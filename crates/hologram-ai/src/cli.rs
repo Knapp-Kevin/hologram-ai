@@ -17,18 +17,24 @@ struct Cli {
 enum Command {
     /// Run inference on a model file.
     Run {
-        /// Path to ONNX or GGUF model.
+        /// Path to a model file (.holo, .onnx, or .gguf).
         #[arg(short, long)]
         model: PathBuf,
-        /// Input token IDs (comma-separated).
+        /// Input token IDs for AI models (comma-separated, for ONNX/GGUF).
         #[arg(short, long, value_delimiter = ',')]
         tokens: Vec<u32>,
+        /// Raw input values as INDEX:HEX pairs (for .holo files).
+        #[arg(long = "input", value_name = "INDEX:HEX")]
+        inputs: Vec<String>,
     },
     /// Inspect a `.holo` archive or ONNX model file.
     Info {
         /// Path to a `.holo` or `.onnx` file.
-        #[arg(short, long)]
-        model: PathBuf,
+        #[arg(short = 'f', long)]
+        file: PathBuf,
+        /// Levels of detail (for `.holo` files, may be repeated).
+        #[arg(long, value_enum, default_values_t = [hologram::hologram_cli::commands::inspect::DetailLevel::Summary])]
+        detail: Vec<hologram::hologram_cli::commands::inspect::DetailLevel>,
     },
     /// Compile a model to a `.holo` archive file.
     Compile {
@@ -48,18 +54,23 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Run { model, tokens } => {
-            let source = model_source_from_path(&model)?;
-            let compiled = ModelCompiler::default().compile(source)?;
-            let mut sess = InferenceSession::new(Arc::new(compiled));
-            let logits = sess.run(&tokens)?;
-            println!("logits shape: [{}]", logits.len());
+        Command::Run { model, tokens, inputs } => {
+            match model.extension().and_then(|e: &std::ffi::OsStr| e.to_str()).unwrap_or("") {
+                "holo" => run_holo(model, inputs)?,
+                _ => {
+                    let source = model_source_from_path(&model)?;
+                    let compiled = ModelCompiler::default().compile(source)?;
+                    let mut sess = InferenceSession::new(Arc::new(compiled));
+                    let logits = sess.run(&tokens)?;
+                    println!("logits shape: [{}]", logits.len());
+                }
+            }
         }
-        Command::Info { model } => {
-            let ext = model.extension().and_then(|e| e.to_str()).unwrap_or("");
+        Command::Info { file, detail } => {
+            let ext = file.extension().and_then(|e: &std::ffi::OsStr| e.to_str()).unwrap_or("");
             match ext {
-                "holo" => inspect_holo(&model)?,
-                "onnx" => inspect_onnx(&model)?,
+                "holo" => inspect_holo(file, detail)?,
+                "onnx" => inspect_onnx(&file)?,
                 other => anyhow::bail!(
                     "info supports .holo and .onnx files, got '.{other}'"
                 ),
@@ -88,27 +99,31 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── Run sub-commands ─────────────────────────────────────────────────────────
+
+/// Run a compiled `.holo` archive — delegates to `hologram run`.
+fn run_holo(file: PathBuf, inputs: Vec<String>) -> anyhow::Result<()> {
+    use hologram::hologram_cli::commands::run_cmd::{RunArgs, execute};
+    let args = RunArgs { file, inputs };
+    tokio::runtime::Builder::new_current_thread()
+        .build()?
+        .block_on(execute(args))
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 // ── Info sub-commands ────────────────────────────────────────────────────────
 
-/// Inspect a compiled `.holo` archive (mirrors `hologram inspect`).
-fn inspect_holo(path: &std::path::Path) -> anyhow::Result<()> {
-    let data = std::fs::read(path)?;
-    let plan = hologram::load_from_bytes(&data)?;
-    let h = plan.header();
-    let sg = plan.graph();
-    let schedule = hologram::hologram_exec::build_schedule(sg)?;
-
-    println!("file:      {:?}", path);
-    println!("size:      {} ({})", format_bytes(data.len() as u64), data.len());
-    println!("graph:     {}", format_bytes(h.graph_size));
-    println!("weights:   {}", format_bytes(h.weights_size));
-    println!("sections:  {} ({})", h.section_count, format_bytes(h.section_table_size));
-    println!("nodes:     {}", sg.node_count());
-    println!("inputs:    [{}]", sg.input_names.join(", "));
-    println!("outputs:   [{}]", sg.output_names.join(", "));
-    println!("levels:    {}", schedule.levels.len());
-
-    Ok(())
+/// Inspect a compiled `.holo` archive — delegates to `hologram inspect`.
+fn inspect_holo(
+    file: PathBuf,
+    detail: Vec<hologram::hologram_cli::commands::inspect::DetailLevel>,
+) -> anyhow::Result<()> {
+    use hologram::hologram_cli::commands::inspect::{InspectArgs, execute};
+    let args = InspectArgs { file, detail };
+    tokio::runtime::Builder::new_current_thread()
+        .build()?
+        .block_on(execute(args))
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Inspect an ONNX model file (import + print metadata without compilation).
@@ -146,19 +161,6 @@ fn model_source_from_path(path: &std::path::Path) -> anyhow::Result<ModelSource>
         "onnx" => Ok(ModelSource::OnnxPath(path.to_owned())),
         "gguf" => Ok(ModelSource::GgufPath(path.to_owned())),
         other  => anyhow::bail!("unsupported model extension: '.{other}'"),
-    }
-}
-
-/// Format a byte count as a human-readable string (binary units).
-fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    const GIB: u64 = 1024 * MIB;
-    match bytes {
-        b if b >= GIB => format!("{:.1} GiB", b as f64 / GIB as f64),
-        b if b >= MIB => format!("{:.1} MiB", b as f64 / MIB as f64),
-        b if b >= KIB => format!("{:.1} KiB", b as f64 / KIB as f64),
-        b => format!("{b} B"),
     }
 }
 
