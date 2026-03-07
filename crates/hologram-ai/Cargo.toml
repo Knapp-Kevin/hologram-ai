@@ -28,3 +28,11 @@ tracing.workspace      = true
 serde.workspace        = true
 serde_json.workspace   = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest.workspace    = true
+indicatif.workspace  = true
+tokio.workspace      = true
+tempfile.workspace   = true
+sha2.workspace       = true
+dirs.workspace       = true
+which.workspace      = true
+tokio-util.workspace = true

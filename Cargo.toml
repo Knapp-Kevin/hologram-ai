@@ -1,12 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/hologram-ai-quant",
-    "crates/hologram-ai-common",
-    "crates/hologram-ai-onnx",
-    "crates/hologram-ai-gguf",
-    "crates/hologram-ai-ggml",
-    "crates/hologram-ai",
+    "crates/*",
 ]
 
 [workspace.package]
@@ -44,3 +39,11 @@ approx        = "0.5"
 clap          = { version = "4", features = ["derive"] }
 prost         = "0.13"
 prost-build   = "0.13"
+reqwest       = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+indicatif     = "0.17"
+tokio         = { version = "1", features = ["rt-multi-thread", "fs", "io-util", "time"] }
+tempfile      = "3"
+sha2          = "0.10"
+dirs          = "5"
+which         = "7"
+tokio-util    = { version = "0.7", features = ["io"] }

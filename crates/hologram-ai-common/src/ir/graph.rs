@@ -145,14 +145,21 @@ impl AiGraph {
 
         // Build adjacency: NodeId → set of NodeIds that depend on it.
         let mut adj: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
-        let mut in_degree: HashMap<NodeId, usize> = HashMap::new();
         for node in &self.nodes {
-            in_degree.entry(node.id).or_insert(0);
             for &tid in &node.inputs {
                 if let Some(&prod) = producer.get(&tid) {
                     adj.entry(prod).or_default().insert(node.id);
-                    *in_degree.entry(node.id).or_insert(0) += 1;
                 }
+            }
+        }
+        // Derive in-degree from adj to stay consistent with the deduplicated edges.
+        let mut in_degree: HashMap<NodeId, usize> = HashMap::new();
+        for node in &self.nodes {
+            in_degree.entry(node.id).or_insert(0);
+        }
+        for succs in adj.values() {
+            for &succ in succs {
+                *in_degree.entry(succ).or_insert(0) += 1;
             }
         }
 

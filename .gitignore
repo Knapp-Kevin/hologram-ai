@@ -2,3 +2,5 @@
 .holoarch/
 **/*.onnx
 **/*.gguf
+models/
+.mypy_cache

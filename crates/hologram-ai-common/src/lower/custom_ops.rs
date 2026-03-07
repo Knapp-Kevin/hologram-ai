@@ -138,6 +138,434 @@ pub fn rope_handler(_base: f32, _dim: u32) -> CustomHandler {
     Arc::new(|inputs, _| Ok(inputs[0].to_vec()))
 }
 
+// ── Gather ─────────────────────────────────────────────────────────────────
+
+/// Inputs: [data (f32, shape [n_rows, row_size]), indices (i64)]  Output: [gathered (f32)]
+///
+/// Implements ONNX Gather with axis=0: selects rows from `data` by `indices`.
+pub fn gather_handler(row_size: usize) -> CustomHandler {
+    Arc::new(move |inputs, _| {
+        if row_size == 0 {
+            return Ok(Vec::new());
+        }
+        let data    = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let indices = bytemuck::cast_slice::<u8, i64>(inputs[1]);
+        let n_rows  = data.len() / row_size;
+        let mut out = vec![0.0f32; indices.len() * row_size];
+        for (i, &idx) in indices.iter().enumerate() {
+            let row = idx.rem_euclid(n_rows as i64) as usize;
+            let src = row * row_size;
+            let dst = i   * row_size;
+            out[dst..dst + row_size].copy_from_slice(&data[src..src + row_size]);
+        }
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+// ── MatMul ─────────────────────────────────────────────────────────────────
+
+/// Inputs: [A (f32, [m, inner]), B (f32, [inner, n_cols])]  Output: [C (f32, [m, n_cols])]
+///
+/// Naive 2-D matrix multiply. Optional third input (Gemm bias) is added if present.
+pub fn matmul_handler(inner: usize, n_cols: usize) -> CustomHandler {
+    Arc::new(move |inputs, _| {
+        if inner == 0 || n_cols == 0 {
+            return Ok(Vec::new());
+        }
+        let a = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let b = bytemuck::cast_slice::<u8, f32>(inputs[1]);
+        let m = a.len() / inner;
+        let mut out = vec![0.0f32; m * n_cols];
+        for i in 0..m {
+            for k in 0..inner {
+                let a_val = a[i * inner + k];
+                for j in 0..n_cols {
+                    out[i * n_cols + j] += a_val * b[k * n_cols + j];
+                }
+            }
+        }
+        if let Some(bias_bytes) = inputs.get(2) {
+            let bias = bytemuck::cast_slice::<u8, f32>(bias_bytes);
+            for i in 0..m {
+                for j in 0..n_cols {
+                    out[i * n_cols + j] += bias[j % bias.len()];
+                }
+            }
+        }
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+// ── Shape ─────────────────────────────────────────────────────────────────
+
+/// Inputs: [x]  Output: [shape as i64 values]
+/// Sprint 001 stub: returns a single-element shape [n_elements].
+pub fn shape_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let n = inputs[0].len() as i64 / 4; // assume f32
+        Ok(bytemuck::cast_slice(&[n]).to_vec())
+    })
+}
+
+// ── Where ─────────────────────────────────────────────────────────────────
+
+/// Inputs: [condition (bool/u8), x (f32), y (f32)]  Output: [selected (f32)]
+pub fn where_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let cond = inputs[0];
+        let x    = bytemuck::cast_slice::<u8, f32>(inputs[1]);
+        let y    = bytemuck::cast_slice::<u8, f32>(inputs[2]);
+        let out: Vec<f32> = (0..x.len().max(y.len()))
+            .map(|i| {
+                let c = cond.get(i % cond.len()).copied().unwrap_or(0);
+                if c != 0 { x[i % x.len()] } else { y[i % y.len()] }
+            })
+            .collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+// ── Range ─────────────────────────────────────────────────────────────────
+
+/// Inputs: [start (f32), limit (f32), delta (f32)]  Output: [range (f32)]
+pub fn range_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let start = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let limit = bytemuck::cast_slice::<u8, f32>(inputs[1]);
+        let delta = bytemuck::cast_slice::<u8, f32>(inputs[2]);
+        let s = start.first().copied().unwrap_or(0.0);
+        let l = limit.first().copied().unwrap_or(0.0);
+        let d = delta.first().copied().unwrap_or(1.0);
+        if d == 0.0 { return Ok(Vec::new()); }
+        let n = ((l - s) / d).ceil().max(0.0) as usize;
+        let out: Vec<f32> = (0..n).map(|i| s + i as f32 * d).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+// ── GatherND ──────────────────────────────────────────────────────────────
+
+/// Inputs: [data, indices]  Output: [gathered]
+/// Sprint 001 stub: passes data through (full N-D gather in Phase 2).
+pub fn gather_nd_handler() -> CustomHandler {
+    Arc::new(|inputs, _| Ok(inputs[0].to_vec()))
+}
+
+// ── IsNaN ─────────────────────────────────────────────────────────────────
+
+/// Inputs: [x (f32)]  Output: [mask (u8, 0 or 1)]
+pub fn isnan_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<u8> = x.iter().map(|v| u8::from(v.is_nan())).collect();
+        Ok(out)
+    })
+}
+
+// ── Flatten ───────────────────────────────────────────────────────────────
+
+/// Sprint 001 stub: passes bytes through unchanged (metadata-only reshape).
+pub fn flatten_handler() -> CustomHandler {
+    Arc::new(|inputs, _| Ok(inputs[0].to_vec()))
+}
+
+// ── Div ──────────────────────────────────────────────────────────────────
+
+/// Inputs: [a (f32), b (f32)]  Output: [a / b (f32)]
+pub fn div_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let a = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let b = bytemuck::cast_slice::<u8, f32>(inputs[1]);
+        let out: Vec<f32> = a.iter().zip(b.iter().cycle())
+            .map(|(&x, &y)| x / y)
+            .collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+// ── Pow ──────────────────────────────────────────────────────────────────
+
+/// Inputs: [base (f32), exp (f32)]  Output: [base^exp (f32)]
+pub fn pow_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let base = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let exp  = bytemuck::cast_slice::<u8, f32>(inputs[1]);
+        let out: Vec<f32> = base.iter().zip(exp.iter().cycle())
+            .map(|(&b, &e)| b.powf(e))
+            .collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+// ── Mod ──────────────────────────────────────────────────────────────────
+
+/// Inputs: [a (f32), b (f32)]  Output: [a % b (f32)]
+pub fn mod_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let a = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let b = bytemuck::cast_slice::<u8, f32>(inputs[1]);
+        let out: Vec<f32> = a.iter().zip(b.iter().cycle())
+            .map(|(&x, &y)| x % y)
+            .collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+// ── Min / Max (elementwise binary) ──────────────────────────────────────
+
+/// Inputs: [a (f32), b (f32)]  Output: [min(a,b) (f32)]
+pub fn min_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let a = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let b = bytemuck::cast_slice::<u8, f32>(inputs[1]);
+        let out: Vec<f32> = a.iter().zip(b.iter().cycle())
+            .map(|(&x, &y)| x.min(y))
+            .collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+/// Inputs: [a (f32), b (f32)]  Output: [max(a,b) (f32)]
+pub fn max_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let a = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let b = bytemuck::cast_slice::<u8, f32>(inputs[1]);
+        let out: Vec<f32> = a.iter().zip(b.iter().cycle())
+            .map(|(&x, &y)| x.max(y))
+            .collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+// ── Boolean ops ──────────────────────────────────────────────────────────
+
+/// Inputs: [a (u8), b (u8)]  Output: [a & b (u8)]
+pub fn and_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let out: Vec<u8> = inputs[0].iter().zip(inputs[1].iter().cycle())
+            .map(|(&a, &b)| u8::from(a != 0 && b != 0))
+            .collect();
+        Ok(out)
+    })
+}
+
+/// Inputs: [a (u8), b (u8)]  Output: [a | b (u8)]
+pub fn or_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let out: Vec<u8> = inputs[0].iter().zip(inputs[1].iter().cycle())
+            .map(|(&a, &b)| u8::from(a != 0 || b != 0))
+            .collect();
+        Ok(out)
+    })
+}
+
+/// Inputs: [a (u8), b (u8)]  Output: [a ^ b (u8)]
+pub fn xor_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let out: Vec<u8> = inputs[0].iter().zip(inputs[1].iter().cycle())
+            .map(|(&a, &b)| u8::from((a != 0) ^ (b != 0)))
+            .collect();
+        Ok(out)
+    })
+}
+
+/// Inputs: [a (u8)]  Output: [!a (u8)]
+pub fn not_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let out: Vec<u8> = inputs[0].iter().map(|&a| u8::from(a == 0)).collect();
+        Ok(out)
+    })
+}
+
+// ── Comparisons ──────────────────────────────────────────────────────────
+
+/// Inputs: [a (f32), b (f32)]  Output: [a == b (u8)]
+pub fn equal_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let a = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let b = bytemuck::cast_slice::<u8, f32>(inputs[1]);
+        let out: Vec<u8> = a.iter().zip(b.iter().cycle())
+            .map(|(&x, &y)| u8::from(x == y))
+            .collect();
+        Ok(out)
+    })
+}
+
+/// Inputs: [a (f32), b (f32)]  Output: [a < b (u8)]
+pub fn less_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let a = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let b = bytemuck::cast_slice::<u8, f32>(inputs[1]);
+        let out: Vec<u8> = a.iter().zip(b.iter().cycle())
+            .map(|(&x, &y)| u8::from(x < y))
+            .collect();
+        Ok(out)
+    })
+}
+
+/// Inputs: [a (f32), b (f32)]  Output: [a <= b (u8)]
+pub fn less_or_equal_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let a = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let b = bytemuck::cast_slice::<u8, f32>(inputs[1]);
+        let out: Vec<u8> = a.iter().zip(b.iter().cycle())
+            .map(|(&x, &y)| u8::from(x <= y))
+            .collect();
+        Ok(out)
+    })
+}
+
+/// Inputs: [a (f32), b (f32)]  Output: [a > b (u8)]
+pub fn greater_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let a = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let b = bytemuck::cast_slice::<u8, f32>(inputs[1]);
+        let out: Vec<u8> = a.iter().zip(b.iter().cycle())
+            .map(|(&x, &y)| u8::from(x > y))
+            .collect();
+        Ok(out)
+    })
+}
+
+/// Inputs: [a (f32), b (f32)]  Output: [a >= b (u8)]
+pub fn greater_or_equal_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let a = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let b = bytemuck::cast_slice::<u8, f32>(inputs[1]);
+        let out: Vec<u8> = a.iter().zip(b.iter().cycle())
+            .map(|(&x, &y)| u8::from(x >= y))
+            .collect();
+        Ok(out)
+    })
+}
+
+// ── Unary math (custom) ──────────────────────────────────────────────────
+
+/// Inputs: [x (f32)]  Output: [1/x (f32)]
+pub fn reciprocal_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|v| 1.0 / v).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+/// Inputs: [x (f32)]  Output: [sign(x) (f32)]
+pub fn sign_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|v| v.signum()).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+/// Inputs: [x (f32)]  Output: [floor(x) (f32)]
+pub fn floor_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|v| v.floor()).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+/// Inputs: [x (f32)]  Output: [ceil(x) (f32)]
+pub fn ceil_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|v| v.ceil()).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+/// Inputs: [x (f32)]  Output: [round(x) (f32)]
+pub fn round_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|v| v.round()).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+/// Inputs: [x (f32)]  Output: [clamp(x, min, max) (f32)]
+/// Sprint 001: no-op clip (min/max from attrs not wired yet).
+pub fn clip_handler() -> CustomHandler {
+    Arc::new(|inputs, _| Ok(inputs[0].to_vec()))
+}
+
+/// Inputs: [x (f32)]  Output: [erf(x) (f32)]
+pub fn erf_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        // Abramowitz & Stegun approximation
+        let out: Vec<f32> = x.iter().map(|&v| {
+            let sign = v.signum();
+            let a = v.abs();
+            let t = 1.0 / (1.0 + 0.3275911 * a);
+            let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+            sign * (1.0 - poly * (-a * a).exp())
+        }).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+// ── Reductions ──────────────────────────────────────────────────────────
+
+/// Inputs: [x (f32)]  Output: [sum (f32)]
+/// Sprint 001: reduces over all elements (ignores axes).
+pub fn reduce_sum_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let s: f32 = x.iter().sum();
+        Ok(bytemuck::cast_slice(&[s]).to_vec())
+    })
+}
+
+/// Inputs: [x (f32)]  Output: [mean (f32)]
+/// Sprint 001: reduces over all elements (ignores axes).
+pub fn reduce_mean_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let n = x.len() as f32;
+        let m = if n > 0.0 { x.iter().sum::<f32>() / n } else { 0.0 };
+        Ok(bytemuck::cast_slice(&[m]).to_vec())
+    })
+}
+
+/// Inputs: [x (f32)]  Output: [max (f32)]
+/// Sprint 001: reduces over all elements (ignores axes).
+pub fn reduce_max_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let m = x.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        Ok(bytemuck::cast_slice(&[m]).to_vec())
+    })
+}
+
+/// Inputs: [x (f32)]  Output: [min (f32)]
+/// Sprint 001: reduces over all elements (ignores axes).
+pub fn reduce_min_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let m = x.iter().cloned().fold(f32::INFINITY, f32::min);
+        Ok(bytemuck::cast_slice(&[m]).to_vec())
+    })
+}
+
+// ── LogSoftmax ──────────────────────────────────────────────────────────
+
+/// Inputs: [x (f32)]  Output: [log_softmax(x) (f32)]
+pub fn log_softmax_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let max = x.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let exps: Vec<f32> = x.iter().map(|v| (v - max).exp()).collect();
+        let sum: f32 = exps.iter().sum();
+        let log_sum = sum.ln();
+        let out: Vec<f32> = x.iter().map(|v| v - max - log_sum).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
 // ── Attention ──────────────────────────────────────────────────────────────
 
 /// Scaled dot-product attention. Inputs: [Q, K, V (f32)]  Output: [out (f32)]
@@ -162,8 +590,8 @@ pub fn attention_handler(head_dim: u32, scale: f32, causal: bool) -> CustomHandl
             }).collect();
 
             if causal {
-                for ki in (qi + 1)..seq_k {
-                    scores[ki] = f32::NEG_INFINITY;
+                for score in &mut scores[(qi + 1)..seq_k] {
+                    *score = f32::NEG_INFINITY;
                 }
             }
 

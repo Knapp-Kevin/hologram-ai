@@ -8,7 +8,7 @@ use hologram_ai_common::{
     AiGraph, AiNode, AiOp, DType, TensorInfo, OptPipeline, MemoryPlanner,
     shape_from_concrete, QuantDescriptor,
 };
-use hologram_ai_onnx::import_onnx;
+use hologram_ai_onnx::{import_onnx, OnnxImportOptions};
 
 // ── ONNX import tests ─────────────────────────────────────────────────────────
 
@@ -16,7 +16,7 @@ use hologram_ai_onnx::import_onnx;
 fn onnx_identity_imports_cleanly() {
     let bytes = std::fs::read("tests/fixtures/onnx/identity.onnx")
         .expect("identity.onnx fixture missing — run scripts/gen-fixtures.py");
-    let graph = import_onnx(&bytes).expect("import failed");
+    let graph = import_onnx(&bytes, OnnxImportOptions::default()).expect("import failed");
     assert!(graph.validate().is_empty(), "unexpected validation errors: {:?}", graph.validate());
 }
 
@@ -24,7 +24,7 @@ fn onnx_identity_imports_cleanly() {
 fn onnx_tiny_mlp_imports_cleanly() {
     let bytes = std::fs::read("tests/fixtures/onnx/tiny-mlp.onnx")
         .expect("tiny-mlp.onnx fixture missing — run scripts/gen-fixtures.py");
-    let graph = import_onnx(&bytes).expect("import failed");
+    let graph = import_onnx(&bytes, OnnxImportOptions::default()).expect("import failed");
     let errs = graph.validate();
     assert!(errs.is_empty(), "validation errors: {:?}", errs);
     // Should have at least 2 nodes: Gather + MatMul.
@@ -37,7 +37,7 @@ fn onnx_tiny_mlp_imports_cleanly() {
 fn opt_pipeline_mvp_runs_on_tiny_mlp() {
     let bytes = std::fs::read("tests/fixtures/onnx/tiny-mlp.onnx")
         .expect("tiny-mlp.onnx fixture missing");
-    let graph = import_onnx(&bytes).expect("import failed");
+    let graph = import_onnx(&bytes, OnnxImportOptions::default()).expect("import failed");
     let node_count_before = graph.nodes.len();
 
     let optimised = OptPipeline::mvp().run(graph).expect("opt failed");
@@ -52,7 +52,7 @@ fn opt_pipeline_mvp_runs_on_tiny_mlp() {
 fn memory_planner_produces_non_zero_weight_budget() {
     let bytes = std::fs::read("tests/fixtures/onnx/tiny-mlp.onnx")
         .expect("tiny-mlp.onnx fixture missing");
-    let graph = import_onnx(&bytes).expect("import failed");
+    let graph = import_onnx(&bytes, OnnxImportOptions::default()).expect("import failed");
     let plan = MemoryPlanner.plan(&graph).expect("planning failed");
     assert!(plan.total_weight_bytes > 0, "expected non-zero weight bytes");
 }
@@ -101,7 +101,15 @@ fn dead_node_elimination_removes_dead_nodes() {
 fn topo_order_matches_node_count() {
     let bytes = std::fs::read("tests/fixtures/onnx/tiny-mlp.onnx")
         .expect("tiny-mlp.onnx fixture missing");
-    let graph = import_onnx(&bytes).expect("import failed");
+    let graph = import_onnx(&bytes, OnnxImportOptions::default()).expect("import failed");
     let order = graph.topo_order();
     assert_eq!(order.len(), graph.nodes.len(), "topo order must cover all nodes");
+}
+
+// ── Quant descriptor tests ────────────────────────────────────────────────────
+
+#[test]
+fn quant_descriptor_none_has_zero_block_size() {
+    let q = QuantDescriptor::none();
+    assert_eq!(q.block_size, 0);
 }

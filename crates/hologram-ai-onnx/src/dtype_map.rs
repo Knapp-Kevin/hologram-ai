@@ -12,6 +12,9 @@ pub fn onnx_dtype(data_type: i32) -> Option<DType> {
         16 => Some(DType::BF16),
         3  => Some(DType::INT8),
         2  => Some(DType::U8),
+        6  => Some(DType::INT32),
+        7  => Some(DType::INT64),
+        9  => Some(DType::BOOL),
         // UINT4 / INT4 → INT4 (hologram packs nibbles)
         21 | 22 => Some(DType::INT4),
         _ => None,

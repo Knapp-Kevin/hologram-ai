@@ -6,13 +6,20 @@
 use std::collections::HashMap;
 use anyhow::Context;
 use hologram::{ConstantData, CustomOpId, GraphBuilder, GraphOp};
-use crate::ir::{AiGraph, AiOp, TensorId};
+use crate::ir::{AiGraph, AiOp, Dim, TensorId, TensorInfo};
 use crate::mem::KvCacheLayout;
 use super::dispatch::{dispatch, DispatchTarget};
 use super::custom_ops::{
-    attention_handler, cast_handler, concat_handler, dequant_handler,
-    embed_handler, layer_norm_handler, reshape_handler, rms_norm_handler,
-    rope_handler, softmax_handler, swiglu_handler,
+    and_handler, attention_handler, cast_handler, ceil_handler, clip_handler,
+    concat_handler, dequant_handler, div_handler, embed_handler, equal_handler,
+    erf_handler, flatten_handler, floor_handler, gather_handler, gather_nd_handler,
+    greater_handler, greater_or_equal_handler, isnan_handler, layer_norm_handler,
+    less_handler, less_or_equal_handler, log_softmax_handler, matmul_handler,
+    max_handler, min_handler, mod_handler, not_handler, or_handler, pow_handler,
+    range_handler, reciprocal_handler, reduce_max_handler, reduce_mean_handler,
+    reduce_min_handler, reduce_sum_handler, reshape_handler, rms_norm_handler,
+    rope_handler, round_handler, shape_handler, sign_handler, softmax_handler,
+    swiglu_handler, where_handler, xor_handler,
 };
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -50,7 +57,7 @@ pub struct LoweringOutput {
 pub fn lower(
     ai_graph: &AiGraph,
     _kv_layout: &KvCacheLayout,
-    _opts: LoweringOptions,
+    _opts: &LoweringOptions,
 ) -> anyhow::Result<LoweringOutput> {
     let mut registry = hologram::CustomOpRegistry::new();
     let mut builder  = GraphBuilder::new();
@@ -66,9 +73,26 @@ pub fn lower(
     }
 
     // Insert constant param nodes (weights, biases).
-    for (&tid, param) in &ai_graph.params {
-        let data = param_bytes_owned(param)?;
-        builder = builder.constant(ConstantData::Bytes(data));
+    // Sort by TensorId for deterministic iteration — Mmap params use cumulative
+    // byte offset as source_id so the executor can resolve them from the weights
+    // section of the .holo archive.
+    let mut sorted_params: Vec<_> = ai_graph.params.iter().collect();
+    sorted_params.sort_by_key(|(&tid, _)| tid);
+
+    let mut mmap_offset: u64 = 0;
+    for (&tid, param) in sorted_params {
+        let constant = match param {
+            crate::ir::AiParam::Mmap { len, .. } => {
+                let d = ConstantData::Deferred { byte_size: *len, source_id: mmap_offset };
+                mmap_offset += *len;
+                d
+            }
+            _ => {
+                let data = param_bytes_owned(param)?;
+                ConstantData::Bytes(data)
+            }
+        };
+        builder = builder.constant(constant);
         tid_to_idx.insert(tid, builder.len() - 1);
     }
 
@@ -92,7 +116,8 @@ pub fn lower(
                 }
             }
             DispatchTarget::Custom { id, arity } => {
-                register_handler(&mut registry, id, arity, &node.op)?;
+                register_handler(&mut registry, id, arity, &node.op,
+                                 &node.inputs, &ai_graph.tensor_info)?;
                 builder = builder.custom_op(id, arity, &input_idxs);
                 if let Some(&tid) = node.outputs.first() {
                     tid_to_idx.insert(tid, builder.len() - 1);
@@ -130,11 +155,15 @@ pub fn lower(
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Register the appropriate `CustomHandler` in the registry for the given op.
+///
+/// `inputs` and `tensor_info` are needed by shape-sensitive ops (Gather, MatMul).
 fn register_handler(
     registry: &mut hologram::CustomOpRegistry,
     id: CustomOpId,
     arity: u8,
     op: &AiOp,
+    inputs: &[TensorId],
+    tensor_info: &HashMap<TensorId, TensorInfo>,
 ) -> anyhow::Result<()> {
     let handler = match op {
         AiOp::RmsNorm { epsilon }              => rms_norm_handler(*epsilon),
@@ -143,7 +172,10 @@ fn register_handler(
         AiOp::Embed                            => embed_handler(),
         AiOp::Dequantize                       => dequant_handler(),
         AiOp::FusedSwiGLU                      => swiglu_handler(),
-        AiOp::Reshape { .. } | AiOp::Transpose { .. } => reshape_handler(),
+        AiOp::Reshape { .. } | AiOp::Transpose { .. }
+        | AiOp::Squeeze { .. } | AiOp::Unsqueeze { .. }
+        | AiOp::Expand | AiOp::Slice { .. }
+        | AiOp::Split { .. } | AiOp::Tile { .. }     => reshape_handler(),
         AiOp::Cast { .. }                      => cast_handler(),
         AiOp::Concat { .. }                    => concat_handler(),
         AiOp::RotaryEmbedding { base, dim }    => rope_handler(*base, *dim),
@@ -156,10 +188,70 @@ fn register_handler(
             attention_handler(*head_dim, s, *causal)
         }
         AiOp::FlashAttentionHint => attention_handler(64, 0.125, true),
+        AiOp::Gather { .. } | AiOp::GatherElements { .. } => {
+            // data = inputs[0]; row_size = last concrete dim of the data tensor.
+            let row_size = inputs.first()
+                .and_then(|tid| tensor_info.get(tid))
+                .and_then(|info| info.shape.last())
+                .and_then(concrete_dim)
+                .unwrap_or(1) as usize;
+            gather_handler(row_size)
+        }
+        AiOp::MatMul | AiOp::BatchMatMul | AiOp::Gemm { .. } => {
+            // A = inputs[0]; inner = last dim of A; B = inputs[1]; n_cols = last dim of B.
+            let inner = inputs.first()
+                .and_then(|tid| tensor_info.get(tid))
+                .and_then(|info| info.shape.last())
+                .and_then(concrete_dim)
+                .unwrap_or(1) as usize;
+            let n_cols = inputs.get(1)
+                .and_then(|tid| tensor_info.get(tid))
+                .and_then(|info| info.shape.last())
+                .and_then(concrete_dim)
+                .unwrap_or(1) as usize;
+            matmul_handler(inner, n_cols)
+        }
+        AiOp::Shape                            => shape_handler(),
+        AiOp::Where                            => where_handler(),
+        AiOp::Range                            => range_handler(),
+        AiOp::GatherND { .. }                  => gather_nd_handler(),
+        AiOp::IsNaN                            => isnan_handler(),
+        AiOp::Flatten { .. }                   => flatten_handler(),
+        AiOp::Div                              => div_handler(),
+        AiOp::Pow                              => pow_handler(),
+        AiOp::Mod                              => mod_handler(),
+        AiOp::Min                              => min_handler(),
+        AiOp::Max                              => max_handler(),
+        AiOp::And                              => and_handler(),
+        AiOp::Or                               => or_handler(),
+        AiOp::Xor                              => xor_handler(),
+        AiOp::Not                              => not_handler(),
+        AiOp::Equal                            => equal_handler(),
+        AiOp::Less                             => less_handler(),
+        AiOp::LessOrEqual                      => less_or_equal_handler(),
+        AiOp::Greater                          => greater_handler(),
+        AiOp::GreaterOrEqual                   => greater_or_equal_handler(),
+        AiOp::Reciprocal                       => reciprocal_handler(),
+        AiOp::Sign                             => sign_handler(),
+        AiOp::Floor                            => floor_handler(),
+        AiOp::Ceil                             => ceil_handler(),
+        AiOp::Round                            => round_handler(),
+        AiOp::Clip                             => clip_handler(),
+        AiOp::Erf                              => erf_handler(),
+        AiOp::ReduceSum { .. }                 => reduce_sum_handler(),
+        AiOp::ReduceMean { .. }                => reduce_mean_handler(),
+        AiOp::ReduceMax { .. }                 => reduce_max_handler(),
+        AiOp::ReduceMin { .. }                 => reduce_min_handler(),
+        AiOp::LogSoftmax { .. }                => log_softmax_handler(),
         _ => anyhow::bail!("no custom handler registered for op {:?}", op),
     };
     registry.register(id, arity, handler);
     Ok(())
+}
+
+/// Extract the concrete value from a `Dim`, returning `None` for symbolic/dynamic dims.
+fn concrete_dim(dim: &Dim) -> Option<u64> {
+    match dim { Dim::Concrete(n) => Some(*n), _ => None }
 }
 
 /// Read parameter bytes into an owned `Vec<u8>`.

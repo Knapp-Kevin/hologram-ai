@@ -67,6 +67,14 @@ pub enum AiOp {
     Squeeze { axes: Vec<i64> },
     Expand,
     Tile { repeats: Vec<u64> },
+    GatherND { batch_dims: i64 },
+    /// Extract shape of input tensor as a 1-D INT64 tensor.
+    Shape,
+    /// Conditional element selection: Where(cond, x, y).
+    Where,
+    /// Generate a range [start, limit) with step.
+    Range,
+    Flatten { axis: i64 },
 
     // ── Elementwise binary ─────────────────────────────────────────────────
     Add, Sub, Mul, Div, Pow, Mod,
@@ -76,6 +84,8 @@ pub enum AiOp {
 
     // ── Elementwise unary ──────────────────────────────────────────────────
     Abs, Neg, Sqrt, Exp, Log, Sign, Floor, Ceil, Round, Clip, Erf, Reciprocal,
+    Cos, Sin,
+    IsNaN,
 
     // ── Reductions ─────────────────────────────────────────────────────────
     ReduceSum  { axes: Vec<i64>, keepdims: bool },

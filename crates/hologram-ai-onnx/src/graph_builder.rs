@@ -1,10 +1,10 @@
 //! Converts a parsed `GraphProto` into an `AiGraph`.
 
 use std::collections::HashMap;
-use anyhow::Context;
+use std::path::Path;
 use hologram_ai_common::{
     AiGraph, AiNode, AiOp, DType, TensorId, NodeId,
-    TensorInfo, ImportWarning, shape_from_concrete, QuantDescriptor,
+    TensorInfo, ImportWarning, QuantDescriptor,
     Dim, Shape,
 };
 use crate::{
@@ -15,7 +15,10 @@ use crate::{
 };
 
 /// Build an `AiGraph` from an ONNX `GraphProto`.
-pub fn build_ai_graph(g: &GraphProto, graph_name: &str) -> anyhow::Result<AiGraph> {
+///
+/// `model_dir` is the directory containing the `.onnx` file, used to resolve
+/// external data file paths for tensors with `data_location == EXTERNAL`.
+pub fn build_ai_graph(g: &GraphProto, graph_name: &str, model_dir: Option<&Path>) -> anyhow::Result<AiGraph> {
     let mut next_tid: TensorId = 0;
     // name → TensorId mapping.
     let mut name_to_tid: HashMap<String, TensorId> = HashMap::new();
@@ -34,7 +37,7 @@ pub fn build_ai_graph(g: &GraphProto, graph_name: &str) -> anyhow::Result<AiGrap
     // ── Initializers (weights) ────────────────────────────────────────────
     for init in &g.initializer {
         let tid = alloc_tid(&init.name, &mut name_to_tid);
-        match tensor_to_param(init) {
+        match tensor_to_param(init, model_dir) {
             Ok((param, info)) => {
                 tensor_info.insert(tid, info);
                 params.insert(tid, param);
@@ -49,19 +52,18 @@ pub fn build_ai_graph(g: &GraphProto, graph_name: &str) -> anyhow::Result<AiGrap
     }
 
     // ── Graph inputs ──────────────────────────────────────────────────────
-    let graph_inputs: Vec<TensorId> = g.input.iter()
+    // Collect non-param inputs first (immutable borrow of name_to_tid),
+    // then allocate tensor IDs (mutable borrow) in a separate pass.
+    let input_vis: Vec<&ValueInfoProto> = g.input.iter()
         .filter(|vi| !params.contains_key(name_to_tid.get(&vi.name).unwrap_or(&u32::MAX)))
+        .collect();
+    let graph_inputs: Vec<TensorId> = input_vis.into_iter()
         .map(|vi| {
             let tid = alloc_tid(&vi.name, &mut name_to_tid);
             let info = value_info_to_tensor_info(vi);
             tensor_info.insert(tid, info);
             tid
         })
-        .collect();
-
-    // ── Graph outputs ─────────────────────────────────────────────────────
-    let graph_outputs: Vec<TensorId> = g.output.iter()
-        .map(|vi| alloc_tid(&vi.name, &mut name_to_tid))
         .collect();
 
     // ── Nodes ─────────────────────────────────────────────────────────────
@@ -128,7 +130,7 @@ pub fn build_ai_graph(g: &GraphProto, graph_name: &str) -> anyhow::Result<AiGrap
         }
     }
 
-    // Re-resolve graph outputs (they may not have been allocated yet before node pass).
+    // Re-resolve graph outputs (tensors may have been allocated during node pass).
     let graph_outputs: Vec<TensorId> = g.output.iter()
         .map(|vi| alloc_tid(&vi.name, &mut name_to_tid))
         .collect();
@@ -151,7 +153,7 @@ fn value_info_to_tensor_info(vi: &ValueInfoProto) -> TensorInfo {
             Some(crate::onnx_pb::type_proto::Value::TensorType(t)) => {
                 let dtype = onnx_dtype(t.elem_type).unwrap_or(DType::F32);
                 let shape = t.shape.as_ref()
-                    .map(|s| shape_from_shape_proto(s))
+                    .map(shape_from_shape_proto)
                     .unwrap_or_default();
                 (dtype, shape)
             }

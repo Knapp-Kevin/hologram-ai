@@ -1,12 +1,12 @@
 //! Map ONNX `op_type` strings to `AiOp`.
 
-use std::collections::HashMap;
 use hologram_ai_common::{AiOp, DType};
 use crate::onnx_pb::AttributeProto;
 
 /// Context passed to op converters (attributes, domain, etc.)
 pub struct OpContext<'a> {
     pub op_type: &'a str,
+    #[allow(dead_code)]
     pub domain: &'a str,
     pub attrs: &'a [AttributeProto],
 }
@@ -24,6 +24,7 @@ impl<'a> OpContext<'a> {
         self.attrs.iter().find(|a| a.name == name).map(|a| a.ints.as_slice())
     }
 
+    #[allow(dead_code)]
     pub fn attr_floats(&self, name: &str) -> Option<&[f32]> {
         self.attrs.iter().find(|a| a.name == name).map(|a| a.floats.as_slice())
     }
@@ -103,8 +104,14 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
             // We emit a placeholder; the builder resolves from constant inputs.
             Slice { axes: vec![], starts: vec![], ends: vec![], steps: vec![] }
         }
-        "Gather" => Gather { axis: ctx.attr_i("axis").unwrap_or(0) },
-        "GatherElements" => GatherElements { axis: ctx.attr_i("axis").unwrap_or(0) },
+        "Gather" | "GatherElements" => {
+            let axis = ctx.attr_i("axis").unwrap_or(0);
+            if ctx.op_type == "GatherElements" {
+                GatherElements { axis }
+            } else {
+                Gather { axis }
+            }
+        }
         "Unsqueeze" => {
             let axes = ctx.attr_ints("axes")
                 .map(|v| v.to_vec())
@@ -119,6 +126,11 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
         }
         "Expand"  => Expand,
         "Tile"    => Tile { repeats: vec![] }, // repeats resolved from constant input
+        "GatherND" => GatherND { batch_dims: ctx.attr_i("batch_dims").unwrap_or(0) },
+        "Shape"   => Shape,
+        "Where"   => Where,
+        "Range"   => Range,
+        "Flatten" => Flatten { axis: ctx.attr_i("axis").unwrap_or(1) },
 
         // ── Elementwise binary ────────────────────────────────────────────
         "Add"   => Add, "Sub"  => Sub, "Mul"  => Mul, "Div"  => Div,
@@ -133,6 +145,8 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
         "Exp"   => Exp,   "Log"   => Log,   "Sign"  => Sign,
         "Floor" => Floor, "Ceil"  => Ceil,  "Round" => Round,
         "Clip"  => Clip,  "Erf"   => Erf,   "Reciprocal" => Reciprocal,
+        "Cos"   => Cos,   "Sin"   => Sin,
+        "IsNaN" => IsNaN,
         "Not"   => Not,
 
         // ── Reductions ────────────────────────────────────────────────────
@@ -156,7 +170,7 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
         }
 
         // ── Embedding ─────────────────────────────────────────────────────
-        "Gather" => Embed, // Gather on the embedding table is Embed
+        "Embedding" => Embed,
 
         // ── Dropout (inference no-op) ─────────────────────────────────────
         "Dropout" | "DropoutGrad" => return Ok(None),

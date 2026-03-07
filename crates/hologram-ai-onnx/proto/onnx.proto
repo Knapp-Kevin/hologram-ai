@@ -1,16 +1,23 @@
 // Minimal ONNX protobuf schema for hologram-ai-onnx.
 // Covers all types needed for LLM model import.
-// Field numbers match the official onnx/onnx.proto (github.com/onnx/onnx).
+// Field numbers match the official onnx-ml.proto (github.com/onnx/onnx).
 
 syntax = "proto3";
 package onnx;
 
+message StringStringEntryProto {
+  string key   = 1;
+  string value = 2;
+}
+
 message ModelProto {
-  int64  ir_version    = 1;
-  string domain        = 2;
-  int64  model_version = 5;
-  string doc_string    = 6;
-  GraphProto graph     = 7;
+  int64  ir_version       = 1;
+  string producer_name    = 2;
+  string producer_version = 3;
+  string domain           = 4;
+  int64  model_version    = 5;
+  string doc_string       = 6;
+  GraphProto graph        = 7;
   repeated OperatorSetIdProto opset_import = 8;
 }
 
@@ -18,6 +25,7 @@ message GraphProto {
   repeated NodeProto      node       = 1;
   string                  name       = 2;
   repeated TensorProto    initializer = 5;
+  string                  doc_string = 10;
   repeated ValueInfoProto input      = 11;
   repeated ValueInfoProto output     = 12;
   repeated ValueInfoProto value_info = 13;
@@ -28,22 +36,27 @@ message NodeProto {
   repeated string        output    = 2;
   string                 name      = 3;
   string                 op_type   = 4;
-  string                 domain    = 7;
   repeated AttributeProto attribute = 5;
   string                 doc_string = 6;
+  string                 domain    = 7;
 }
 
 message AttributeProto {
   string name  = 1;
-  float  f     = 4;
+  float  f     = 2;
   int64  i     = 3;
-  bytes  s     = 8;
-
-  repeated float floats = 6;
-  repeated int64 ints   = 7;
+  bytes  s     = 4;
 
   TensorProto t = 5;
-  repeated TensorProto tensors = 9;
+  GraphProto  g = 6;
+
+  repeated float  floats  = 7;
+  repeated int64  ints    = 8;
+  repeated bytes  strings = 9;
+  repeated TensorProto tensors = 10;
+  repeated GraphProto  graphs  = 11;
+
+  string doc_string    = 13;
 
   enum AttributeType {
     UNDEFINED = 0;
@@ -58,7 +71,8 @@ message AttributeProto {
     TENSORS   = 9;
     GRAPHS    = 10;
   }
-  AttributeType type = 20;
+  AttributeType type     = 20;
+  string ref_attr_name   = 21;
 }
 
 message TensorProto {
@@ -73,12 +87,21 @@ message TensorProto {
   repeated double double_data = 10;
   repeated uint64 uint64_data = 11;
 
-  // Segment for large raw tensors (unused in Sprint 001).
+  // Segment for large raw tensors.
   message Segment {
     int64 begin = 1;
     int64 end   = 2;
   }
   Segment segment = 3;
+
+  // External data support (weights stored in separate files).
+  repeated StringStringEntryProto external_data = 13;
+
+  enum DataLocation {
+    DEFAULT  = 0;
+    EXTERNAL = 1;
+  }
+  DataLocation data_location = 14;
 
   enum DataType {
     UNDEFINED  = 0;

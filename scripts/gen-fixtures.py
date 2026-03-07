@@ -35,7 +35,7 @@ def make_tiny_mlp(vocab=32, embd=64, out=32, seq=3):
         np.zeros((embd, out), dtype=np.float32), name="linear_weight"
     )
 
-    gather = helper.make_node("Gather", inputs=["token_ids", "embed_weight"],
+    gather = helper.make_node("Gather", inputs=["embed_weight", "token_ids"],
                               outputs=["embedded"], axis=0)
     matmul = helper.make_node("MatMul", inputs=["embedded", "linear_weight"],
                               outputs=["logits"])

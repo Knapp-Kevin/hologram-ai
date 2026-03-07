@@ -19,9 +19,10 @@ impl KvCacheLayout {
     pub fn byte_size(&self) -> u64 {
         if self.n_layers == 0 { return 0; }
         let elem_bytes = match self.dtype {
-            DType::F32 | DType::U8 => 4u64,
+            DType::F32 | DType::INT32 => 4u64,
             DType::F16 | DType::BF16 => 2,
-            DType::INT8 => 1,
+            DType::INT64 => 8,
+            DType::INT8 | DType::U8 | DType::BOOL => 1,
             DType::INT4 => 1, // conservatively rounded up
         };
         // K + V for each layer

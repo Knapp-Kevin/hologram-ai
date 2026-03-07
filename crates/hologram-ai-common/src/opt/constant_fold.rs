@@ -20,7 +20,7 @@ impl Pass for ConstantFolding {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{AiGraph, AiNode, DType, TensorInfo, shape_from_concrete};
+    use crate::ir::{AiGraph, AiNode, AiOp, DType, TensorInfo, shape_from_concrete};
     use std::collections::HashMap;
 
     #[test]
