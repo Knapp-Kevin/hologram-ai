@@ -7,41 +7,79 @@
 
 ---
 
-## Gap Analysis
+## Design Principle
 
-The spec-alignment work (Plan 001) laid the foundations. The following gaps
-remain before the MVP exit criteria in `specs/docs/roadmap.md` are met:
+**hologram-ai is a compiler only.** It contains zero runtime code. All execution
+kernels, custom handlers, and float ops belong in the hologram base crate.
+hologram-ai parses, optimizes, lowers, and writes archives. That's it.
 
-| Gap | Current State | Required (per specs/docs) |
-|-----|---------------|---------------------------|
-| Multi-graph lowering | Single graph per compile; `_kv_layout` unused | `LowerPhase` enum (Prefill/Decode); separate graphs with KV I/O |
-| KV-cache ops | No `KvSlotWrite`/`KvSlotRead` in `AiOp` | KV-cache read/write ops in IR + lowering dispatch |
-| KV-cache layout | `KvCacheLayout::none()` always | `MemoryPlanner` computes from arch params (n_layers, n_kv_heads, head_dim, max_seq_len) |
-| Pipeline archive | Single flat archive via `HoloWriter` | `PipelineWriter` bundles prefill + decode sub-archives |
-| LayerHeader tensor ports | Not emitted | Named `lm.prefill` / `lm.decode` with `TensorPort` entries per spec §3 |
-| LLM meta section | Not emitted | `SECTION_LLM_META` (0x0011) — `LlmMetaSection` from hologram base crate |
-| Tokenizer section | Not emitted | `SECTION_TOKENIZER` (0x1001) — `TokenizerSectionData` from hologram base crate |
-| Tokenizer archive packing | No `archive.rs` in tokenizer crate | `ConstantStore` pack/unpack for vocab/merges/scores |
-| ConstantFolding | No-op stub | Remove identity chains on constants |
-| Lowering output | Returns `LoweringOutput` without `layer_descriptor` | Must return `LayerDescriptor` with tensor ports |
-| CLI validate | Not implemented | `hologram-ai validate <model>` — compare against reference runtimes |
-| Logits golden test | No integration test | Compile fixture → `KvExecutor` → compare logits |
+CLI commands: `compile`, `info`, `download`. No `run`, no `validate`.
+(`hologram run` handles execution; validation is done by compiling then
+running via hologram.)
 
 ---
 
-## Work Items
+## Gap Analysis
 
-### 1. KV-Cache Ops in IR
+| Gap | Current State | Required |
+|-----|---------------|----------|
+| Runtime code in hologram-ai | `custom_ops.rs` has ~60 f32 handlers | Delete — hologram needs native float ops |
+| `Run` CLI command | Exists as facade to `hologram run` | Delete — users call `hologram run` directly |
+| Multi-graph lowering | Single graph; `_kv_layout` unused | `LowerPhase` enum, prefill/decode graphs |
+| KV-cache ops | No `KvSlotWrite`/`KvSlotRead` in `AiOp` | KV read/write ops in IR |
+| KV-cache layout | `KvCacheLayout::none()` always | `MemoryPlanner` computes from arch params |
+| Pipeline archive | Single flat archive via `HoloWriter` | `PipelineWriter` bundles sub-archives |
+| LayerHeader | Not emitted | Named `lm.prefill`/`lm.decode` with tensor ports |
+| LLM meta section | Not emitted | `SECTION_LLM_META` (0x0011) |
+| Tokenizer section | Not emitted | `SECTION_TOKENIZER` (0x1001) |
+| Tokenizer archive packing | No `archive.rs` | ConstantStore pack/unpack |
+| ConstantFolding | No-op stub | Fold identity chains on constants |
+| Lowering dispatch | Maps to `GraphOp::Custom` | Map to native `GraphOp::Float(FloatOp)` |
 
-**Goal:** Add KV-cache read/write operations to the AI IR so that lowering
-can emit graphs that interact with the KV-cache buffer.
+---
+
+## Blocked on hologram base crate
+
+The following items **cannot be completed** until hologram adds native float ops.
+See `specs/plans/hologram-types-needed.md` for the full change request.
+
+- **Native float tensor ops** — `FloatAdd`, `FloatMatMul`, `FloatSoftmax`,
+  `FloatRmsNorm`, `FloatAttention`, etc. Without these, lowering must use
+  `GraphOp::Custom` and ship runtime handlers.
+- **Shape metadata on graph edges** — hologram graphs have no per-edge
+  shape/dtype. Lowering currently bakes shapes into closure captures.
+- **`LlmMetaSection`**, **`TokenizerSectionData`** — spec says these types
+  live in hologram. Workaround: local `EmbeddableSection` implementations.
+
+---
+
+## Work Items (hologram-ai side)
+
+### 1. Delete Runtime Code
+
+**Goal:** Remove all custom op handlers. hologram-ai ships zero runtime code.
 
 **Changes:**
-- Add `AiOp::KvSlotWrite { layer: usize }` — writes key/value to cache at
-  current sequence position
-- Add `AiOp::KvSlotRead { layer: usize }` — reads cached key/value up to
-  `present_len` tokens
-- GGUF arch builders (`llama.rs`) emit these ops within each attention block
+- Delete `crates/hologram-ai-common/src/lower/custom_ops.rs`
+- Remove `CustomOpRegistry` from `LoweringOutput`
+- Remove `Run` command from CLI
+- Update `lower/dispatch.rs` to map `AiOp` → native `GraphOp` variants
+  (blocked on hologram adding float ops; can stub with `GraphOp::Custom` for now)
+
+**Files:**
+- `crates/hologram-ai-common/src/lower/custom_ops.rs` (delete)
+- `crates/hologram-ai-common/src/lower/builder.rs`
+- `crates/hologram-ai-common/src/lower/dispatch.rs`
+- `crates/hologram-ai/src/cli.rs`
+
+### 2. KV-Cache Ops in IR
+
+**Goal:** Add KV-cache read/write operations to `AiOp`.
+
+**Changes:**
+- Add `AiOp::KvSlotWrite { layer: usize }` — writes K/V to cache
+- Add `AiOp::KvSlotRead { layer: usize }` — reads cached K/V
+- GGUF arch builders emit these ops in attention blocks
 - Shape propagation rules for KvSlotWrite/KvSlotRead
 
 **Files:**
@@ -49,228 +87,131 @@ can emit graphs that interact with the KV-cache buffer.
 - `crates/hologram-ai-common/src/opt/shape_prop.rs`
 - `crates/hologram-ai-gguf/src/arch/llama.rs`
 
-### 2. KV-Cache Layout Computation
+### 3. KV-Cache Layout Computation
 
-**Goal:** `MemoryPlanner` computes a real `KvCacheLayout` from the model's
-architecture parameters.
+**Goal:** `MemoryPlanner` computes real `KvCacheLayout` from arch params.
 
 **Changes:**
-- `MemoryPlanner::plan()` reads `arch_params` from `AiGraph` metadata
-- Computes: `total_bytes = n_layers × 2 × n_kv_heads × head_dim × max_seq_len × dtype_size`
-- Returns populated `KvCacheLayout` instead of `KvCacheLayout::none()`
+- Read n_layers, n_kv_heads, head_dim, max_seq_len, dtype from `AiGraph` metadata
+- Compute `total_bytes = n_layers × 2 × n_kv_heads × head_dim × max_seq_len × dtype_size`
+- Return populated `KvCacheLayout`
 
 **Files:**
 - `crates/hologram-ai-common/src/mem/planner.rs`
 
-### 3. Multi-Graph Lowering with LowerPhase
+### 4. Multi-Graph Lowering
 
-**Goal:** Lower `AiGraph` twice (prefill phase, decode phase) with proper KV
-cache tensor ports on each graph.
+**Goal:** Lower `AiGraph` twice with `LowerPhase` for prefill + decode.
 
 **Changes:**
 - Add `LowerPhase` enum: `Prefill`, `Decode`, `DecodeBucket(u64)`
-- Prefill graph: `input_ids: [batch, seq_len]`, `kv_cache: [n_bytes]` in + out,
-  `logits: [batch, vocab]` out
-- Decode graph: `input_ids: [batch, 1]`, `present_len: [] u32`,
-  `kv_cache: [n_bytes]` in + out, `logits: [batch, vocab]` out
-- `KvSlotWrite` lowered to cache buffer writes at correct offset
-- `KvSlotRead` lowered to cache buffer reads up to present_len
-- `lower()` returns `LoweringOutput` with populated `layer_descriptor`
-  containing correct `TensorPort` entries
-
-**Signature per architecture spec §12:**
-```rust
-pub fn lower(
-    graph: &AiGraph,
-    kv_layout: &hologram::KvCacheLayout,
-    phase: LowerPhase,
-    opts: &LoweringOptions,
-) -> Result<LoweringOutput>
-```
+- Prefill: `input_ids [batch, seq_len]`, `kv_cache [n_bytes]` in/out, `logits` out
+- Decode: `input_ids [batch, 1]`, `present_len [] u32`, `kv_cache [n_bytes]` in/out, `logits` out
+- `LoweringOutput` includes `layer_name` and `layer_descriptor` with `TensorPort` entries
 
 **Files:**
 - `crates/hologram-ai-common/src/lower/builder.rs`
 - `crates/hologram-ai-common/src/lower/dispatch.rs`
-- `crates/hologram-ai-common/src/lower/custom_ops.rs`
 
-### 4. Pipeline Archive Construction
+### 5. Pipeline Archive Construction
 
-**Goal:** Compile prefill + decode into separate sub-archives, bundle via
-`PipelineWriter`.
+**Goal:** Bundle prefill + decode sub-archives via `PipelineWriter`.
 
 **Changes:**
-- `ModelCompiler::compile()` detects LLM models (has `arch` in metadata)
-- For LLMs: lower twice → `hologram::compile()` twice → build each sub-archive
-  with its own `LayerHeader` → `PipelineWriter::new()
-  .add_model("lm.prefill", prefill_holo)
-  .add_model("lm.decode", decode_holo)
-  .build()`
-- Each sub-archive gets a `LayerHeader` with `LayerDescriptor` containing
-  correct `TensorPort` entries (names, shapes, dtypes per spec §3)
-- Non-LLM models: single archive with `"model.forward"` layer (current behavior)
+- `ModelCompiler::compile()` detects LLMs (has `arch` metadata)
+- Lower twice → `hologram::compile()` twice → `PipelineWriter` bundles them
+- Each sub-archive gets `LayerHeader` with named layer + tensor ports
+- Non-LLM models: single archive with `"model.forward"` layer
 
 **Files:**
 - `crates/hologram-ai/src/compiler.rs`
 
-**Cross-repo dependency:** `TensorPort`, `WeightDType`, `PipelineWriter` are
-not flat re-exported from `hologram::`. Access via deep module paths as
-workaround. See `specs/plans/hologram-types-needed.md`.
+### 6. LLM Meta Section
 
-### 5. LLM Meta Section Embedding
-
-**Goal:** Embed KV-cache layout and model metadata as `SECTION_LLM_META` (0x0011).
+**Goal:** Embed `SECTION_LLM_META` (0x0011) in each sub-archive.
 
 **Changes:**
-- hologram base crate defines `LlmMetaSection` (per spec §8):
-  ```rust
-  pub struct LlmMetaSection {
-      pub model_type: LlmModelType,
-      pub kv_layout: KvCacheLayout,
-      pub prefill_layer: LayerId,
-      pub decode_layers: DecodeLayers,
-  }
-  ```
-- If `LlmMetaSection` is not yet in hologram base crate, define a local
-  `EmbeddableSection` implementation in hologram-ai-common using
-  `SECTION_CUSTOM_BASE + 0x11 = 0x1011` as interim section kind
-- `ModelCompiler` populates and embeds in each sub-archive
+- Define local `LlmMetaSection` implementing `EmbeddableSection`
+  (using `SECTION_CUSTOM_BASE + 0x11` until hologram adds the type)
+- Contains: `KvCacheLayout`, model type, prefill/decode layer IDs
+- Migrate to `hologram::LlmMetaSection` when available
 
 **Files:**
 - `crates/hologram-ai-common/src/sections/llm_meta.rs` (new)
-- `crates/hologram-ai-common/src/sections/mod.rs` (new)
 - `crates/hologram-ai/src/compiler.rs`
 
-**Cross-repo dependency:** `LlmMetaSection`, `LlmModelType`, `DecodeLayers`
-should be defined in hologram base crate (per spec §2, §8). See
-`specs/plans/hologram-types-needed.md`.
+### 7. Tokenizer Section
 
-### 6. Tokenizer Section Embedding
-
-**Goal:** Embed tokenizer data from GGUF metadata into `SECTION_TOKENIZER` (0x1001).
+**Goal:** Embed `SECTION_TOKENIZER` (0x1001) from GGUF metadata.
 
 **Changes:**
-- Add `archive.rs` to tokenizer crate with `ConstantStore` pack/unpack:
-  - `pack_tokenizer(tokenizer: &NativeTokenizer) -> TokenizerSectionData`
-  - `unpack_tokenizer(data: &TokenizerSectionData) -> NativeTokenizer`
-- Serialize: vocab tokens, scores, special token IDs, algorithm type, merges
-- `ModelCompiler` extracts tokenizer from GGUF → packs into section → embeds
-  in prefill sub-archive
+- Add `archive.rs` with ConstantStore pack/unpack for vocab/merges/scores
+- Define local `TokenizerSectionData` implementing `EmbeddableSection`
+- Compiler extracts tokenizer from GGUF → packs → embeds in prefill sub-archive
 
 **Files:**
 - `crates/hologram-ai-tokenizer/src/archive.rs` (new)
 - `crates/hologram-ai/src/compiler.rs`
 
-**Cross-repo dependency:** `TokenizerSectionData` should be defined in hologram
-base crate (per spec §2, §8). See `specs/plans/hologram-types-needed.md`.
+### 8. ConstantFolding
 
-### 7. ConstantFolding Implementation
-
-**Goal:** Remove identity chains where a `Constant` feeds into `Identity`.
+**Goal:** Replace the no-op stub with actual folding.
 
 **Changes:**
-- Scan for `Identity` nodes whose sole input is a `Constant` node
-- Replace with direct output aliasing
+- Fold `Identity` nodes whose input is `Constant`
+- Fold `Reshape` of constant tensors
 - Remove dead constant nodes
-- Additional: fold `Reshape` of constant tensors, `Cast` of constant scalars
 
 **Files:**
 - `crates/hologram-ai-common/src/opt/constant_fold.rs`
 
-### 8. Lowering Output with LayerDescriptor
+### 9. CLI Cleanup
 
-**Goal:** `LoweringOutput` includes a fully populated `LayerDescriptor` with
-tensor ports, matching spec §12.
-
-**Changes:**
-- `LoweringOutput` gets `layer_descriptor: hologram::LayerDescriptor` field
-  with `name`, `entrypoint`, `inputs: Vec<TensorPort>`, `outputs: Vec<TensorPort>`
-- `layer_name: String` field for the archive layer name
-  (e.g., `"lm.prefill"`, `"lm.decode"`, `"lm.decode.128"`)
-
-**Files:**
-- `crates/hologram-ai-common/src/lower/builder.rs`
-
-### 9. CLI: validate subcommand
-
-**Goal:** `hologram-ai validate <model>` compiles model, executes via
-`KvExecutor`, compares to reference runtime output.
+**Goal:** CLI has exactly three commands: `compile`, `info`, `download`.
 
 **Changes:**
-- Add `Command::Validate` variant to CLI
-- Compile model → load archive → `KvExecutor::execute_with_weights()` →
-  compare output shape and values against golden fixture
-- Stub initially: just compile + verify archive loads
+- Delete `Command::Run` variant and all associated code
+- Keep `Command::Info` (delegates to `hologram inspect` for .holo, prints
+  metadata for .onnx/.gguf)
+- Keep `Command::Compile` (import → optimize → lower → write archive)
+- Keep `Command::Download` (HuggingFace acquisition)
 
 **Files:**
 - `crates/hologram-ai/src/cli.rs`
-- `crates/hologram-ai/src/validate.rs` (if exists, update; else create)
-
-### 10. Integration Test: Logits Golden Test
-
-**Goal:** Compile a model fixture, run via `KvExecutor`, compare logits.
-
-**Changes:**
-- Use a small ONNX fixture (already exists in test data)
-- Compile → load via `load_from_bytes` → `KvExecutor::execute_with_weights`
-- Assert output shape and value ranges
-- For pipeline archives: verify `PipelineHeader` entries, load sub-archive by
-  name, verify `LayerHeader` tensor ports
-
-**Files:**
-- `tests/integration/golden_logits.rs` (new)
 
 ---
 
 ## Execution Order
 
 ```
-1. KV-cache ops in IR (AiOp::KvSlotWrite/Read)
+1. CLI cleanup (delete Run) + delete custom_ops.rs
      ↓
-2. KV-cache layout computation (MemoryPlanner)
+2. KV-cache ops in IR
      ↓
-3. Multi-graph lowering (LowerPhase) + LoweringOutput with LayerDescriptor
+3. KV-cache layout computation
      ↓
-4. Pipeline archive construction (PipelineWriter + LayerHeader)
+4. Multi-graph lowering (LowerPhase)
      ↓
-5. LLM meta section ──────┐
+5. Pipeline archive construction
+     ↓
+6. LLM meta section ──────┐
                            │ (parallel)
-6. Tokenizer section ─────┘
+7. Tokenizer section ─────┘
      ↓
-7. ConstantFolding
-     ↓
-8. CLI validate + integration test
+8. ConstantFolding
 ```
 
----
-
-## Cross-Repo Dependencies
-
-The following types are specified as living in `hologram` base crate (per
-architecture spec §2 and §8). Their availability affects implementation:
-
-| Type | Needed by | Status | Workaround |
-|------|-----------|--------|------------|
-| `LlmMetaSection` | §5 LLM meta section | Check if exists | Define local `EmbeddableSection` impl |
-| `LlmModelType` | §5 LLM meta section | Check if exists | Local enum |
-| `DecodeLayers` | §5 LLM meta section | Check if exists | Local enum |
-| `TokenizerSectionData` | §6 Tokenizer section | Check if exists | Local `EmbeddableSection` impl |
-| `BucketSelector` | Phase 2 bucketed compilation | Not needed for MVP | — |
-| `TensorPort` (flat re-export) | §4 Pipeline archive | Not re-exported | Use deep path |
-| `WeightDType` (flat re-export) | §4 Pipeline archive | Not re-exported | Use deep path |
-| `PipelineWriter` (flat re-export) | §4 Pipeline archive | Not re-exported | Use deep path |
-| `KvExecutor::execute_layer()` | §10 Integration test | Does not exist | Manual sub-archive extraction |
-| `SECTION_LLM_META` constant | §5 | May not be exported | Define locally |
-| `SECTION_TOKENIZER` constant | §6 | May not be exported | Define locally |
-
-See `specs/plans/hologram-types-needed.md` for the full change request.
+Steps 1–3 and 8 are unblocked.
+Steps 4–7 depend on hologram adding native float ops for the lowering to
+emit correct native `GraphOp` variants (can stub with `Custom` placeholder).
 
 ---
 
 ## MVP Exit Criteria (from roadmap.md)
 
-- [ ] `hologram-ai compile tinyllama.gguf` produces a valid `.holo` archive
+- [ ] `hologram-ai compile tinyllama.gguf` produces a valid `.holo` pipeline archive
 - [ ] Archive `LayerHeader` declares `lm.prefill` and `lm.decode` with correct tensor ports
 - [ ] `SECTION_LLM_META` reports correct `KvCacheLayout` for TinyLlama 1.1B
-- [ ] Calling `KvExecutor::execute_layer("lm.prefill", ...)` yields logits of correct shape
-- [ ] Top-1 logit matches llama.cpp reference (greedy) on golden prompt
-- [ ] All unit tests pass on `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`
+- [ ] `KvExecutor` yields logits of correct shape from compiled archive
+- [ ] hologram-ai contains zero runtime code (no custom op handlers)
+- [ ] All unit tests pass

@@ -14,18 +14,6 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Run a model file (facade to `hologram run`).
-    ///
-    /// For `.holo` files, delegates directly. For `.onnx`/`.gguf`, compiles
-    /// to a temporary `.holo` first, then delegates.
-    Run {
-        /// Path to a model file (.holo, .onnx, or .gguf).
-        #[arg(short, long)]
-        model: PathBuf,
-        /// Raw input values as INDEX:HEX pairs.
-        #[arg(long = "input", value_name = "INDEX:HEX")]
-        inputs: Vec<String>,
-    },
     /// Inspect a `.holo` archive or ONNX model file.
     Info {
         /// Path to a `.holo` or `.onnx` file.
@@ -53,25 +41,6 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Run { model, inputs } => {
-            let holo_path = match model.extension().and_then(|e| e.to_str()).unwrap_or("") {
-                "holo" => model,
-                _ => {
-                    // Compile to a temp .holo, then run that.
-                    let t0 = std::time::Instant::now();
-                    let source = model_source_from_path(&model)?;
-                    let compiled = ModelCompiler::default().compile(source)?;
-                    let tmp_dir = std::env::temp_dir().join("hologram-ai");
-                    std::fs::create_dir_all(&tmp_dir)?;
-                    let stem = model.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
-                    let tmp_holo = tmp_dir.join(format!("{stem}.holo"));
-                    compiled.save_archive(&tmp_holo)?;
-                    eprintln!("[compile] {:.2?} → {}", t0.elapsed(), tmp_holo.display());
-                    tmp_holo
-                }
-            };
-            run_holo(holo_path, inputs)?;
-        }
         Command::Info { file, detail } => {
             let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
             match ext {
@@ -109,18 +78,6 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-// ── Run ──────────────────────────────────────────────────────────────────────
-
-/// Run a compiled `.holo` archive — delegates to `hologram run`.
-fn run_holo(file: PathBuf, inputs: Vec<String>) -> anyhow::Result<()> {
-    use hologram::hologram_cli::commands::run_cmd::{RunArgs, execute};
-    let args = RunArgs { file, inputs };
-    tokio::runtime::Builder::new_current_thread()
-        .build()?
-        .block_on(execute(args))
-        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 // ── Info ─────────────────────────────────────────────────────────────────────

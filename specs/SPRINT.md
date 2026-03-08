@@ -2,27 +2,27 @@
 
 ## Sprint Goal
 
-Complete MVP exit criteria: compile GGUF LLM to `.holo` pipeline archive with
-named `lm.prefill`/`lm.decode` entrypoints, KV-cache layout, and embedded
-metadata sections. Validate via `KvExecutor` golden test.
+Enforce compiler-only boundary: remove runtime code, add KV-cache and
+multi-graph lowering, produce pipeline archives with named entrypoints.
+
+**Design principle:** hologram-ai is a compiler only (ADR-0016). It ships
+zero runtime code. All kernels (GEMM, attention, norms, etc.) belong in
+hologram base crate. CLI: `compile`, `info`, `download` — nothing else.
 
 ---
 
 ## In Progress
 
-- [ ] KV-cache ops: add `AiOp::KvSlotWrite`/`KvSlotRead` to IR + shape prop rules
+- [ ] KV-cache ops: add `AiOp::KvSlotWrite`/`KvSlotRead` to IR
 - [ ] KV-cache layout: `MemoryPlanner` computes real `KvCacheLayout` from arch params
 - [ ] Multi-graph lowering: `LowerPhase` enum, prefill/decode graph emission
-- [ ] `LoweringOutput` with `LayerDescriptor` and `TensorPort` entries
 - [ ] Pipeline archive: `PipelineWriter` bundles prefill + decode sub-archives
-- [ ] `LayerHeader` with named `lm.prefill`/`lm.decode` layers + tensor ports
+- [ ] `LayerHeader` with named `lm.prefill`/`lm.decode` + tensor ports
 - [ ] LLM meta section: `SECTION_LLM_META` (0x0011) embedding
-- [ ] Tokenizer section: `SECTION_TOKENIZER` (0x1001) + `archive.rs` ConstantStore packing
-- [ ] ConstantFolding: implement actual constant expression folding (currently no-op)
-- [ ] CLI `validate` subcommand (stub: compile + verify archive loads)
-- [ ] Integration test: logits golden test via `KvExecutor`
+- [ ] Tokenizer section: `SECTION_TOKENIZER` (0x1001) + `archive.rs` packing
+- [ ] ConstantFolding: implement actual folding (currently no-op)
 
-See `specs/plans/002-mvp-remaining.md` for full details and execution order.
+See `specs/plans/002-mvp-remaining.md` for full details.
 
 ---
 
@@ -34,36 +34,44 @@ See `specs/plans/002-mvp-remaining.md` for full details and execution order.
 - [x] GGUF v2/v3 binary parser + metadata extraction (ADR-0006)
 - [x] LlamaArch graph construction from GGUF tensors
 - [x] Compiler rework: `HoloArchive` + `CompileStats` replacing `CompiledModel`
-- [x] CLI: `inspect_gguf`, compile stats output, facade to `hologram run`
+- [x] CLI: `inspect_gguf`, compile stats output
 - [x] Shape propagation optimization pass (`ShapePropagation`)
+- [x] Delete `Run` CLI command — users call `hologram run` directly
 - [x] 60 tests passing, zero clippy warnings
+- [x] Native `FloatOp` in hologram base crate (55 variants, kernels, dispatch, CLI inspect)
+- [x] Lowering emits `GraphOp::Float(FloatOp::...)` for ALL ops (zero custom ops remaining)
+- [x] Deleted `custom_ops.rs` — all 446 lines removed, no `CustomHandler` closures
+- [x] Removed `CustomOpRegistry` from `LoweringOutput` — lowering is pure native ops
+- [x] Op extensibility plan documented (`specs/plans/003-op-extensibility.md`)
 
 See `specs/plans/001-spec-alignment-completed.md` for full details.
 
 ---
 
-## Blocked
+## Recently Unblocked
 
-- `LlmMetaSection`, `TokenizerSectionData`, `LlmModelType`, `DecodeLayers`
-  are specified as living in hologram base crate (spec §2, §8) — may need to
-  define local implementations until hologram adds them
-  (see `specs/plans/hologram-types-needed.md`)
-- `KvExecutor::execute_layer()` does not exist in hologram base crate — need
-  manual pipeline sub-archive extraction for golden test
-- `TensorPort`, `WeightDType`, `PipelineWriter` not in `hologram::` flat
-  re-exports — use deep module paths as workaround
+- **All ops are native FloatOp** — DONE. `FloatOp` expanded to 55 variants
+  covering arithmetic, activations, trig, boolean, comparison, linear algebra,
+  normalization, reductions, attention, embedding, dequantization, and structural
+  ops. `custom_ops.rs` deleted entirely. `CustomOpRegistry` removed from
+  `LoweringOutput`. Archives are fully self-describing; `hologram run` works
+  out of the box.
+
+## Still Blocked on hologram base crate
+
+- **Shape metadata on graph edges** — hologram graphs have no per-edge
+  shape/dtype, forcing shapes to be baked into closure captures
+- **`LlmMetaSection`**, **`TokenizerSectionData`** — spec says these live
+  in hologram. Workaround: local `EmbeddableSection` implementations.
+- **`KvExecutor::execute_layer()`** — does not exist; manual sub-archive
+  extraction required
 
 ---
 
 ## Notes
 
+- CLI: exactly 3 commands — `compile`, `info`, `download`
 - ONNX importer path still works (single-archive, non-pipeline)
-- `CompiledModel` is kept as a type alias to `HoloArchive` for backward compat
 - GGUF importer supports `llama`, `mistral`, `codellama`, `tinyllama` arch names
-- Shape propagation handles: MatMul, elementwise broadcast, norms, concat,
-  attention (MHA/GQA), reduce, embed, cast, FusedSwiGLU, RotaryEmbedding
-- MVP exit criteria (from roadmap.md):
-  - `hologram-ai compile tinyllama.gguf` → valid `.holo` pipeline archive
-  - `LayerHeader` declares `lm.prefill` + `lm.decode` with correct tensor ports
-  - `SECTION_LLM_META` reports correct `KvCacheLayout` for TinyLlama 1.1B
-  - Top-1 logit matches llama.cpp reference on golden prompt
+- No backwards compatibility concerns — can break APIs freely
+- Future extensibility: op decomposition (now), serializable op descriptors (Phase 3), WASM kernels (Phase 4+). See `specs/plans/003-op-extensibility.md`.

@@ -4,3 +4,4 @@
 **/*.gguf
 models/
 .mypy_cache
+.claude/

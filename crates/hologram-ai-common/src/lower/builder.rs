@@ -5,26 +5,10 @@
 
 use std::collections::HashMap;
 use anyhow::Context;
-use hologram::{ConstantData, CustomOpId, GraphBuilder, GraphOp};
+use hologram::{ConstantData, FloatOp, GraphBuilder, GraphOp, f32_to_bits};
 use crate::ir::{AiGraph, AiOp, Dim, TensorId, TensorInfo};
 use crate::mem::KvCacheLayout;
 use super::dispatch::{dispatch, DispatchTarget};
-use super::custom_ops::{
-    abs_handler, add_handler, and_handler, attention_handler, cast_handler,
-    ceil_handler, clip_handler, concat_handler, cos_handler, dequant_handler,
-    div_handler, embed_handler, equal_handler, erf_handler, exp_handler,
-    flatten_handler, floor_handler, gather_handler, gather_nd_handler,
-    gelu_handler, greater_handler, greater_or_equal_handler, isnan_handler,
-    layer_norm_handler, less_handler, less_or_equal_handler, log_handler,
-    log_softmax_handler, matmul_handler, max_handler, min_handler,
-    mod_handler, mul_handler, neg_handler, not_handler, or_handler,
-    pow_handler, range_handler, reciprocal_handler, reduce_max_handler,
-    reduce_mean_handler, reduce_min_handler, reduce_sum_handler,
-    relu_handler, reshape_handler, rms_norm_handler, rope_handler,
-    round_handler, shape_handler, sigmoid_handler, sign_handler,
-    silu_handler, sin_handler, softmax_handler, sqrt_handler, sub_handler,
-    swiglu_handler, tanh_handler, where_handler, xor_handler,
-};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -50,21 +34,20 @@ pub enum QuantStrategy {
 /// Output of the lowering pass.
 pub struct LoweringOutput {
     pub graph: hologram::Graph,
-    pub registry: hologram::CustomOpRegistry,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-/// Lower an optimised `AiGraph` to `hologram::Graph + CustomOpRegistry`.
+/// Lower an optimised `AiGraph` to `hologram::Graph`.
 ///
+/// All ops emit native `GraphOp` variants — no `CustomOpRegistry` needed.
 /// Does NOT call `hologram::compile()` — that is the caller's responsibility.
 pub fn lower(
     ai_graph: &AiGraph,
     _kv_layout: &KvCacheLayout,
     _opts: &LoweringOptions,
 ) -> anyhow::Result<LoweringOutput> {
-    let mut registry = hologram::CustomOpRegistry::new();
-    let mut builder  = GraphBuilder::new();
+    let mut builder = GraphBuilder::new();
 
     // Map AiGraph TensorId → builder node index.
     let mut tid_to_idx: HashMap<TensorId, usize> = HashMap::new();
@@ -104,12 +87,6 @@ pub fn lower(
     let topo = ai_graph.topo_order();
     let node_map: HashMap<u32, &_> = ai_graph.nodes.iter().map(|n| (n.id, n)).collect();
 
-    // Counter for allocating unique CustomOpIds for shape-dependent ops.
-    // Shape-dependent ops (MatMul, Gather, Attention) bake tensor dimensions into
-    // their handlers, so each node instance needs its own handler and ID.
-    // Start above the fixed IDs in dispatch.rs (currently up to 46).
-    let mut next_unique_id: u32 = 1000;
-
     for nid in topo {
         let node = node_map[&nid];
 
@@ -125,19 +102,11 @@ pub fn lower(
                     tid_to_idx.insert(tid, builder.len() - 1);
                 }
             }
-            DispatchTarget::Custom { id, arity } => {
-                // Shape-dependent ops need unique IDs per node instance,
-                // since different nodes have different baked-in dimensions.
-                let effective_id = if is_shape_dependent(&node.op) {
-                    let uid = CustomOpId(next_unique_id);
-                    next_unique_id += 1;
-                    uid
-                } else {
-                    id
-                };
-                register_handler(&mut registry, effective_id, arity, &node.op,
-                                 &node.inputs, &ai_graph.tensor_info)?;
-                builder = builder.custom_op(effective_id, arity, &input_idxs);
+            DispatchTarget::FloatNeedsShape => {
+                let graph_op = resolve_float_op(
+                    &node.op, &node.inputs, &ai_graph.tensor_info,
+                )?;
+                builder = builder.node_with_inputs(graph_op, &input_idxs);
                 if let Some(&tid) = node.outputs.first() {
                     tid_to_idx.insert(tid, builder.len() - 1);
                 }
@@ -168,133 +137,114 @@ pub fn lower(
     }
 
     let graph = builder.build();
-    Ok(LoweringOutput { graph, registry })
+    Ok(LoweringOutput { graph })
+}
+
+// ── Float op shape resolution ─────────────────────────────────────────────────
+
+/// Resolve an `AiOp` that needs tensor shape info into a `GraphOp::Float(FloatOp::...)`.
+fn resolve_float_op(
+    op: &AiOp,
+    inputs: &[TensorId],
+    tensor_info: &HashMap<TensorId, TensorInfo>,
+) -> anyhow::Result<GraphOp> {
+    let float_op = match op {
+        AiOp::MatMul | AiOp::BatchMatMul => {
+            let k = last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
+            let n = last_dim(inputs.get(1), tensor_info).unwrap_or(1) as u32;
+            let m = second_last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
+            FloatOp::MatMul { m, k, n }
+        }
+        AiOp::Gemm { alpha, beta, trans_a, trans_b } => {
+            let k = last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
+            let n = last_dim(inputs.get(1), tensor_info).unwrap_or(1) as u32;
+            let m = second_last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
+            FloatOp::Gemm {
+                m, k, n,
+                alpha: f32_to_bits(*alpha),
+                beta: f32_to_bits(*beta),
+                trans_a: *trans_a,
+                trans_b: *trans_b,
+            }
+        }
+        AiOp::Softmax { .. } => {
+            let size = last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
+            FloatOp::Softmax { size }
+        }
+        AiOp::LogSoftmax { .. } => {
+            let size = last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
+            FloatOp::LogSoftmax { size }
+        }
+        AiOp::RmsNorm { epsilon } => {
+            let size = last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
+            FloatOp::RmsNorm { size, epsilon: f32_to_bits(*epsilon) }
+        }
+        AiOp::LayerNorm { epsilon, .. } => {
+            let size = last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
+            FloatOp::LayerNorm { size, epsilon: f32_to_bits(*epsilon) }
+        }
+        AiOp::ReduceSum { .. } => {
+            let size = last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
+            FloatOp::ReduceSum { size }
+        }
+        AiOp::ReduceMean { .. } => {
+            let size = last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
+            FloatOp::ReduceMean { size }
+        }
+        AiOp::ReduceMax { .. } => {
+            let size = last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
+            FloatOp::ReduceMax { size }
+        }
+        AiOp::ReduceMin { .. } => {
+            let size = last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
+            FloatOp::ReduceMin { size }
+        }
+        AiOp::Gather { .. } | AiOp::GatherElements { .. } => {
+            let dim = last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
+            FloatOp::Gather { dim }
+        }
+        AiOp::Concat { .. } => {
+            let size_a = last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
+            let size_b = last_dim(inputs.get(1), tensor_info).unwrap_or(1) as u32;
+            FloatOp::Concat { size_a, size_b }
+        }
+        AiOp::Embed => {
+            let dim = last_dim(inputs.get(1), tensor_info).unwrap_or(1) as u32;
+            FloatOp::Embed { dim }
+        }
+        AiOp::MultiHeadAttention { head_dim, scale, causal, .. } => {
+            let s = scale.unwrap_or((*head_dim as f32).sqrt().recip());
+            FloatOp::Attention { head_dim: *head_dim, scale: f32_to_bits(s), causal: *causal }
+        }
+        AiOp::GroupedQueryAttention { head_dim, scale, causal, .. } => {
+            let s = scale.unwrap_or((*head_dim as f32).sqrt().recip());
+            FloatOp::Attention { head_dim: *head_dim, scale: f32_to_bits(s), causal: *causal }
+        }
+        AiOp::FlashAttentionHint => {
+            FloatOp::Attention { head_dim: 64, scale: f32_to_bits(0.125), causal: true }
+        }
+        _ => anyhow::bail!("resolve_float_op: unexpected op {:?}", op),
+    };
+    Ok(GraphOp::Float(float_op))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Register the appropriate `CustomHandler` in the registry for the given op.
-///
-/// `inputs` and `tensor_info` are needed by shape-sensitive ops (Gather, MatMul).
-fn register_handler(
-    registry: &mut hologram::CustomOpRegistry,
-    id: CustomOpId,
-    arity: u8,
-    op: &AiOp,
-    inputs: &[TensorId],
-    tensor_info: &HashMap<TensorId, TensorInfo>,
-) -> anyhow::Result<()> {
-    let handler = match op {
-        AiOp::RmsNorm { epsilon }              => rms_norm_handler(*epsilon),
-        AiOp::LayerNorm { epsilon, .. }        => layer_norm_handler(*epsilon),
-        AiOp::Softmax { axis }                 => softmax_handler(*axis),
-        AiOp::Embed                            => embed_handler(),
-        AiOp::Dequantize                       => dequant_handler(),
-        AiOp::FusedSwiGLU                      => swiglu_handler(),
-        AiOp::Reshape { .. } | AiOp::Transpose { .. }
-        | AiOp::Squeeze { .. } | AiOp::Unsqueeze { .. }
-        | AiOp::Expand | AiOp::Slice { .. }
-        | AiOp::Split { .. } | AiOp::Tile { .. }     => reshape_handler(),
-        AiOp::Cast { .. }                      => cast_handler(),
-        AiOp::Concat { .. }                    => concat_handler(),
-        AiOp::RotaryEmbedding { base, dim }    => rope_handler(*base, *dim),
-        AiOp::MultiHeadAttention { head_dim, scale, causal, .. } => {
-            let s = scale.unwrap_or((*head_dim as f32).sqrt().recip());
-            attention_handler(*head_dim, s, *causal)
-        }
-        AiOp::GroupedQueryAttention { head_dim, scale, causal, .. } => {
-            let s = scale.unwrap_or((*head_dim as f32).sqrt().recip());
-            attention_handler(*head_dim, s, *causal)
-        }
-        AiOp::FlashAttentionHint => attention_handler(64, 0.125, true),
-        AiOp::Gather { .. } | AiOp::GatherElements { .. } => {
-            // data = inputs[0]; row_size = last concrete dim of the data tensor.
-            let row_size = inputs.first()
-                .and_then(|tid| tensor_info.get(tid))
-                .and_then(|info| info.shape.last())
-                .and_then(concrete_dim)
-                .unwrap_or(1) as usize;
-            gather_handler(row_size)
-        }
-        AiOp::MatMul | AiOp::BatchMatMul | AiOp::Gemm { .. } => {
-            // A = inputs[0]; inner = last dim of A; B = inputs[1]; n_cols = last dim of B.
-            let inner = inputs.first()
-                .and_then(|tid| tensor_info.get(tid))
-                .and_then(|info| info.shape.last())
-                .and_then(concrete_dim)
-                .unwrap_or(1) as usize;
-            let n_cols = inputs.get(1)
-                .and_then(|tid| tensor_info.get(tid))
-                .and_then(|info| info.shape.last())
-                .and_then(concrete_dim)
-                .unwrap_or(1) as usize;
-            matmul_handler(inner, n_cols)
-        }
-        AiOp::Shape                            => shape_handler(),
-        AiOp::Where                            => where_handler(),
-        AiOp::Range                            => range_handler(),
-        AiOp::GatherND { .. }                  => gather_nd_handler(),
-        AiOp::IsNaN                            => isnan_handler(),
-        AiOp::Flatten { .. }                   => flatten_handler(),
-        AiOp::Div                              => div_handler(),
-        AiOp::Pow                              => pow_handler(),
-        AiOp::Mod                              => mod_handler(),
-        AiOp::Min                              => min_handler(),
-        AiOp::Max                              => max_handler(),
-        AiOp::And                              => and_handler(),
-        AiOp::Or                               => or_handler(),
-        AiOp::Xor                              => xor_handler(),
-        AiOp::Not                              => not_handler(),
-        AiOp::Equal                            => equal_handler(),
-        AiOp::Less                             => less_handler(),
-        AiOp::LessOrEqual                      => less_or_equal_handler(),
-        AiOp::Greater                          => greater_handler(),
-        AiOp::GreaterOrEqual                   => greater_or_equal_handler(),
-        AiOp::Reciprocal                       => reciprocal_handler(),
-        AiOp::Sign                             => sign_handler(),
-        AiOp::Floor                            => floor_handler(),
-        AiOp::Ceil                             => ceil_handler(),
-        AiOp::Round                            => round_handler(),
-        AiOp::Clip                             => clip_handler(),
-        AiOp::Erf                              => erf_handler(),
-        AiOp::ReduceSum { .. }                 => reduce_sum_handler(),
-        AiOp::ReduceMean { .. }                => reduce_mean_handler(),
-        AiOp::ReduceMax { .. }                 => reduce_max_handler(),
-        AiOp::ReduceMin { .. }                 => reduce_min_handler(),
-        AiOp::LogSoftmax { .. }                => log_softmax_handler(),
-        AiOp::Add                              => add_handler(),
-        AiOp::Sub                              => sub_handler(),
-        AiOp::Mul                              => mul_handler(),
-        AiOp::Neg                              => neg_handler(),
-        AiOp::Relu                             => relu_handler(),
-        AiOp::Gelu | AiOp::GeluApprox         => gelu_handler(),
-        AiOp::Silu                             => silu_handler(),
-        AiOp::Tanh                             => tanh_handler(),
-        AiOp::Sigmoid                          => sigmoid_handler(),
-        AiOp::Exp                              => exp_handler(),
-        AiOp::Log                              => log_handler(),
-        AiOp::Sqrt                             => sqrt_handler(),
-        AiOp::Abs                              => abs_handler(),
-        AiOp::Cos                              => cos_handler(),
-        AiOp::Sin                              => sin_handler(),
-        _ => anyhow::bail!("no custom handler registered for op {:?}", op),
-    };
-    registry.register(id, arity, handler);
-    Ok(())
+/// Extract last concrete dimension from a tensor.
+fn last_dim(tid: Option<&TensorId>, tensor_info: &HashMap<TensorId, TensorInfo>) -> Option<u64> {
+    tid.and_then(|t| tensor_info.get(t))
+       .and_then(|info| info.shape.last())
+       .and_then(concrete_dim)
 }
 
-/// Whether this op bakes tensor dimensions into its custom handler.
-///
-/// Shape-dependent ops need unique `CustomOpId`s per node so each instance
-/// gets its own handler with the correct dimensions.
-fn is_shape_dependent(op: &AiOp) -> bool {
-    matches!(op,
-        AiOp::MatMul | AiOp::BatchMatMul | AiOp::Gemm { .. }
-        | AiOp::Gather { .. } | AiOp::GatherElements { .. }
-        | AiOp::MultiHeadAttention { .. }
-        | AiOp::GroupedQueryAttention { .. }
-        | AiOp::FlashAttentionHint
-    )
+/// Extract second-to-last concrete dimension from a tensor.
+fn second_last_dim(tid: Option<&TensorId>, tensor_info: &HashMap<TensorId, TensorInfo>) -> Option<u64> {
+    tid.and_then(|t| tensor_info.get(t))
+       .and_then(|info| {
+           let n = info.shape.len();
+           if n >= 2 { info.shape.get(n - 2) } else { None }
+       })
+       .and_then(concrete_dim)
 }
 
 /// Extract the concrete value from a `Dim`, returning `None` for symbolic/dynamic dims.
