@@ -17,13 +17,18 @@ use crate::ir::{shape_from_concrete, AiGraph, AiOp, Shape};
 ///
 /// When `known_i64_values` are available on shape-input tensors (populated by
 /// `DataPropagation`), this pass can resolve Reshape and Expand output shapes.
+///
+/// Settled shapes (non-empty with no `Dynamic` dims) are never overwritten —
+/// this preserves oracle-seeded shapes from `ShapeOraclePass` and correctly
+/// inferred shapes from prior passes.
 pub struct ShapePropagation;
 
-/// Aggressive shape propagation that always overwrites existing shapes
-/// with inferred shapes (when the inferred shape is non-empty).
+/// Alias for `ShapePropagation` used in the post-concretization repair loop.
 ///
-/// Used in post-concretization repair where all dims are concrete and
-/// the pipeline needs to re-derive shapes from scratch.
+/// After `concretize_all_dims` all symbolic `Var` dims are concrete, so oracle
+/// shapes become fully settled. The settled-shape protection in
+/// `ShapePropagation` applies identically here — this alias exists for
+/// call-site clarity in the compiler pipeline.
 pub struct AggressiveShapePropagation;
 
 impl Pass for ShapePropagation {
@@ -32,7 +37,7 @@ impl Pass for ShapePropagation {
     }
 
     fn run(&self, graph: AiGraph) -> anyhow::Result<AiGraph> {
-        propagate_shapes(graph, false)
+        propagate_shapes(graph)
     }
 }
 
@@ -42,11 +47,11 @@ impl Pass for AggressiveShapePropagation {
     }
 
     fn run(&self, graph: AiGraph) -> anyhow::Result<AiGraph> {
-        propagate_shapes(graph, true)
+        propagate_shapes(graph)
     }
 }
 
-fn propagate_shapes(mut graph: AiGraph, overwrite: bool) -> anyhow::Result<AiGraph> {
+fn propagate_shapes(mut graph: AiGraph) -> anyhow::Result<AiGraph> {
         let order = graph.topo_order();
 
         // Build node lookup.
@@ -97,10 +102,20 @@ fn propagate_shapes(mut graph: AiGraph, overwrite: bool) -> anyhow::Result<AiGra
             for (i, tid) in output_tids.iter().enumerate() {
                 if let Some(shape) = inferred.get(i) {
                     if let Some(info) = graph.tensor_info.get_mut(tid) {
-                        let should_write = overwrite
-                            || info.shape.is_empty()
-                            || info.shape.iter().all(|d| matches!(d, DimExpr::Dynamic));
-                        if should_write && !shape.is_empty() {
+                        // A "settled" shape is non-empty with no Dynamic dims.
+                        // This includes oracle-seeded shapes (all-concrete or
+                        // symbolic Var dims) and any shapes from prior passes
+                        // that fully resolved every dimension.
+                        //
+                        // Settled shapes are preserved even in overwrite mode
+                        // (AggressiveShapePropagation) — re-deriving them from
+                        // op rules could produce wrong results when ops carry
+                        // stale parameters (e.g. head_dim=0 before resolution).
+                        // Dynamic dims are always overwritten when propagation
+                        // can provide something better.
+                        let is_settled = !info.shape.is_empty()
+                            && info.shape.iter().all(|d| !matches!(d, DimExpr::Dynamic));
+                        if !is_settled && !shape.is_empty() {
                             info.shape = shape.clone();
                         }
                     }
@@ -1024,5 +1039,84 @@ mod tests {
         assert_eq!(out_shape[0].as_concrete(), Some(4));
         assert_eq!(out_shape[1].as_concrete(), Some(2));
         assert_eq!(out_shape[2].as_concrete(), Some(3));
+    }
+
+    fn relu_graph_with_shapes(in_shape: &[u64], out_shape: &[u64]) -> AiGraph {
+        let mut ti = HashMap::new();
+        ti.insert(0u32, TensorInfo::new(DType::F32, shape_from_concrete(in_shape)));
+        ti.insert(1u32, TensorInfo::new(DType::F32, shape_from_concrete(out_shape)));
+        AiGraph {
+            name: "test".into(),
+            nodes: vec![AiNode::new(0, AiOp::Relu, vec![0], vec![1])],
+            inputs: vec![0],
+            outputs: vec![1],
+            input_names: vec![],
+            output_names: vec![],
+            params: HashMap::new(),
+            tensor_info: ti,
+            metadata: HashMap::new(),
+            warnings: vec![],
+            dim_vars: Default::default(),
+            shape_constraints: Default::default(),
+        }
+    }
+
+    /// Oracle-seeded concrete shapes survive ShapePropagation (settled-shape protection).
+    #[test]
+    fn settled_shape_survives_shape_propagation() {
+        let g = relu_graph_with_shapes(&[1, 32, 512], &[1, 32, 512]);
+        let g2 = ShapePropagation.run(g).unwrap();
+        assert_eq!(
+            g2.tensor_info[&1].shape.as_slice(),
+            shape_from_concrete(&[1, 32, 512]).as_slice(),
+            "ShapePropagation must not overwrite settled shape"
+        );
+    }
+
+    /// Oracle-seeded concrete shapes survive AggressiveShapePropagation.
+    #[test]
+    fn settled_shape_survives_aggressive_propagation() {
+        let g = relu_graph_with_shapes(&[1, 32, 512], &[1, 32, 512]);
+        let g2 = AggressiveShapePropagation.run(g).unwrap();
+        assert_eq!(
+            g2.tensor_info[&1].shape.as_slice(),
+            shape_from_concrete(&[1, 32, 512]).as_slice(),
+            "AggressiveShapePropagation must not overwrite settled shape"
+        );
+    }
+
+    /// Dynamic dims are still filled by propagation even when other dims
+    /// are concrete (shape is not settled because it contains Dynamic).
+    #[test]
+    fn dynamic_dim_is_filled_by_propagation() {
+        use crate::ir::shape::DimExpr;
+        use smallvec::smallvec;
+
+        let mut ti = HashMap::new();
+        // Input: fully concrete.
+        ti.insert(0u32, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 4])));
+        // Output: has a Dynamic dim — not settled, propagation should fill it.
+        let partial: Shape = smallvec![DimExpr::Concrete(2), DimExpr::Dynamic];
+        ti.insert(1u32, TensorInfo::new(DType::F32, partial));
+
+        let g = AiGraph {
+            name: "test".into(),
+            nodes: vec![AiNode::new(0, AiOp::Relu, vec![0], vec![1])],
+            inputs: vec![0],
+            outputs: vec![1],
+            input_names: vec![],
+            output_names: vec![],
+            params: HashMap::new(),
+            tensor_info: ti,
+            metadata: HashMap::new(),
+            warnings: vec![],
+            dim_vars: Default::default(),
+            shape_constraints: Default::default(),
+        };
+
+        let g2 = ShapePropagation.run(g).unwrap();
+        let out = &g2.tensor_info[&1].shape;
+        assert_eq!(out.as_slice(), shape_from_concrete(&[2, 4]).as_slice(),
+            "Dynamic dim in output should be replaced by propagated concrete shape");
     }
 }

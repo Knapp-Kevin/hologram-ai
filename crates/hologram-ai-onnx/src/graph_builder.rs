@@ -15,13 +15,18 @@ use std::path::Path;
 
 /// Build an `AiGraph` from an ONNX `GraphProto`.
 ///
+/// Returns the graph and an oracle map (TensorId → TensorInfo) built from all
+/// ONNX `value_info`, `input`, and `output` annotations. The oracle is used by
+/// [`ShapeOraclePass`][hologram_ai_common::ShapeOraclePass] to seed any tensor
+/// shapes that remain empty after construction.
+///
 /// `model_dir` is the directory containing the `.onnx` file, used to resolve
 /// external data file paths for tensors with `data_location == EXTERNAL`.
 pub fn build_ai_graph(
     g: &GraphProto,
     graph_name: &str,
     model_dir: Option<&Path>,
-) -> anyhow::Result<AiGraph> {
+) -> anyhow::Result<(AiGraph, HashMap<TensorId, TensorInfo>)> {
     let mut next_tid: TensorId = 0;
     // name → TensorId mapping.
     let mut name_to_tid: HashMap<String, TensorId> = HashMap::new();
@@ -220,20 +225,120 @@ pub fn build_ai_graph(
     // inputs rather than node attributes. We resolve them from constants here.
     resolve_dynamic_op_params(&mut nodes, &params, &tensor_info, &mut warnings);
 
-    Ok(AiGraph {
-        name: graph_name.to_owned(),
-        nodes,
-        inputs: graph_inputs,
-        outputs: graph_outputs,
-        input_names,
-        output_names,
-        params,
-        tensor_info,
-        metadata: HashMap::new(),
-        warnings,
-        dim_vars,
-        shape_constraints: Default::default(),
-    })
+    // Build the shape oracle from all ONNX-provided annotations.
+    // Covers value_info (intermediate tensors), graph inputs, and graph outputs.
+    // Only entries with non-empty shapes are included — empty annotations from
+    // untyped outputs would just add noise.
+    let mut oracle: HashMap<TensorId, TensorInfo> = HashMap::new();
+    let all_vis = g
+        .value_info
+        .iter()
+        .chain(g.input.iter())
+        .chain(g.output.iter());
+    for vi in all_vis {
+        if let Some(&tid) = name_to_tid.get(&vi.name) {
+            // Skip params: their shapes come from initializer data.
+            if params.contains_key(&tid) {
+                continue;
+            }
+            let info = value_info_to_tensor_info(vi, &mut dim_vars);
+            if !info.shape.is_empty() {
+                oracle.insert(tid, info);
+            }
+        }
+    }
+
+    // Resolve head_dim for ONNX MultiHeadAttention nodes that were given
+    // head_dim: 0 in op_map (placeholder; real value comes from oracle shapes).
+    resolve_attention_head_dims(&mut nodes, &oracle, &tensor_info);
+
+    Ok((
+        AiGraph {
+            name: graph_name.to_owned(),
+            nodes,
+            inputs: graph_inputs,
+            outputs: graph_outputs,
+            input_names,
+            output_names,
+            params,
+            tensor_info,
+            metadata: HashMap::new(),
+            warnings,
+            dim_vars,
+            shape_constraints: Default::default(),
+        },
+        oracle,
+    ))
+}
+
+/// Resolve `head_dim: 0` for ONNX MultiHeadAttention / GroupedQueryAttention nodes.
+///
+/// ONNX MHA nodes are imported with `head_dim: 0` because the value is not
+/// available as a node attribute — it must be derived from tensor shapes.
+///
+/// Priority order:
+/// 1. Oracle output shape: if the output is `[_, _, hidden]` with concrete
+///    `hidden`, then `head_dim = hidden / num_heads`.
+/// 2. Query input shape (input[0]): same formula.
+/// 3. Leave as 0 and emit a tracing warning (will produce a zero-dim shape
+///    later, caught by the compiler's diagnostic pass).
+fn resolve_attention_head_dims(
+    nodes: &mut [AiNode],
+    oracle: &HashMap<TensorId, TensorInfo>,
+    tensor_info: &HashMap<TensorId, TensorInfo>,
+) {
+    for node in nodes.iter_mut() {
+        let (num_heads, head_dim) = match &node.op {
+            AiOp::MultiHeadAttention { num_heads, head_dim, .. } => (*num_heads, *head_dim),
+            AiOp::GroupedQueryAttention { num_heads, head_dim, .. } => (*num_heads, *head_dim),
+            _ => continue,
+        };
+
+        if head_dim != 0 || num_heads == 0 {
+            continue;
+        }
+
+        // Try to derive head_dim from the output tensor's oracle shape.
+        let resolved = node
+            .outputs
+            .first()
+            .and_then(|tid| oracle.get(tid).or_else(|| tensor_info.get(tid)))
+            .and_then(|info| info.shape.last())
+            .and_then(|d| d.as_concrete())
+            .map(|hidden| hidden / num_heads as u64)
+            // Fallback: try the query input (input[0]) shape.
+            .or_else(|| {
+                node.inputs
+                    .first()
+                    .and_then(|tid| oracle.get(tid).or_else(|| tensor_info.get(tid)))
+                    .and_then(|info| info.shape.last())
+                    .and_then(|d| d.as_concrete())
+                    .map(|hidden| hidden / num_heads as u64)
+            });
+
+        match resolved {
+            Some(hd) if hd > 0 => {
+                match &mut node.op {
+                    AiOp::MultiHeadAttention { head_dim, .. } => *head_dim = hd as u32,
+                    AiOp::GroupedQueryAttention { head_dim, .. } => *head_dim = hd as u32,
+                    _ => {}
+                }
+                tracing::debug!(
+                    node_id = node.id,
+                    num_heads,
+                    head_dim = hd,
+                    "resolved attention head_dim from oracle"
+                );
+            }
+            _ => {
+                tracing::warn!(
+                    node_id = node.id,
+                    num_heads,
+                    "could not resolve head_dim for attention node; left as 0"
+                );
+            }
+        }
+    }
 }
 
 fn value_info_to_tensor_info(vi: &ValueInfoProto, dim_vars: &mut DimVarTable) -> TensorInfo {

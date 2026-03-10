@@ -4,7 +4,7 @@
 //! ready for optimization and lowering. Priority importer for Sprint 001.
 
 use error::OnnxError;
-use hologram_ai_common::AiGraph;
+use hologram_ai_common::{opt::pipeline::Pass, AiGraph, ShapeOraclePass};
 use prost::Message;
 
 mod onnx_pb {
@@ -62,7 +62,8 @@ fn import_onnx_inner(
         &model.domain
     };
 
-    let ai_graph = graph_builder::build_ai_graph(&graph_proto, graph_name, model_dir)?;
+    let (ai_graph, oracle) =
+        graph_builder::build_ai_graph(&graph_proto, graph_name, model_dir)?;
 
     // Surface warnings.
     for w in &ai_graph.warnings {
@@ -72,6 +73,12 @@ fn import_onnx_inner(
             tracing::warn!("{}", w.message);
         }
     }
+
+    // Apply shape oracle: seed any empty tensor shapes from value_info.
+    // This ensures oracle-provided shapes are present before the opt pipeline
+    // runs, and the settled-shape protection in ShapePropagation will keep
+    // them from being overwritten by AggressiveShapePropagation.
+    let ai_graph = ShapeOraclePass::new(oracle).run(ai_graph)?;
 
     Ok(ai_graph)
 }
@@ -139,5 +146,73 @@ mod tests {
     #[test]
     fn import_rejects_empty_bytes() {
         assert!(import_onnx(&[], Default::default()).is_err());
+    }
+
+    /// An intermediate tensor whose shape appears in value_info should have
+    /// that shape filled by the oracle after import — even when the tensor's
+    /// shape wasn't populated during node processing.
+    #[test]
+    fn oracle_fills_intermediate_tensor_shape() {
+        use onnx_pb::*;
+        // Build a two-node graph: Relu(x) -> y -> Relu(y) -> z
+        // with shape annotations for both intermediate tensors.
+        let dim_val = |v: i64| tensor_shape_proto::Dimension {
+            value: Some(tensor_shape_proto::dimension::Value::DimValue(v)),
+        };
+        let tensor_type = |elem: i32, dims: Vec<i64>| TypeProto {
+            value: Some(type_proto::Value::TensorType(type_proto::Tensor {
+                elem_type: elem,
+                shape: Some(TensorShapeProto {
+                    dim: dims.into_iter().map(dim_val).collect(),
+                }),
+            })),
+        };
+
+        let model = ModelProto {
+            ir_version: 8,
+            graph: Some(GraphProto {
+                name: "test".to_string(),
+                node: vec![
+                    NodeProto {
+                        op_type: "Relu".to_string(),
+                        input: vec!["x".to_string()],
+                        output: vec!["y".to_string()],
+                        ..Default::default()
+                    },
+                    NodeProto {
+                        op_type: "Relu".to_string(),
+                        input: vec!["y".to_string()],
+                        output: vec!["z".to_string()],
+                        ..Default::default()
+                    },
+                ],
+                input: vec![ValueInfoProto {
+                    name: "x".to_string(),
+                    r#type: Some(tensor_type(1, vec![2, 8])),
+                }],
+                output: vec![ValueInfoProto {
+                    name: "z".to_string(),
+                    r#type: Some(tensor_type(1, vec![2, 8])),
+                }],
+                // Intermediate tensor 'y' has its shape in value_info.
+                value_info: vec![ValueInfoProto {
+                    name: "y".to_string(),
+                    r#type: Some(tensor_type(1, vec![2, 8])),
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut buf = Vec::new();
+        model.encode(&mut buf).unwrap();
+
+        let g = import_onnx(&buf, Default::default()).expect("import failed");
+
+        // The intermediate tensor 'y' should have shape [2, 8] from the oracle.
+        let y_tid = g.nodes[0].outputs[0];
+        let y_shape = &g.tensor_info[&y_tid].shape;
+        assert_eq!(y_shape.len(), 2);
+        assert_eq!(y_shape[0].as_concrete(), Some(2));
+        assert_eq!(y_shape[1].as_concrete(), Some(8));
     }
 }

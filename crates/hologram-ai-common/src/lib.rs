@@ -28,5 +28,5 @@ pub use lower::{lower, LowerPhase, LoweringOptions, LoweringOutput, QuantStrateg
 pub use mem::{KvCacheLayout, MemoryPlan, MemoryPlanner};
 pub use opt::{
     AggressiveShapePropagation, ConstantDeduplication, OptPipeline, Pass, ShapeHealing,
-    SliceToGather,
+    ShapeOraclePass, SliceToGather,
 };
