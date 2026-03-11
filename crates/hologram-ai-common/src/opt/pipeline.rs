@@ -21,8 +21,8 @@ impl OptPipeline {
         use super::{
             const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,
             constant_fold::ConstantFolding, data_prop::DataPropagation,
-            dead_node::DeadNodeElimination, rmsnorm_fusion::RmsNormFusion,
-            shape_prop::ShapePropagation,
+            dead_node::DeadNodeElimination, decompose::OpDecomposition,
+            rmsnorm_fusion::RmsNormFusion, shape_prop::ShapePropagation,
         };
         Self::new(vec![
             Box::new(ShapePropagation),
@@ -40,6 +40,9 @@ impl OptPipeline {
             // scalar epsilon and exponent params are already materialized as
             // AiParam::Inline (otherwise scalar_f32_param returns None).
             Box::new(RmsNormFusion),
+            // Decompose compound ops (ReduceL1/L2, DepthToSpace, SpaceToDepth)
+            // into primitive ops before lowering.
+            Box::new(OpDecomposition),
             // Deduplicate identical constants by content hash.
             // Cross-layer duplicates (e.g., RoPE constants computed per
             // transformer layer) share the same bytes but have different

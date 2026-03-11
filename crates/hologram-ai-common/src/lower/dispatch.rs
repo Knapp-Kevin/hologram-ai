@@ -185,21 +185,21 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
         | Compress { .. }
         | ReverseSequence { .. } => D::FloatNeedsShape,
 
-        // ── Decomposition ops (multi-node expansion, not yet implemented) ─
+        // ── Decomposed ops (should be eliminated by OpDecomposition pass) ─
         ReduceL1 { .. } => D::Unsupported {
-            reason: "ReduceL1 decomposition not yet implemented",
+            reason: "ReduceL1 should have been decomposed by OpDecomposition pass",
         },
         ReduceL2 { .. } => D::Unsupported {
-            reason: "ReduceL2 decomposition not yet implemented",
+            reason: "ReduceL2 should have been decomposed by OpDecomposition pass",
+        },
+        DepthToSpace { .. } => D::Unsupported {
+            reason: "DepthToSpace should have been decomposed by OpDecomposition pass",
+        },
+        SpaceToDepth { .. } => D::Unsupported {
+            reason: "SpaceToDepth should have been decomposed by OpDecomposition pass",
         },
         OneHot { .. } => D::Unsupported {
             reason: "OneHot decomposition not yet implemented",
-        },
-        DepthToSpace { .. } => D::Unsupported {
-            reason: "DepthToSpace decomposition not yet implemented",
-        },
-        SpaceToDepth { .. } => D::Unsupported {
-            reason: "SpaceToDepth decomposition not yet implemented",
         },
 
         // ── Control flow (Phase 4): subgraph lowering ──────────────────

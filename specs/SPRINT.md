@@ -28,7 +28,7 @@ CLI: `compile`, `info`, `download` — nothing else.
 - [x] Add shape propagation rules for utility ops (reductions, TopK, ScatterND, NonZero, OneHot, DepthToSpace, SpaceToDepth, Compress)
 - [x] Add lowering dispatch entries → FloatNeedsShape (FloatOp variants added to hologram base)
 - [x] Add resolve_op strategy arms for ReduceProd, TopK, ScatterND, CumSum, NonZero, Compress, ReverseSequence
-- [ ] Add lowering decompositions where possible (ReduceL1/L2, DepthToSpace, SpaceToDepth)
+- [x] Add OpDecomposition pass: ReduceL1→Abs+ReduceSum, ReduceL2→Mul+ReduceSum+Sqrt, DepthToSpace/SpaceToDepth→Reshape+Transpose+Reshape
 
 ### Phase 3: Proto/Type Gaps
 - [x] Add F64 dtype + ONNX type 11 mapping
