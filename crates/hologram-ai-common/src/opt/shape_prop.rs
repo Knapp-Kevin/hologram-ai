@@ -85,9 +85,27 @@ fn propagate_shapes(mut graph: AiGraph, protect_settled: bool) -> anyhow::Result
                 })
                 .collect();
 
-            // For Reshape/Expand: try to get known_i64_values from the shape input.
+            // For Reshape/Expand/Resize/Pad: try to get known_i64_values from shape inputs.
             let shape_known_values: Option<Vec<Option<i64>>> = match &graph.nodes[idx].op {
                 AiOp::Reshape { .. } | AiOp::Expand => {
+                    graph.nodes[idx].inputs.get(1).and_then(|tid| {
+                        graph
+                            .tensor_info
+                            .get(tid)
+                            .and_then(|ti| ti.known_i64_values.clone())
+                    })
+                }
+                // Resize: sizes from input[3] (opset 11+).
+                AiOp::Resize { .. } => {
+                    graph.nodes[idx].inputs.get(3).and_then(|tid| {
+                        graph
+                            .tensor_info
+                            .get(tid)
+                            .and_then(|ti| ti.known_i64_values.clone())
+                    })
+                }
+                // Pad: pads from input[1] (opset 11+).
+                AiOp::Pad { .. } => {
                     graph.nodes[idx].inputs.get(1).and_then(|tid| {
                         graph
                             .tensor_info
@@ -522,8 +540,496 @@ fn infer_custom_output_shapes(
             }
         }
 
+        // ── Phase 1: Vision ops ──────────────────────────────────────────────
+
+        // Conv: [N, C, *spatial] → [N, C_out, *conv_spatial]
+        // out_dim = floor((in + pad_begin + pad_end - dilation*(kernel-1) - 1) / stride + 1)
+        AiOp::Conv {
+            kernel_shape,
+            strides,
+            pads,
+            dilations,
+            ..
+        } => {
+            if inputs.len() >= 2 && !inputs[0].is_empty() && inputs[0].len() >= 2 {
+                let x = &inputs[0];
+                let w = &inputs[1];
+                let mut shape = Vec::new();
+                shape.push(x[0].clone()); // N (batch)
+                // C_out from weight[0]
+                if !w.is_empty() {
+                    shape.push(w[0].clone());
+                } else {
+                    shape.push(DimExpr::Dynamic);
+                }
+                // Spatial dims
+                let spatial_rank = kernel_shape.len();
+                for i in 0..spatial_rank {
+                    if let Some(in_dim) = x.get(2 + i).and_then(|d| d.as_concrete()) {
+                        let k = kernel_shape.get(i).copied().unwrap_or(1);
+                        let s = strides.get(i).copied().unwrap_or(1);
+                        let d = dilations.get(i).copied().unwrap_or(1);
+                        let p_begin = pads.get(i).copied().unwrap_or(0);
+                        let p_end = pads.get(spatial_rank + i).copied().unwrap_or(0);
+                        let effective_k = d * (k - 1) + 1;
+                        let out = (in_dim + p_begin + p_end).saturating_sub(effective_k) / s + 1;
+                        shape.push(DimExpr::Concrete(out));
+                    } else {
+                        shape.push(DimExpr::Dynamic);
+                    }
+                }
+                vec![Shape::from(shape)]
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // ConvTranspose: out_dim = stride * (in - 1) + output_padding + dilation*(kernel-1) - pad_begin - pad_end + 1
+        AiOp::ConvTranspose {
+            kernel_shape,
+            strides,
+            pads,
+            output_padding,
+            dilations,
+            ..
+        } => {
+            if inputs.len() >= 2 && !inputs[0].is_empty() && inputs[0].len() >= 2 {
+                let x = &inputs[0];
+                let w = &inputs[1];
+                let mut shape = Vec::new();
+                shape.push(x[0].clone()); // N
+                if w.len() >= 2 {
+                    shape.push(w[1].clone()); // C_out (weight dim 1 for conv transpose)
+                } else {
+                    shape.push(DimExpr::Dynamic);
+                }
+                let spatial_rank = kernel_shape.len();
+                for i in 0..spatial_rank {
+                    if let Some(in_dim) = x.get(2 + i).and_then(|d| d.as_concrete()) {
+                        let k = kernel_shape.get(i).copied().unwrap_or(1);
+                        let s = strides.get(i).copied().unwrap_or(1);
+                        let d = dilations.get(i).copied().unwrap_or(1);
+                        let p_begin = pads.get(i).copied().unwrap_or(0);
+                        let p_end = pads.get(spatial_rank + i).copied().unwrap_or(0);
+                        let out_pad = output_padding.get(i).copied().unwrap_or(0);
+                        let out = s * (in_dim - 1) + out_pad + d * (k - 1) + 1 - p_begin - p_end;
+                        shape.push(DimExpr::Concrete(out));
+                    } else {
+                        shape.push(DimExpr::Dynamic);
+                    }
+                }
+                vec![Shape::from(shape)]
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // MaxPool / AveragePool: same formula as Conv (spatial dims only, no weight).
+        AiOp::MaxPool {
+            kernel_shape,
+            strides,
+            pads,
+            dilations,
+            ceil_mode,
+            ..
+        } => {
+            if let Some(x) = inputs.first() {
+                if x.len() >= 2 {
+                    let mut shape = vec![x[0].clone(), x[1].clone()]; // N, C
+                    let spatial_rank = kernel_shape.len();
+                    for i in 0..spatial_rank {
+                        if let Some(in_dim) = x.get(2 + i).and_then(|d| d.as_concrete()) {
+                            let k = kernel_shape.get(i).copied().unwrap_or(1);
+                            let s = strides.get(i).copied().unwrap_or(1);
+                            let d = dilations.get(i).copied().unwrap_or(1);
+                            let p_begin = pads.get(i).copied().unwrap_or(0);
+                            let p_end = pads.get(spatial_rank + i).copied().unwrap_or(0);
+                            let effective_k = d * (k - 1) + 1;
+                            let out = pool_output_dim(in_dim, effective_k, s, p_begin, p_end, *ceil_mode);
+                            shape.push(DimExpr::Concrete(out));
+                        } else {
+                            shape.push(DimExpr::Dynamic);
+                        }
+                    }
+                    vec![Shape::from(shape)]
+                } else {
+                    vec![Shape::new()]
+                }
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        AiOp::AveragePool {
+            kernel_shape,
+            strides,
+            pads,
+            ceil_mode,
+            ..
+        } => {
+            if let Some(x) = inputs.first() {
+                if x.len() >= 2 {
+                    let mut shape = vec![x[0].clone(), x[1].clone()]; // N, C
+                    let spatial_rank = kernel_shape.len();
+                    for i in 0..spatial_rank {
+                        if let Some(in_dim) = x.get(2 + i).and_then(|d| d.as_concrete()) {
+                            let k = kernel_shape.get(i).copied().unwrap_or(1);
+                            let s = strides.get(i).copied().unwrap_or(1);
+                            let p_begin = pads.get(i).copied().unwrap_or(0);
+                            let p_end = pads.get(spatial_rank + i).copied().unwrap_or(0);
+                            let out = pool_output_dim(in_dim, k, s, p_begin, p_end, *ceil_mode);
+                            shape.push(DimExpr::Concrete(out));
+                        } else {
+                            shape.push(DimExpr::Dynamic);
+                        }
+                    }
+                    vec![Shape::from(shape)]
+                } else {
+                    vec![Shape::new()]
+                }
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // GlobalAveragePool: [N, C, *spatial] → [N, C, 1, 1, ...]
+        AiOp::GlobalAveragePool => {
+            if let Some(x) = inputs.first() {
+                if x.len() >= 2 {
+                    let mut shape = vec![x[0].clone(), x[1].clone()];
+                    for _ in 2..x.len() {
+                        shape.push(DimExpr::Concrete(1));
+                    }
+                    vec![Shape::from(shape)]
+                } else {
+                    vec![Shape::new()]
+                }
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // Resize: output shape from sizes input (known_i64_values via shape_known_values).
+        AiOp::Resize { .. } => {
+            if let Some(vals) = shape_known_values {
+                // sizes input gives absolute output dimensions.
+                let shape: Vec<DimExpr> = vals
+                    .iter()
+                    .map(|v| match v {
+                        Some(n) if *n > 0 => DimExpr::Concrete(*n as u64),
+                        _ => DimExpr::Dynamic,
+                    })
+                    .collect();
+                if shape.is_empty() {
+                    inputs.first().cloned().into_iter().collect()
+                } else {
+                    vec![Shape::from(shape)]
+                }
+            } else {
+                // No sizes — preserve input shape as fallback.
+                inputs.first().cloned().into_iter().collect()
+            }
+        }
+
+        // Pad: add pad amounts per dim. Pads from known_i64_values (input[1]).
+        AiOp::Pad { .. } => {
+            if let Some(x) = inputs.first() {
+                if let Some(pad_vals) = shape_known_values {
+                    // ONNX pads format: [x1_begin, x2_begin, ..., x1_end, x2_end, ...]
+                    let ndim = x.len();
+                    if pad_vals.len() == 2 * ndim {
+                        let shape: Vec<DimExpr> = (0..ndim)
+                            .map(|i| {
+                                let p_begin = pad_vals[i].unwrap_or(0);
+                                let p_end = pad_vals[ndim + i].unwrap_or(0);
+                                if let Some(d) = x[i].as_concrete() {
+                                    DimExpr::Concrete((d as i64 + p_begin + p_end) as u64)
+                                } else {
+                                    DimExpr::Dynamic
+                                }
+                            })
+                            .collect();
+                        vec![Shape::from(shape)]
+                    } else {
+                        inputs.first().cloned().into_iter().collect()
+                    }
+                } else {
+                    inputs.first().cloned().into_iter().collect()
+                }
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // ── Phase 2: Utility ops ────────────────────────────────────────────
+
+        // Additional reductions: same pattern as ReduceSum.
+        AiOp::ReduceProd { axes, keepdims }
+        | AiOp::ReduceL1 { axes, keepdims }
+        | AiOp::ReduceL2 { axes, keepdims } => {
+            if let Some(input) = inputs.first() {
+                vec![reduce_shape(input, axes, *keepdims)]
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // TopK: axis dim → K (from input[1] known value). Two outputs: values, indices.
+        AiOp::TopK { axis, .. } => {
+            if let Some(x) = inputs.first() {
+                if x.is_empty() {
+                    return vec![Shape::new(), Shape::new()];
+                }
+                let ax = normalize_axis(*axis, x.len());
+                let mut shape = x.clone();
+                // K comes from input[1] known_i64_values; if unavailable, dim is dynamic.
+                if ax < shape.len() {
+                    shape[ax] = DimExpr::Dynamic; // K is dynamic unless we have it
+                }
+                vec![shape.clone(), shape] // values, indices
+            } else {
+                vec![Shape::new(), Shape::new()]
+            }
+        }
+
+        // ScatterND: output = data shape (input[0]).
+        AiOp::ScatterND { .. } => {
+            inputs.first().cloned().into_iter().collect()
+        }
+
+        // NonZero: output = [rank, num_nonzero] (dynamic second dim).
+        AiOp::NonZero => {
+            if let Some(x) = inputs.first() {
+                let rank = x.len() as u64;
+                vec![Shape::from(vec![
+                    DimExpr::Concrete(rank),
+                    DimExpr::Dynamic,
+                ])]
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // OneHot: indices_shape + [depth] inserted at axis.
+        AiOp::OneHot { axis } => {
+            if let Some(indices) = inputs.first() {
+                let out_rank = indices.len() + 1;
+                let ax = normalize_axis(*axis, out_rank);
+                let mut shape = indices.to_vec();
+                shape.insert(ax, DimExpr::Dynamic); // depth is from input[1]
+                vec![Shape::from(shape)]
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // DepthToSpace: [N, C, H, W] → [N, C/bs², H*bs, W*bs]
+        AiOp::DepthToSpace { blocksize, .. } => {
+            if let Some(x) = inputs.first() {
+                if x.len() == 4 {
+                    let bs = *blocksize;
+                    let shape = vec![
+                        x[0].clone(), // N
+                        match x[1].as_concrete() {
+                            Some(c) => DimExpr::Concrete(c / (bs * bs)),
+                            None => DimExpr::Dynamic,
+                        },
+                        match x[2].as_concrete() {
+                            Some(h) => DimExpr::Concrete(h * bs),
+                            None => DimExpr::Dynamic,
+                        },
+                        match x[3].as_concrete() {
+                            Some(w) => DimExpr::Concrete(w * bs),
+                            None => DimExpr::Dynamic,
+                        },
+                    ];
+                    vec![Shape::from(shape)]
+                } else {
+                    inputs.first().cloned().into_iter().collect()
+                }
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // SpaceToDepth: [N, C, H, W] → [N, C*bs², H/bs, W/bs]
+        AiOp::SpaceToDepth { blocksize } => {
+            if let Some(x) = inputs.first() {
+                if x.len() == 4 {
+                    let bs = *blocksize;
+                    let shape = vec![
+                        x[0].clone(),
+                        match x[1].as_concrete() {
+                            Some(c) => DimExpr::Concrete(c * bs * bs),
+                            None => DimExpr::Dynamic,
+                        },
+                        match x[2].as_concrete() {
+                            Some(h) => DimExpr::Concrete(h / bs),
+                            None => DimExpr::Dynamic,
+                        },
+                        match x[3].as_concrete() {
+                            Some(w) => DimExpr::Concrete(w / bs),
+                            None => DimExpr::Dynamic,
+                        },
+                    ];
+                    vec![Shape::from(shape)]
+                } else {
+                    inputs.first().cloned().into_iter().collect()
+                }
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // Compress: dynamic on compressed axis (or flattened if axis=None).
+        AiOp::Compress { axis } => {
+            if let Some(x) = inputs.first() {
+                if let Some(ax) = axis {
+                    let a = normalize_axis(*ax, x.len());
+                    let mut shape = x.clone();
+                    if a < shape.len() {
+                        shape[a] = DimExpr::Dynamic;
+                    }
+                    vec![shape]
+                } else {
+                    // No axis: flatten and return 1-D dynamic.
+                    vec![Shape::from(vec![DimExpr::Dynamic])]
+                }
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // ── Phase 2: Scatter (already has ScatterND above) ──────────────────
+        AiOp::Scatter { .. } => {
+            // Output shape = data shape (input[0]).
+            inputs.first().cloned().into_iter().collect()
+        }
+
+        // ArgMax/ArgMin: reduce axis to 1 (or remove if !keepdims).
+        AiOp::ArgMax { axis, keepdims } | AiOp::ArgMin { axis, keepdims } => {
+            if let Some(x) = inputs.first() {
+                if x.is_empty() {
+                    return vec![Shape::new()];
+                }
+                let ax = normalize_axis(*axis, x.len());
+                let mut shape = Vec::new();
+                for (i, d) in x.iter().enumerate() {
+                    if i == ax {
+                        if *keepdims {
+                            shape.push(DimExpr::Concrete(1));
+                        }
+                    } else {
+                        shape.push(d.clone());
+                    }
+                }
+                vec![Shape::from(shape)]
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // Split: divide axis dim into parts. Multiple outputs.
+        AiOp::Split { axis, sizes } => {
+            if let Some(x) = inputs.first() {
+                if x.is_empty() {
+                    return sizes.iter().map(|_| Shape::new()).collect();
+                }
+                let ax = normalize_axis(*axis, x.len());
+                sizes
+                    .iter()
+                    .map(|&s| {
+                        let mut shape = x.clone();
+                        if ax < shape.len() {
+                            shape[ax] = DimExpr::Concrete(s);
+                        }
+                        shape
+                    })
+                    .collect()
+            } else {
+                sizes.iter().map(|_| Shape::new()).collect()
+            }
+        }
+
+        // Tile: multiply each dim by repeats.
+        AiOp::Tile { repeats } => {
+            if let Some(x) = inputs.first() {
+                let shape: Vec<DimExpr> = x
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| {
+                        let r = repeats.get(i).copied().unwrap_or(1);
+                        match d.as_concrete() {
+                            Some(v) => DimExpr::Concrete(v * r),
+                            None => DimExpr::Dynamic,
+                        }
+                    })
+                    .collect();
+                vec![Shape::from(shape)]
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // Gemm: [M, K] x [K, N] → [M, N] (with optional transposes).
+        AiOp::Gemm { trans_a, trans_b, .. } => {
+            if inputs.len() >= 2 && inputs[0].len() == 2 && inputs[1].len() == 2 {
+                let a = &inputs[0];
+                let b = &inputs[1];
+                let m = if *trans_a { a[1].clone() } else { a[0].clone() };
+                let n = if *trans_b { b[0].clone() } else { b[1].clone() };
+                vec![Shape::from(vec![m, n])]
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // GatherND: complex shape rule.
+        AiOp::GatherND { batch_dims } => {
+            if inputs.len() >= 2 && !inputs[0].is_empty() && !inputs[1].is_empty() {
+                let indices = &inputs[1];
+                let bd = *batch_dims as usize;
+                // Output = batch_dims from data + indices shape except last dim.
+                let mut shape: Vec<DimExpr> = inputs[0][..bd.min(inputs[0].len())].to_vec();
+                if indices.len() > 1 {
+                    shape.extend_from_slice(&indices[bd..indices.len() - 1]);
+                }
+                // If last dim of indices < data rank - batch_dims, append remaining data dims.
+                if let Some(last) = indices.last().and_then(|d| d.as_concrete()) {
+                    let data_remaining = inputs[0].len().saturating_sub(bd + last as usize);
+                    for i in 0..data_remaining {
+                        shape.push(inputs[0][bd + last as usize + i].clone());
+                    }
+                }
+                vec![Shape::from(shape)]
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // ── Phase 4: Control flow ops ───────────────────────────────────────
+        // If/Loop/Scan: we can't infer shapes without recursing into subgraphs.
+        // Return empty for now — Phase 4 will add subgraph shape prop.
+        AiOp::If { .. } | AiOp::Loop { .. } | AiOp::Scan { .. } => {
+            vec![Shape::new()]
+        }
+
         // Remaining custom ops: return empty (unknown shape).
         _ => vec![Shape::new()],
+    }
+}
+
+/// Compute pooling output dimension, with optional ceil_mode.
+fn pool_output_dim(in_dim: u64, effective_kernel: u64, stride: u64, p_begin: u64, p_end: u64, ceil_mode: bool) -> u64 {
+    let padded = in_dim + p_begin + p_end;
+    if padded < effective_kernel {
+        return 0;
+    }
+    let numerator = padded - effective_kernel;
+    if ceil_mode {
+        numerator.div_ceil(stride) + 1
+    } else {
+        numerator / stride + 1
     }
 }
 

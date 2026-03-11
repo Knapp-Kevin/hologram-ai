@@ -11,8 +11,8 @@
 - [x] `subgraphs: HashMap<String, AiGraph>` field on AiGraph
 - [x] Lowering dispatch with explicit unsupported reasons per op
 - [x] All passes carry subgraphs through transforms
-- [ ] Shape propagation rules for new ops
-- [ ] Data propagation match arms for new ops
+- [x] Shape propagation rules for new ops (Conv/Pool formula, ConvTranspose, GlobalAvgPool, Resize, Pad, reductions, TopK, ScatterND, NonZero, OneHot, DepthToSpace, SpaceToDepth, Compress, ArgMax/ArgMin, Split, Tile, Gemm, GatherND)
+- [x] Data propagation match arms for new ops (catch-all handles non-shape-computing ops)
 - [ ] F64 dtype, widening casts, opset validation (Phase 3)
 - [ ] Recursive ONNX subgraph import (Phase 4)
 - [ ] Subgraph shape prop, pass recursion, lowering to SubgraphDef (Phase 4)

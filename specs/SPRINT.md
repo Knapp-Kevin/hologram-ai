@@ -16,15 +16,16 @@ CLI: `compile`, `info`, `download` — nothing else.
 ### Phase 1: Vision-Critical Ops
 - [x] Add 9 AiOp variants: Conv, ConvTranspose, MaxPool, AveragePool, GlobalAveragePool, Resize, Pad, InstanceNorm, LRN
 - [x] Add ONNX op mappings + `attr_s()` accessor to OpContext
+- [x] Add shape propagation rules (Conv/Pool formula, Resize, Pad, etc.)
+- [x] Add data propagation match arms
 - [ ] Add dynamic param resolution for Pad/Resize (opset 11+ inputs)
-- [ ] Add shape propagation rules (Conv/Pool formula, Resize, Pad, etc.)
-- [ ] Add data propagation match arms
 - [x] Add lowering dispatch entries (Unsupported until hologram base adds FloatOp)
 
 ### Phase 2: Utility Ops
 - [x] Add 12 AiOp variants: ReduceProd, ReduceL1, ReduceL2, TopK, ScatterND, CumSum, NonZero, OneHot, DepthToSpace, SpaceToDepth, Compress, ReverseSequence
 - [x] Add ONNX mappings + quantization integration (QuantizeLinear, DequantizeLinear)
-- [ ] Add shape propagation + lowering (decompositions where possible)
+- [x] Add shape propagation rules for utility ops (reductions, TopK, ScatterND, NonZero, OneHot, DepthToSpace, SpaceToDepth, Compress)
+- [ ] Add lowering decompositions where possible (ReduceL1/L2, DepthToSpace, SpaceToDepth)
 
 ### Phase 3: Proto/Type Gaps
 - [ ] Add F64 dtype + ONNX type 11 mapping
