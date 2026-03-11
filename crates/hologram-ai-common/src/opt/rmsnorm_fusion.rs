@@ -230,9 +230,9 @@ fn match_rmsnorm_inner(
         AiOp::Pow if pow_node.inputs.len() >= 2 => {
             let a = pow_node.inputs[0];
             let b = pow_node.inputs[1];
-            if scalar_f32_param(b, graph).map_or(false, |v| (v - 2.0).abs() < 0.01) {
+            if scalar_f32_param(b, graph).is_some_and(|v| (v - 2.0).abs() < 0.01) {
                 a
-            } else if scalar_f32_param(a, graph).map_or(false, |v| (v - 2.0).abs() < 0.01) {
+            } else if scalar_f32_param(a, graph).is_some_and(|v| (v - 2.0).abs() < 0.01) {
                 b
             } else {
                 return None;
@@ -373,6 +373,7 @@ mod tests {
             warnings: vec![],
             dim_vars: Default::default(),
             shape_constraints: Default::default(),
+            subgraphs: HashMap::new(),
         }
     }
 

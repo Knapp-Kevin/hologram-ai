@@ -829,8 +829,7 @@ fn concretize_all_dims(mut graph: AiGraph) -> anyhow::Result<AiGraph> {
                 // Emit as 0-sentinel: runtime resolves from actual token count.
                 entry.fixed = Some(0);
             } else {
-                let default_val = if name_lower.contains("batch") { 1u64 } else { 1u64 };
-                entry.upper = Some(default_val);
+                entry.upper = Some(1u64);
             }
         }
     }

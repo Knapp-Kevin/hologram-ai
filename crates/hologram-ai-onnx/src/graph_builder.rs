@@ -266,6 +266,7 @@ pub fn build_ai_graph(
             warnings,
             dim_vars,
             shape_constraints: Default::default(),
+            subgraphs: HashMap::new(),
         },
         oracle,
     ))

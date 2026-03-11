@@ -166,6 +166,68 @@ pub enum AiOp {
         axis: i64,
     },
 
+    // ── Convolution / pooling ────────────────────────────────────────────────
+    /// N-D convolution (1D, 2D, 3D). Inputs: [X, W, bias?].
+    Conv {
+        kernel_shape: Vec<u64>,
+        strides: Vec<u64>,
+        pads: Vec<u64>,
+        dilations: Vec<u64>,
+        group: u64,
+        auto_pad: String,
+    },
+    /// N-D transposed convolution. Inputs: [X, W, bias?].
+    ConvTranspose {
+        kernel_shape: Vec<u64>,
+        strides: Vec<u64>,
+        pads: Vec<u64>,
+        output_padding: Vec<u64>,
+        dilations: Vec<u64>,
+        group: u64,
+        auto_pad: String,
+    },
+    /// Max pooling. Inputs: [X].
+    MaxPool {
+        kernel_shape: Vec<u64>,
+        strides: Vec<u64>,
+        pads: Vec<u64>,
+        dilations: Vec<u64>,
+        auto_pad: String,
+        ceil_mode: bool,
+    },
+    /// Average pooling. Inputs: [X].
+    AveragePool {
+        kernel_shape: Vec<u64>,
+        strides: Vec<u64>,
+        pads: Vec<u64>,
+        count_include_pad: bool,
+        auto_pad: String,
+        ceil_mode: bool,
+    },
+    /// Global average pooling: spatial dims → 1.
+    GlobalAveragePool,
+    /// Resize/Upsample. Inputs: [X, roi?, scales?, sizes?].
+    Resize {
+        mode: String,
+        coordinate_transform_mode: String,
+        nearest_mode: String,
+    },
+    /// Padding. Inputs: [X, pads, constant_value?].
+    Pad {
+        mode: String,
+    },
+    /// Instance normalization. Inputs: [X, scale, bias].
+    InstanceNorm {
+        epsilon: f32,
+    },
+    /// Local response normalization.
+    LRN {
+        alpha: f32,
+        beta: f32,
+        bias: f32,
+        size: u64,
+    },
+
     // ── Elementwise binary ─────────────────────────────────────────────────
     Add,
     Sub,
@@ -228,6 +290,61 @@ pub enum AiOp {
         keepdims: bool,
     },
 
+    // ── Additional reductions ──────────────────────────────────────────────
+    ReduceProd {
+        axes: Vec<i64>,
+        keepdims: bool,
+    },
+    ReduceL1 {
+        axes: Vec<i64>,
+        keepdims: bool,
+    },
+    ReduceL2 {
+        axes: Vec<i64>,
+        keepdims: bool,
+    },
+
+    // ── Data selection / manipulation ────────────────────────────────────────
+    /// Return top-K largest or smallest elements. Inputs: [X, K].
+    TopK {
+        axis: i64,
+        largest: bool,
+        sorted: bool,
+    },
+    /// Scatter updates into a tensor using N-D indices. Inputs: [data, indices, updates].
+    ScatterND {
+        reduce: ScatterReduce,
+    },
+    /// Cumulative sum along an axis. Inputs: [X, axis_tensor].
+    CumSum {
+        exclusive: bool,
+        reverse: bool,
+    },
+    /// Return indices of non-zero elements.
+    NonZero,
+    /// One-hot encoding. Inputs: [indices, depth, values].
+    OneHot {
+        axis: i64,
+    },
+    /// Rearrange depth to spatial blocks. Inputs: [X].
+    DepthToSpace {
+        blocksize: u64,
+        mode: String,
+    },
+    /// Rearrange spatial blocks to depth. Inputs: [X].
+    SpaceToDepth {
+        blocksize: u64,
+    },
+    /// Select elements along an axis using a boolean mask. Inputs: [X, condition].
+    Compress {
+        axis: Option<i64>,
+    },
+    /// Reverse variable-length sequences. Inputs: [X, sequence_lens].
+    ReverseSequence {
+        batch_axis: i64,
+        time_axis: i64,
+    },
+
     // ── Embeddings ─────────────────────────────────────────────────────────
     /// token_ids → embedding vectors via weight-table lookup.
     Embed,
@@ -259,6 +376,26 @@ pub enum AiOp {
     FusedSwiGLU,
     /// x + residual → layernorm
     FusedLayerNormResidual,
+
+    // ── Control flow (subgraph ops) ────────────────────────────────────────
+    /// Conditional: execute then_branch or else_branch subgraph based on
+    /// condition input. Subgraph names reference `AiGraph.subgraphs` keys.
+    If {
+        then_branch: String,
+        else_branch: Option<String>,
+    },
+    /// Loop: iterate body subgraph up to max_trip_count times (or until
+    /// condition output is false). Carries state tensors between iterations.
+    Loop {
+        body: String,
+        max_trip_count: Option<i64>,
+    },
+    /// Scan: iterate body subgraph over a sequence dimension, accumulating
+    /// outputs. Similar to functional fold/scan.
+    Scan {
+        body: String,
+        num_scan_inputs: u32,
+    },
 
     // ── Type / control ─────────────────────────────────────────────────────
     Cast {
@@ -344,7 +481,11 @@ impl AiOp {
             | AiOp::FusedLayerNormResidual
             | AiOp::KvSlotWrite { .. }
             | AiOp::KvSlotRead { .. }
-            | AiOp::Quantize { .. } => ShapePreserving,
+            | AiOp::Quantize { .. }
+            | AiOp::InstanceNorm { .. }
+            | AiOp::LRN { .. }
+            | AiOp::CumSum { .. }
+            | AiOp::ReverseSequence { .. } => ShapePreserving,
 
             // ── Custom: op-specific shape/dtype/value rules ───────────────
             AiOp::MatMul
@@ -383,7 +524,30 @@ impl AiOp {
             | AiOp::QuantizedMatMul { .. }
             | AiOp::Cast { .. }
             | AiOp::Constant { .. }
-            | AiOp::Opaque { .. } => Custom,
+            | AiOp::Opaque { .. }
+            // Phase 1: vision ops
+            | AiOp::Conv { .. }
+            | AiOp::ConvTranspose { .. }
+            | AiOp::MaxPool { .. }
+            | AiOp::AveragePool { .. }
+            | AiOp::GlobalAveragePool
+            | AiOp::Resize { .. }
+            | AiOp::Pad { .. }
+            // Phase 2: utility ops
+            | AiOp::ReduceProd { .. }
+            | AiOp::ReduceL1 { .. }
+            | AiOp::ReduceL2 { .. }
+            | AiOp::TopK { .. }
+            | AiOp::ScatterND { .. }
+            | AiOp::NonZero
+            | AiOp::OneHot { .. }
+            | AiOp::DepthToSpace { .. }
+            | AiOp::SpaceToDepth { .. }
+            | AiOp::Compress { .. }
+            // Phase 4: control flow
+            | AiOp::If { .. }
+            | AiOp::Loop { .. }
+            | AiOp::Scan { .. } => Custom,
         }
     }
 }

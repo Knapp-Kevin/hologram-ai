@@ -388,6 +388,7 @@ impl<'a> GraphAssembler<'a> {
             warnings: self.warnings,
             dim_vars: self.dim_vars,
             shape_constraints: ConstraintStore::default(),
+            subgraphs: HashMap::new(),
         })
     }
 }

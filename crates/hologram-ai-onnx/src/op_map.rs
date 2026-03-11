@@ -34,6 +34,14 @@ impl<'a> OpContext<'a> {
             .find(|a| a.name == name)
             .map(|a| a.floats.as_slice())
     }
+
+    pub fn attr_s(&self, name: &str) -> Option<String> {
+        self.attrs
+            .iter()
+            .find(|a| a.name == name)
+            .filter(|a| !a.s.is_empty())
+            .map(|a| String::from_utf8_lossy(&a.s).into_owned())
+    }
 }
 
 /// Convert an ONNX node op to `AiOp`.
@@ -254,6 +262,117 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
             scale: ctx.attr_f("scale"),
             causal: ctx.attr_i("unidirectional").unwrap_or(0) != 0,
         },
+
+        // ── Convolution / pooling ────────────────────────────────────────
+        "Conv" => Conv {
+            kernel_shape: ctx.attr_ints("kernel_shape").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            strides: ctx.attr_ints("strides").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            pads: ctx.attr_ints("pads").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            dilations: ctx.attr_ints("dilations").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            group: ctx.attr_i("group").unwrap_or(1) as u64,
+            auto_pad: ctx.attr_s("auto_pad").unwrap_or_default(),
+        },
+        "ConvTranspose" => ConvTranspose {
+            kernel_shape: ctx.attr_ints("kernel_shape").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            strides: ctx.attr_ints("strides").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            pads: ctx.attr_ints("pads").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            output_padding: ctx.attr_ints("output_padding").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            dilations: ctx.attr_ints("dilations").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            group: ctx.attr_i("group").unwrap_or(1) as u64,
+            auto_pad: ctx.attr_s("auto_pad").unwrap_or_default(),
+        },
+        "MaxPool" => MaxPool {
+            kernel_shape: ctx.attr_ints("kernel_shape").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            strides: ctx.attr_ints("strides").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            pads: ctx.attr_ints("pads").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            dilations: ctx.attr_ints("dilations").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            auto_pad: ctx.attr_s("auto_pad").unwrap_or_default(),
+            ceil_mode: ctx.attr_i("ceil_mode").unwrap_or(0) != 0,
+        },
+        "AveragePool" => AveragePool {
+            kernel_shape: ctx.attr_ints("kernel_shape").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            strides: ctx.attr_ints("strides").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            pads: ctx.attr_ints("pads").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            count_include_pad: ctx.attr_i("count_include_pad").unwrap_or(0) != 0,
+            auto_pad: ctx.attr_s("auto_pad").unwrap_or_default(),
+            ceil_mode: ctx.attr_i("ceil_mode").unwrap_or(0) != 0,
+        },
+        "GlobalAveragePool" => GlobalAveragePool,
+        "Resize" | "Upsample" => Resize {
+            mode: ctx.attr_s("mode").unwrap_or_else(|| "nearest".into()),
+            coordinate_transform_mode: ctx.attr_s("coordinate_transformation_mode").unwrap_or_else(|| "half_pixel".into()),
+            nearest_mode: ctx.attr_s("nearest_mode").unwrap_or_else(|| "round_prefer_floor".into()),
+        },
+        "Pad" => Pad {
+            mode: ctx.attr_s("mode").unwrap_or_else(|| "constant".into()),
+        },
+        "InstanceNormalization" => InstanceNorm {
+            epsilon: ctx.attr_f("epsilon").unwrap_or(1e-5),
+        },
+        "LRN" => LRN {
+            alpha: ctx.attr_f("alpha").unwrap_or(1e-4),
+            beta: ctx.attr_f("beta").unwrap_or(0.75),
+            bias: ctx.attr_f("bias").unwrap_or(1.0),
+            size: ctx.attr_i("size").unwrap_or(5) as u64,
+        },
+
+        // ── Additional reductions ───────────────────────────────────────
+        "ReduceProd" => ReduceProd {
+            axes: reduce_axes(ctx),
+            keepdims: keepdims(ctx),
+        },
+        "ReduceL1" => ReduceL1 {
+            axes: reduce_axes(ctx),
+            keepdims: keepdims(ctx),
+        },
+        "ReduceL2" => ReduceL2 {
+            axes: reduce_axes(ctx),
+            keepdims: keepdims(ctx),
+        },
+
+        // ── Data selection / manipulation ────────────────────────────────
+        "TopK" => TopK {
+            axis: ctx.attr_i("axis").unwrap_or(-1),
+            largest: ctx.attr_i("largest").unwrap_or(1) != 0,
+            sorted: ctx.attr_i("sorted").unwrap_or(1) != 0,
+        },
+        "ScatterND" => ScatterND {
+            reduce: match ctx.attr_s("reduction").as_deref() {
+                Some("add") => hologram_ai_common::ScatterReduce::Add,
+                Some("mul") => hologram_ai_common::ScatterReduce::Mul,
+                Some("min") => hologram_ai_common::ScatterReduce::Min,
+                Some("max") => hologram_ai_common::ScatterReduce::Max,
+                _ => hologram_ai_common::ScatterReduce::None,
+            },
+        },
+        "CumSum" => CumSum {
+            exclusive: ctx.attr_i("exclusive").unwrap_or(0) != 0,
+            reverse: ctx.attr_i("reverse").unwrap_or(0) != 0,
+        },
+        "NonZero" => NonZero,
+        "OneHot" => OneHot {
+            axis: ctx.attr_i("axis").unwrap_or(-1),
+        },
+        "DepthToSpace" => DepthToSpace {
+            blocksize: ctx.attr_i("blocksize").unwrap_or(1) as u64,
+            mode: ctx.attr_s("mode").unwrap_or_else(|| "DCR".into()),
+        },
+        "SpaceToDepth" => SpaceToDepth {
+            blocksize: ctx.attr_i("blocksize").unwrap_or(1) as u64,
+        },
+        "Compress" => Compress {
+            axis: ctx.attr_i("axis"),
+        },
+        "ReverseSequence" => ReverseSequence {
+            batch_axis: ctx.attr_i("batch_axis").unwrap_or(1),
+            time_axis: ctx.attr_i("time_axis").unwrap_or(0),
+        },
+
+        // ── Quantization ────────────────────────────────────────────────
+        "QuantizeLinear" => Quantize {
+            scheme: hologram_ai_quant::QuantScheme::Q8_0,
+        },
+        "DequantizeLinear" => Dequantize,
 
         // ── Fallback ──────────────────────────────────────────────────────
         _ => Opaque {

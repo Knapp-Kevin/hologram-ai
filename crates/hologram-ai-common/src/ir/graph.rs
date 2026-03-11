@@ -81,6 +81,9 @@ pub struct AiGraph {
     pub dim_vars: DimVarTable,
     /// Shape constraints collected during import and shape propagation.
     pub shape_constraints: ConstraintStore,
+    /// Named subgraphs for control flow ops (If branches, Loop/Scan bodies).
+    /// Empty for models without control flow — zero cost.
+    pub subgraphs: HashMap<String, AiGraph>,
 }
 
 impl AiGraph {
@@ -259,6 +262,7 @@ mod tests {
             warnings: vec![],
             dim_vars: DimVarTable::default(),
             shape_constraints: ConstraintStore::default(),
+            subgraphs: HashMap::new(),
         }
     }
 

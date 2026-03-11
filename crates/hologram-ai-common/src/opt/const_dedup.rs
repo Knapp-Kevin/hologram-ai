@@ -160,6 +160,7 @@ mod tests {
             warnings: vec![],
             dim_vars: Default::default(),
             shape_constraints: Default::default(),
+            subgraphs: HashMap::new(),
         }
     }
 

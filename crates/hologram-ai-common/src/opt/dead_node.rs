@@ -32,6 +32,7 @@ impl Pass for DeadNodeElimination {
             warnings: graph.warnings,
             dim_vars: graph.dim_vars,
             shape_constraints: graph.shape_constraints,
+            subgraphs: graph.subgraphs,
         })
     }
 }
@@ -95,6 +96,7 @@ mod tests {
             warnings: vec![],
             dim_vars: Default::default(),
             shape_constraints: Default::default(),
+            subgraphs: HashMap::new(),
         }
     }
 

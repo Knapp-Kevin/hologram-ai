@@ -614,6 +614,7 @@ mod tests {
             warnings: vec![],
             dim_vars: DimVarTable::default(),
             shape_constraints: ConstraintStore::default(),
+            subgraphs: HashMap::new(),
         }
     }
 

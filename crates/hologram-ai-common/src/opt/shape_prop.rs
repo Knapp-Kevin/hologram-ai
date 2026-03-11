@@ -850,6 +850,7 @@ mod tests {
             warnings: vec![],
             dim_vars: Default::default(),
             shape_constraints: Default::default(),
+            subgraphs: HashMap::new(),
         };
 
         let pass = ShapePropagation;
@@ -888,6 +889,7 @@ mod tests {
             warnings: vec![],
             dim_vars: Default::default(),
             shape_constraints: Default::default(),
+            subgraphs: HashMap::new(),
         };
 
         let pass = ShapePropagation;
@@ -946,6 +948,7 @@ mod tests {
             warnings: vec![],
             dim_vars: Default::default(),
             shape_constraints: Default::default(),
+            subgraphs: HashMap::new(),
         };
 
         let pass = ShapePropagation;
@@ -996,6 +999,7 @@ mod tests {
             warnings: vec![],
             dim_vars: Default::default(),
             shape_constraints: Default::default(),
+            subgraphs: HashMap::new(),
         };
 
         let pass = ShapePropagation;
@@ -1036,6 +1040,7 @@ mod tests {
             warnings: vec![],
             dim_vars: Default::default(),
             shape_constraints: Default::default(),
+            subgraphs: HashMap::new(),
         };
 
         let pass = ShapePropagation;
@@ -1065,6 +1070,7 @@ mod tests {
             warnings: vec![],
             dim_vars: Default::default(),
             shape_constraints: Default::default(),
+            subgraphs: HashMap::new(),
         }
     }
 
@@ -1119,6 +1125,7 @@ mod tests {
             warnings: vec![],
             dim_vars: Default::default(),
             shape_constraints: Default::default(),
+            subgraphs: HashMap::new(),
         };
 
         let g2 = ShapePropagation.run(g).unwrap();

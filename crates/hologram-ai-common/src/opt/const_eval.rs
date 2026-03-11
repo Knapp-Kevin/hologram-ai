@@ -93,7 +93,7 @@ impl Pass for ConstantEvaluation {
                 // Skip empty results: a 0-element tensor means a dynamic dim
                 // was substituted with 0 (e.g. seq_len sentinel). Materializing
                 // it as an empty constant would fail validation.
-                if result_shape.iter().any(|&d| d == 0) || result_bytes.is_empty() {
+                if result_shape.contains(&0) || result_bytes.is_empty() {
                     continue;
                 }
 
@@ -1135,6 +1135,7 @@ mod tests {
             warnings: vec![],
             dim_vars: Default::default(),
             shape_constraints: Default::default(),
+            subgraphs: HashMap::new(),
         }
     }
 
