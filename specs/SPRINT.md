@@ -14,16 +14,16 @@ CLI: `compile`, `info`, `download` — nothing else.
 ## In Progress
 
 ### Phase 1: Vision-Critical Ops
-- [ ] Add 9 AiOp variants: Conv, ConvTranspose, MaxPool, AveragePool, GlobalAveragePool, Resize, Pad, InstanceNorm, LRN
-- [ ] Add ONNX op mappings + `attr_s()` accessor to OpContext
+- [x] Add 9 AiOp variants: Conv, ConvTranspose, MaxPool, AveragePool, GlobalAveragePool, Resize, Pad, InstanceNorm, LRN
+- [x] Add ONNX op mappings + `attr_s()` accessor to OpContext
 - [ ] Add dynamic param resolution for Pad/Resize (opset 11+ inputs)
 - [ ] Add shape propagation rules (Conv/Pool formula, Resize, Pad, etc.)
 - [ ] Add data propagation match arms
-- [ ] Add lowering dispatch entries (Unsupported until hologram base adds FloatOp)
+- [x] Add lowering dispatch entries (Unsupported until hologram base adds FloatOp)
 
 ### Phase 2: Utility Ops
-- [ ] Add 12 AiOp variants: ReduceProd, ReduceL1, ReduceL2, TopK, ScatterND, CumSum, NonZero, OneHot, DepthToSpace, SpaceToDepth, Compress, ReverseSequence
-- [ ] Add ONNX mappings + quantization integration (QuantizeLinear, DequantizeLinear, MatMulInteger)
+- [x] Add 12 AiOp variants: ReduceProd, ReduceL1, ReduceL2, TopK, ScatterND, CumSum, NonZero, OneHot, DepthToSpace, SpaceToDepth, Compress, ReverseSequence
+- [x] Add ONNX mappings + quantization integration (QuantizeLinear, DequantizeLinear)
 - [ ] Add shape propagation + lowering (decompositions where possible)
 
 ### Phase 3: Proto/Type Gaps
@@ -33,8 +33,8 @@ CLI: `compile`, `info`, `download` — nothing else.
 - [ ] Document and handle optional input semantics
 
 ### Phase 4: Subgraph Support (If/Loop/Scan)
-- [ ] Add `subgraphs: HashMap<String, AiGraph>` to AiGraph
-- [ ] Add AiOp::If, Loop, Scan variants
+- [x] Add `subgraphs: HashMap<String, AiGraph>` to AiGraph
+- [x] Add AiOp::If, Loop, Scan variants
 - [ ] Add recursive ONNX import with lexical scope capture
 - [ ] Add subgraph shape propagation + optimization pass recursion
 - [ ] Add lowering to hologram's native SubgraphDef + CallSubgraph

@@ -4,6 +4,20 @@
 **Branch:** `feat/onnx-last-mile`
 **Date:** 2026-03-11
 
+### Progress
+- [x] 24 AiOp variants added (9 vision + 12 utility + 3 control flow)
+- [x] ONNX op mappings for all new ops (Conv, Pool, Resize, Pad, TopK, ScatterND, etc.)
+- [x] `attr_s()` string accessor on OpContext
+- [x] `subgraphs: HashMap<String, AiGraph>` field on AiGraph
+- [x] Lowering dispatch with explicit unsupported reasons per op
+- [x] All passes carry subgraphs through transforms
+- [ ] Shape propagation rules for new ops
+- [ ] Data propagation match arms for new ops
+- [ ] F64 dtype, widening casts, opset validation (Phase 3)
+- [ ] Recursive ONNX subgraph import (Phase 4)
+- [ ] Subgraph shape prop, pass recursion, lowering to SubgraphDef (Phase 4)
+- [ ] Long-tail ops + conformance tests (Phase 5)
+
 ## Context
 
 hologram-ai compiles TinyLlama 1.1B end-to-end (ONNX → .holo), but the ONNX
