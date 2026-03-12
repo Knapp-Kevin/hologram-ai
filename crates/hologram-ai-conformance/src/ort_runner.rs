@@ -49,6 +49,59 @@ pub mod runner {
 
         Ok(data.to_vec())
     }
+
+    /// An intermediate tensor captured from ORT execution.
+    pub struct IntermediateTensor {
+        pub name: String,
+        pub shape: Vec<usize>,
+        pub data: Vec<f32>,
+    }
+
+    /// Run an ONNX model through ORT, returning ALL named outputs.
+    ///
+    /// Unlike `run_onnx_bytes()` which returns only the first output's data,
+    /// this returns every output tensor with its name and shape. Works best
+    /// with models built via `onnx_builder::multi_output_model()` that
+    /// already expose intermediate tensors as graph outputs.
+    pub fn run_onnx_all_outputs(
+        model_bytes: &[u8],
+        inputs: Vec<OrtInput>,
+    ) -> Result<Vec<IntermediateTensor>> {
+        let mut session = Session::builder()
+            .context("failed to create ORT session builder")?
+            .commit_from_memory(model_bytes)
+            .context("failed to load ONNX model into ORT")?;
+
+        let tensors: Vec<Tensor<f32>> = inputs
+            .iter()
+            .map(|inp| {
+                let shape: Vec<i64> = inp.shape.iter().map(|&d| d as i64).collect();
+                Tensor::<f32>::from_array((shape, inp.data.clone()))
+                    .context("creating ORT input tensor")
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let ort_inputs: Vec<(String, ort::value::DynValue)> = inputs
+            .iter()
+            .zip(tensors)
+            .map(|(inp, tensor)| (inp.name.clone(), tensor.into_dyn()))
+            .collect();
+
+        let outputs = session.run(ort_inputs).context("ORT session run failed")?;
+
+        let mut result = Vec::new();
+        for (name, value) in outputs.iter() {
+            if let Ok((shape, data)) = value.try_extract_tensor::<f32>() {
+                result.push(IntermediateTensor {
+                    name: name.to_string(),
+                    shape: shape.iter().map(|&d| d as usize).collect(),
+                    data: data.to_vec(),
+                });
+            }
+        }
+
+        Ok(result)
+    }
 }
 
 /// Build a minimal single-op ONNX model as raw protobuf bytes.
@@ -184,23 +237,43 @@ pub mod onnx_builder {
         )
     }
 
+    /// Build a multi-node ONNX model where ALL intermediate tensors are
+    /// exposed as graph outputs, enabling node-by-node comparison with ORT.
+    ///
+    /// `nodes` defines the graph topology. All node outputs (intermediate
+    /// and final) appear in the graph's output list. Graph inputs and
+    /// initializers are passed separately.
+    pub fn multi_output_model(
+        nodes: &[Node],
+        inputs: &[(&str, &[usize])],
+        initializers: &[Initializer],
+    ) -> Vec<u8> {
+        // All node outputs become graph outputs.
+        let all_outputs: Vec<(&str, &[usize])> = nodes
+            .iter()
+            .flat_map(|n| n.outputs.iter().map(|&name| (name, &[][..])))
+            .collect();
+
+        build_multi_node_model(nodes, inputs, &all_outputs, initializers)
+    }
+
     // ── Protobuf encoding helpers ───────────────────────────────────────────
 
-    enum AttrVal {
+    pub enum AttrVal {
         Int(i64),
         Float(f32),
         Ints(Vec<i64>),
     }
 
-    struct Node {
-        op_type: &'static str,
-        inputs: Vec<&'static str>,
-        outputs: Vec<&'static str>,
-        attrs: Vec<(&'static str, AttrVal)>,
+    pub struct Node {
+        pub op_type: &'static str,
+        pub inputs: Vec<&'static str>,
+        pub outputs: Vec<&'static str>,
+        pub attrs: Vec<(&'static str, AttrVal)>,
     }
 
     impl Node {
-        fn new(op_type: &'static str, inputs: &[&'static str], outputs: &[&'static str]) -> Self {
+        pub fn new(op_type: &'static str, inputs: &[&'static str], outputs: &[&'static str]) -> Self {
             Self {
                 op_type,
                 inputs: inputs.to_vec(),
@@ -209,7 +282,7 @@ pub mod onnx_builder {
             }
         }
 
-        fn with_attrs(
+        pub fn with_attrs(
             op_type: &'static str,
             inputs: &[&'static str],
             outputs: &[&'static str],
@@ -224,14 +297,14 @@ pub mod onnx_builder {
         }
     }
 
-    struct Initializer {
-        name: &'static str,
-        data: Vec<f32>,
-        shape: Vec<usize>,
+    pub struct Initializer {
+        pub name: &'static str,
+        pub data: Vec<f32>,
+        pub shape: Vec<usize>,
     }
 
     impl Initializer {
-        fn scalar(name: &'static str, val: f32) -> Self {
+        pub fn scalar(name: &'static str, val: f32) -> Self {
             Self { name, data: vec![val], shape: vec![] }
         }
     }

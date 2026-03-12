@@ -12,6 +12,7 @@
 //! - `ort_runner` — ORT session management + ONNX model builder (feature-gated)
 
 pub mod comparator;
+pub mod exec_comparator;
 pub mod ort_runner;
 pub mod reference;
 pub mod tolerance;

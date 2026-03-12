@@ -33,9 +33,9 @@ CLI: `compile`, `info`, `download` — nothing else.
 
 #### Phase 3: Layer D — Execution Conformance Harness (hologram-ai repo)
 - [x] Add `compile_with_debug_info()` to `ModelCompiler` (ONNX name → NodeId map)
-- [ ] Add ORT intermediate tensor capture in `ort_runner.rs`
-- [ ] Add `exec_comparator.rs` — node-by-node comparison with tolerances
-- [ ] Add `tests/exec_conformance.rs` — multi-node ONNX integration tests
+- [x] Add ORT intermediate tensor capture in `ort_runner.rs`
+- [x] Add `exec_comparator.rs` — node-by-node comparison with tolerances (5 unit tests)
+- [x] Add `tests/exec_conformance.rs` — multi-node ONNX integration tests (7 tests, `conformance` feature-gated)
 
 ---
 
