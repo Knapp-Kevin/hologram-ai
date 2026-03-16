@@ -2,13 +2,16 @@
 
 ## Sprint Goal
 
-**Execution Conformance Testing:** Validate the full compile → lower → execute
-pipeline, not just individual kernels. Catch shape propagation errors, dynamic
-dim sentinel failures, and dtype confusion at compile time and via ORT comparison.
-See `specs/plans/006-execution-conformance.md`.
+**ShapeContextGraph — Compile-Time Shape Projection (Plan 008):** Replace the
+brute-force `ParamRecipe`/0-sentinel mechanism with a formalized `ShapeContextGraph`
+that maps each operation's output shape derivation using hologram's `ShapeSpec`/`ShapeDim`
+language. A single topological walk at runtime projects all shapes forward from concrete
+inputs, enabling shape-polymorphic compilation (same `.holo` archive for any `seq_len`,
+`batch`, etc.). See `specs/plans/008-shape-context-graph.md`.
 
-**Previous sprint (complete):** Kernel Conformance Testing (Plan 005) — 187+ tests.
-See `specs/plans/005-conformance-testing.md`.
+**Previous sprint (complete):** Execution Conformance Testing (Plan 006) + TinyLlama
+E2E (feat/tinyllama-e2e) — conformance harness, concat axis fix, broadcast inflation fix,
+ONNX model runs end-to-end. See `specs/plans/006-execution-conformance.md`.
 
 **Design principle:** hologram-ai is a compiler only (ADR-0016). It ships
 zero runtime code. All kernels belong in hologram base crate.
@@ -17,6 +20,46 @@ CLI: `compile`, `info`, `download` — nothing else.
 ---
 
 ## In Progress
+
+### ShapeContextGraph (Plan 008)
+
+#### Step 1 — `AiOp → ShapeSpecRepr` translator
+- [ ] Create `crates/hologram-ai-common/src/lower/shape_spec_bridge.rs`
+- [ ] Implement `ai_op_to_shape_spec()` using `OpCategory` for structural classification
+- [ ] Handle Custom ops: MatMul, Reshape, Expand, Gather, Concat, Conv
+- [ ] Unit tests: all OpCategory variants + custom shape extraction
+
+#### Step 2 — Build `ShapeContextGraph` during lowering
+- [ ] Add `ShapeContextGraph`, `ShapeProjectionEntry`, `ShapeSpecRepr`, `ShapeDimRepr` types to `exec_context.rs`
+- [ ] Emit seeds for fully-concrete output nodes in `builder.rs`
+- [ ] Emit `ShapeProjectionEntry` per node after lowering loop
+- [ ] Add `ShapeContextGraph` to `ExecContext` and archive pipeline
+
+#### Step 3 — Runtime `walk_shape_context()`
+- [ ] Implement `walk_shape_context()` in `exec_context.rs`
+- [ ] Integrate with hologram's `resolve_float_shape()` for each entry
+- [ ] Handle `shape_value_input` (read bytes from `BufferArena` for Reshape/Expand)
+- [ ] Unit tests: seed propagation, symbolic seq_len resolution, Expand example
+
+#### Step 4 — Retire `ParamRecipe` for shape-resolved dims
+- [ ] In `strategy.rs`: skip `DimVar`/`RuntimeInferred` recipes for dims covered by `ShapeContextGraph`
+- [ ] Keep recipes only for true kernel scalar params not covered by `resolve_dynamic_sizes()`
+
+#### Step 5 — Extend hologram `resolve_dynamic_sizes()`
+- [ ] Cover `Attention { head_dim: 0 }` — infer from Q input shape
+- [ ] Cover `Embed { dim: 0 }` — infer from embedding table shape
+- [ ] Cover `Concat { size_a: 0, size_b: 0 }` — infer from input shapes in ShapeMap
+- [ ] Verify: no `ParamRecipe::DimVar` / `RuntimeInferred` remain in final archive
+
+#### Verification
+- [ ] `cargo test -p hologram-ai-common` — shape_spec_bridge + walk_shape_context unit tests
+- [ ] `cargo test -p hologram-ai-conformance` — exec conformance against ORT
+- [ ] `cargo test -p hologram-ai --features e2e -- tinyllama` — variable seq_len (1, 7, 128, 512)
+- [ ] Assert ShapeMap matches ORT intermediates at every node
+
+---
+
+## Previous Sprint (Complete): Execution Conformance + TinyLlama E2E
 
 ### Execution Conformance Testing (Plan 006)
 
