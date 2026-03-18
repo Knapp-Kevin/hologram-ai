@@ -222,14 +222,12 @@ impl Pass for DataPropagation {
             if !is_integer_tensor {
                 continue;
             }
-            // Only materialize if all values are concrete and non-empty.
-            // An empty list means a 0-element tensor (dynamic dim = 0 sentinel)
-            // — skip to avoid creating invalid empty params.
+            if vals.is_empty() {
+                continue;
+            }
             if vals.iter().all(|v| v.is_some()) {
+                // All values concrete — materialize directly.
                 let concrete: Vec<i64> = vals.iter().map(|v| v.unwrap()).collect();
-                if concrete.is_empty() {
-                    continue;
-                }
                 let bytes: Vec<u8> = concrete.iter().flat_map(|v| v.to_le_bytes()).collect();
                 let shape = crate::ir::shape_from_concrete(&[concrete.len() as u64]);
                 let info = TensorInfo::new(DType::INT64, shape);

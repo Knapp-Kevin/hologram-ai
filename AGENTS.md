@@ -128,6 +128,75 @@ This applies to:
 
 The `shape_chain.rs` tests in hologram base (`hologram/crates/hologram-exec/tests/shape_chain.rs`) cover dispatch-level correctness for individual ops. The `exec_conformance.rs` tests cover full ONNX pipeline correctness end-to-end (compile + execute).
 
+## Fixture-Driven Regression Testing
+
+When a full model (TinyLlama, etc.) produces incorrect output, use this
+workflow to isolate the bug into a minimal, reproducible fixture.
+
+### Workflow: Model failure → Minimal fixture → Conformance test → Fix
+
+#### Phase 1: Identify the failing subgraph
+1. Compile the full model and run it (`cargo test -p hologram-ai --features e2e`)
+2. Examine diagnostics: shape warnings, NaN detector, output quality
+3. Identify the suspect op or op-chain (e.g., GQA kernel, SwiGLU, RoPE)
+4. Determine the path: **ONNX-decomposed** (individual ops) or **fused kernel** (GGUF `AiOp`)
+
+#### Phase 2: Create a minimal fixture file
+Generate a `.onnx` fixture in `crates/hologram-ai-conformance/fixtures/`:
+
+- Add a Python generator function to `fixtures/generate.py` that builds the
+  minimal ONNX subgraph (typically 2–20 nodes) reproducing the failure
+- Use small dimensions (seq=4–8, hidden=16–64) for fast CI execution
+- Run `python3 crates/hologram-ai-conformance/fixtures/generate.py` to create the file
+- The fixture file serves as the ORT reference — loaded via `fixtures::load("name")`
+
+#### Phase 3: Write the conformance test
+
+**For ONNX-path bugs (decomposed ops):**
+```rust
+let onnx_bytes = fixtures::load("my_fixture").expect("run generate.py");
+let ort_out = run_onnx_all_outputs(&onnx_bytes, inputs)?;
+let holo_out = compile_and_execute(&onnx_bytes, &inputs);
+assert!(compare_outputs(&holo_out, &ort_out[0].data, tol).passed);
+```
+
+**For fused-kernel bugs (GGUF path):**
+Build an `AiGraph` with the fused `AiOp` and compile via `ModelSource::AiGraph`.
+Load the decomposed ONNX fixture as the ORT reference:
+```rust
+// ORT reference from decomposed fixture
+let onnx_bytes = fixtures::load("gqa_fused_reference").expect("run generate.py");
+let ort_out = run_onnx_all_outputs(&onnx_bytes, inputs)?;
+
+// Fused kernel via AiGraph
+let graph = build_gqa_aigraph(n_q, n_kv, head_dim, seq, causal);
+let holo_out = compile_and_execute_aigraph(graph, &inputs);
+assert!(compare_outputs(&holo_out, &ort_out[0].data, tol).passed);
+```
+
+#### Phase 4: Fix and verify
+Fix the root cause following the Problem-Solving Philosophy. The test MUST pass.
+
+### Available infrastructure
+
+| Tool | Purpose | Location |
+|------|---------|----------|
+| `fixtures::load(name)` | Load `.onnx` fixture from file | `ort_runner.rs` |
+| `generate.py` | Generate fixture `.onnx` files | `fixtures/generate.py` |
+| `onnx_builder::*()` | Build ONNX models in Rust (for dynamic or parameterized tests) | `ort_runner.rs` |
+| `run_onnx_all_outputs()` | Run ONNX through ORT, collect outputs | `ort_runner.rs` |
+| `compile_and_execute()` | Compile ONNX → hologram, execute | `exec_conformance.rs` |
+| `compile_and_execute_aigraph()` | Compile `AiGraph` → hologram, execute (fused kernel path) | `exec_conformance.rs` |
+| `ModelSource::AiGraph` | Compile directly from `AiGraph` (skips ONNX import) | `compiler.rs` |
+| `compare_outputs()` | Compare f32 slices with tolerance | `tolerance.rs` |
+
+### Fixture conventions
+
+- Fixtures live in `crates/hologram-ai-conformance/fixtures/*.onnx`
+- Each fixture has a generator in `generate.py` and at least one test in `exec_conformance.rs`
+- Use `_fused_reference` suffix for fixtures that serve as ORT reference for fused kernel tests
+- Keep dimensions small (< 100 KB per fixture) for fast CI
+
 <!-- ARCHON:MANAGED:BEGIN -->
 ## Ecosystem Rules
 
@@ -199,7 +268,12 @@ The defined goal is to compile TinyLlama-1.1B (ONNX) to a `.holo` archive
 and run it with a joke prompt to produce coherent English text. This validates
 the full pipeline: import → optimize → concretize → lower → execute.
 
-Higher-level goal: support ANY ONNX or GGUF model (focusing on ONNX first).
+Higher-level goal: support ANY ONNX or GGUF model.
+
+**Priority: ONNX-first, GGUF second.** The ONNX pipeline is the primary focus —
+all shape propagation, lowering, and conformance testing should target ONNX models
+first. GGUF support is secondary and should not drive architectural decisions or
+block ONNX progress.
 
 ### What the runtime needs from compiled shapes
 

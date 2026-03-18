@@ -6,13 +6,15 @@
 //! hologram-ai is a **compiler**, not a runtime. It produces `.holo` archives
 //! that are executed via the standard hologram APIs (see ADR-0016).
 
+pub mod commands;
 pub mod compiler;
 pub mod download;
 pub mod validate;
 
 // Flat re-exports.
 pub use compiler::{
-    CompileStats, CompiledModel, DebugMap, HoloArchive, ModelCompiler, ModelMetadata, ModelSource,
+    read_shape_context_from_archive, run_with_shape_context, CompileStats, CompiledModel, DebugMap,
+    HoloArchive, HoloRunner, ModelCompiler, ModelMetadata, ModelSource,
 };
 pub use hologram_ai_common::{AiGraph, AiNode, AiOp, DType, NodeId, Shape, TensorId, TensorInfo};
 pub use hologram_ai_gguf::{import_gguf, GgufImportOptions};

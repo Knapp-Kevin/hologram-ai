@@ -6,7 +6,8 @@
 
 use anyhow::Context;
 use hologram_ai_common::{
-    lower, AiGraph, AiParam, LowerPhase, LoweringOptions, MemoryPlanner, OptPipeline, Pass,
+    exec_context::ShapeContextGraph, lower, AiGraph, AiParam, LowerPhase, LoweringOptions,
+    MemoryPlanner, OptPipeline, Pass,
 };
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -197,12 +198,14 @@ impl ModelCompiler {
         // Replace any Dynamic or remaining Var dims introduced by the
         // aggressive pipeline (e.g., broadcast_shape returns Dynamic for
         // non-matching concrete dims).
+        // Use 0-sentinel (not 1) so the runtime knows to resolve these dims
+        // from actual buffer sizes rather than trusting stale compiled shapes.
         {
             use hologram_ai_common::Dim;
             for info in ai_graph.tensor_info.values_mut() {
                 for dim in info.shape.iter_mut() {
                     if matches!(dim, Dim::Dynamic) {
-                        *dim = Dim::Concrete(1);
+                        *dim = Dim::Concrete(0);
                     } else if matches!(dim, Dim::Var(_)) {
                         *dim = Dim::Concrete(0);
                     }
@@ -507,7 +510,7 @@ impl ModelCompiler {
             for info in ai_graph.tensor_info.values_mut() {
                 for dim in info.shape.iter_mut() {
                     if matches!(dim, Dim::Dynamic) {
-                        *dim = Dim::Concrete(1);
+                        *dim = Dim::Concrete(0);
                     } else if matches!(dim, Dim::Var(_)) {
                         *dim = Dim::Concrete(0);
                     }
@@ -584,6 +587,145 @@ impl ModelCompiler {
         };
 
         Ok((archive, debug_map))
+    }
+
+    /// Compile a model and return both the debug map and the `ShapeContextGraph`.
+    ///
+    /// Like [`compile_with_debug_info`](Self::compile_with_debug_info) but also
+    /// returns the compile-time shape projection map so callers can verify that
+    /// `walk_shape_context()` produces correct shapes for given runtime inputs.
+    pub fn compile_with_shape_context(
+        &self,
+        source: ModelSource,
+    ) -> anyhow::Result<(HoloArchive, DebugMap, Option<ShapeContextGraph>)> {
+        // Reuse the full pipeline by calling compile_with_debug_info, but we
+        // also need the ShapeContextGraph from the LoweringOutput.  Rather
+        // than duplicating the whole pipeline, we re-run the lower step once
+        // more to extract the context. This is acceptable for testing code.
+        let ai_graph = self.import(source)?;
+        let ai_graph = OptPipeline::mvp()
+            .run(ai_graph)
+            .context("optimization pass failed")?;
+        let ai_graph = concretize_all_dims(ai_graph).context("shape concretization failed")?;
+
+        let mut ai_graph = ai_graph;
+        for info in ai_graph.tensor_info.values_mut() {
+            info.known_i64_values = None;
+        }
+        let aggressive_pipeline = {
+            use hologram_ai_common::{
+                AggressiveShapePropagation, ConstantDeduplication,
+                opt::{
+                    const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
+                    data_prop::DataPropagation, dead_node::DeadNodeElimination,
+                },
+            };
+            OptPipeline::new(vec![
+                Box::new(AggressiveShapePropagation),
+                Box::new(DataPropagation),
+                Box::new(AggressiveShapePropagation),
+                Box::new(DataPropagation),
+                Box::new(AggressiveShapePropagation),
+                Box::new(ConstantEvaluation),
+                Box::new(ConstantFolding),
+                Box::new(ConstantDeduplication),
+                Box::new(DeadNodeElimination),
+            ])
+        };
+        for pass_num in 0..3 {
+            ai_graph = aggressive_pipeline
+                .run(ai_graph)
+                .with_context(|| format!("post-concretization repair pass {pass_num} failed"))?;
+            for info in ai_graph.tensor_info.values_mut() {
+                info.known_i64_values = None;
+            }
+        }
+        {
+            use hologram_ai_common::Dim;
+            for info in ai_graph.tensor_info.values_mut() {
+                for dim in info.shape.iter_mut() {
+                    if matches!(dim, Dim::Dynamic) {
+                        *dim = Dim::Concrete(0);
+                    } else if matches!(dim, Dim::Var(_)) {
+                        *dim = Dim::Concrete(0);
+                    }
+                }
+            }
+        }
+        let ai_graph = hologram_ai_common::SliceToGather
+            .run(ai_graph)
+            .context("slice-to-gather conversion failed")?;
+        let ai_graph = hologram_ai_common::ShapeHealing
+            .run(ai_graph)
+            .context("shape healing failed")?;
+
+        let errs = ai_graph.validate();
+        if !errs.is_empty() {
+            anyhow::bail!("{} validation error(s): {}", errs.len(), errs[0].message);
+        }
+
+        let mem_plan = MemoryPlanner
+            .plan(&ai_graph)
+            .context("memory planning failed")?;
+
+        let metadata = extract_metadata(&ai_graph);
+        let import_warnings = ai_graph.warnings.len();
+        let node_count = ai_graph.nodes.len();
+
+        let lower_out = lower(
+            &ai_graph,
+            &mem_plan.kv_cache_layout,
+            &LoweringOptions::default(),
+            &LowerPhase::Forward,
+        )
+        .context("lowering failed")?;
+
+        // Extract ShapeContextGraph before the context is consumed.
+        let shape_ctx = lower_out
+            .context
+            .get::<ShapeContextGraph>()
+            .ok()
+            .flatten();
+
+        // Build debug map.
+        let mut name_to_idx = std::collections::HashMap::new();
+        for (tid, name) in &ai_graph.tensor_names {
+            if let Some(&idx) = lower_out.tid_to_idx.get(tid) {
+                name_to_idx.insert(name.clone(), idx);
+            }
+        }
+        let debug_map = DebugMap { name_to_idx };
+
+        // Compile and assemble archive.
+        let compilation =
+            hologram::compile(lower_out.graph).context("hologram::compile failed")?;
+        let unpacked = unpack_archive(&compilation.archive)?;
+        let layer_header = build_tensor_port_header(&unpacked.plan, &ai_graph);
+        let weights = collect_weight_bytes(&ai_graph)?;
+        let bundle = if lower_out.context.is_empty() {
+            None
+        } else {
+            Some(&lower_out.context)
+        };
+        let archive_bytes = build_final_archive(
+            unpacked,
+            if weights.is_empty() { None } else { Some(weights.clone()) },
+            Some(layer_header),
+            bundle,
+        )?;
+
+        let archive = HoloArchive {
+            bytes: archive_bytes,
+            metadata,
+            stats: CompileStats {
+                import_warnings,
+                validation_errors: 0,
+                total_weight_bytes: weights.len() as u64,
+                node_count,
+            },
+        };
+
+        Ok((archive, debug_map, shape_ctx))
     }
 
     /// Compile a non-LLM model into a single-graph archive.
@@ -969,7 +1111,7 @@ fn extract_metadata(graph: &AiGraph) -> ModelMetadata {
 /// Concretize all symbolic and dynamic dimensions in the graph.
 ///
 /// - `DimExpr::Var` dims → substituted with a concrete value
-/// - `DimExpr::Dynamic` dims → replaced with `Concrete(1)`
+/// - `DimExpr::Dynamic` dims → replaced with `Concrete(0)` (0-sentinel for runtime resolution)
 ///
 /// For Var dims with an upper bound (e.g., GGUF models), uses the upper bound.
 /// For Var dims without an upper bound (e.g., ONNX models), uses heuristic
@@ -1039,7 +1181,7 @@ fn concretize_all_dims(mut graph: AiGraph) -> anyhow::Result<AiGraph> {
         }
     }
 
-    // Apply Var substitutions and replace Dynamic→Concrete(1).
+    // Apply Var substitutions and replace Dynamic→Concrete(0) (0-sentinel).
     // After this, all dims are concrete. The post-concretization aggressive
     // pipeline will re-infer correct shapes from these concrete anchors.
     for info in graph.tensor_info.values_mut() {
@@ -1051,7 +1193,7 @@ fn concretize_all_dims(mut graph: AiGraph) -> anyhow::Result<AiGraph> {
                 *dim = Dim::Concrete(v);
             }
             if matches!(dim, Dim::Dynamic) {
-                *dim = Dim::Concrete(1);
+                *dim = Dim::Concrete(0);
             } else if matches!(dim, Dim::Var(_)) {
                 // Safety net: any remaining Var (e.g. seq-like fixed=0) that
                 // wasn't substituted above gets the 0-sentinel treatment.
@@ -1119,6 +1261,253 @@ fn collect_weight_bytes(ai_graph: &AiGraph) -> anyhow::Result<Vec<u8>> {
 /// Preserves all existing sections from the source archive so that
 /// layer headers, model metadata, tokenizer data, etc. are not lost.
 /// Uses a single unpack/repack cycle internally.
+/// Pre-loaded archive ready for repeated shape-aware execution.
+///
+/// Supports both single-graph archives (non-LLM models) and pipeline archives
+/// (LLM with prefill + decode sub-models). For pipeline archives, the first
+/// `execute()` call runs the prefill model; subsequent calls run the decode model
+/// (when KV cache is wired up — currently both use the prefill model).
+///
+/// Load once with [`HoloRunner::from_bytes`], then call [`HoloRunner::execute`]
+/// many times with different inputs.
+pub struct HoloRunner {
+    /// For single-graph: the archive bytes. For pipeline: the prefill sub-archive bytes.
+    effective_bytes: Vec<u8>,
+    /// The raw top-level archive bytes (pipeline wrapper or single-graph).
+    _raw_bytes: Vec<u8>,
+    /// Single-graph plan (non-pipeline) or the prefill sub-model.
+    plan: hologram::LoadedPlan,
+    shape_ctx: Option<ShapeContextGraph>,
+    /// True if the archive is a pipeline (prefill + decode).
+    is_pipeline: bool,
+}
+
+impl HoloRunner {
+    /// Load a runner from raw archive bytes.
+    pub fn from_bytes(bytes: Vec<u8>) -> anyhow::Result<Self> {
+        // Try loading as pipeline first; fall back to single-graph.
+        let is_pipeline = hologram::hologram_archive::loader::pipeline::LoadedPipeline::from_bytes(&bytes).is_ok();
+
+        let effective_bytes = if is_pipeline {
+            extract_sub_archive_bytes(&bytes, "lm.prefill")?
+        } else {
+            bytes.clone()
+        };
+
+        let plan = hologram::load_from_bytes(&effective_bytes)
+            .map_err(|e| anyhow::anyhow!("loading plan: {e}"))?;
+        let shape_ctx = read_shape_context_from_archive(&effective_bytes)?;
+
+        Ok(Self {
+            effective_bytes,
+            _raw_bytes: bytes,
+            plan,
+            shape_ctx,
+            is_pipeline,
+        })
+    }
+
+    /// Load a runner from a `.holo` file on disk.
+    pub fn from_path(path: &std::path::Path) -> anyhow::Result<Self> {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading archive {}", path.display()))?;
+        Self::from_bytes(bytes)
+    }
+
+    /// Execute with shape hints projected from the embedded `ShapeContextGraph`.
+    ///
+    /// Input node shapes are read from `inputs.shape(i)` for each slot `i`.
+    /// When a `ShapeContextGraph` is present, `walk_shape_context()` projects
+    /// all node shapes forward before dispatch. Falls back to standard
+    /// execution (0-sentinel resolution) when no context is available.
+    pub fn execute(&self, inputs: &hologram::GraphInputs) -> anyhow::Result<hologram::GraphOutputs> {
+        use hologram_ai_common::lower::shape_spec_bridge::walk_shape_context;
+        use std::collections::HashMap;
+
+        let mut input_node_shapes: HashMap<u32, Vec<usize>> = HashMap::new();
+        for i in 0..64u32 {
+            if let Some(shape) = inputs.shape(i) {
+                if !shape.is_empty() {
+                    input_node_shapes.insert(i, shape.to_vec());
+                }
+            }
+        }
+
+        let shape_map = match &self.shape_ctx {
+            Some(ctx) => {
+                let mut map = HashMap::new();
+                walk_shape_context(ctx, &input_node_shapes, &HashMap::new(), &mut map);
+                map
+            }
+            None => HashMap::new(),
+        };
+
+        hologram::execute_plan_with_shape_hints(&self.plan, inputs, &shape_map)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// Access the underlying loaded plan (for layer headers, weights, etc.).
+    #[must_use]
+    pub fn plan(&self) -> &hologram::LoadedPlan {
+        &self.plan
+    }
+
+    /// Raw archive bytes (for section lookups).
+    #[must_use]
+    pub fn archive_bytes(&self) -> &[u8] {
+        &self.effective_bytes
+    }
+
+    /// Whether this archive has a `ShapeContextGraph` for variable seq_len support.
+    #[must_use]
+    pub fn has_shape_context(&self) -> bool {
+        self.shape_ctx.is_some()
+    }
+
+    /// Whether this is a pipeline archive (prefill + decode sub-models).
+    #[must_use]
+    pub fn is_pipeline(&self) -> bool {
+        self.is_pipeline
+    }
+
+    /// Execute with a mutable KV cache state for autoregressive generation.
+    ///
+    /// Projects shapes via `ShapeContextGraph`, then dispatches through the
+    /// KV-cache-aware executor path. `KvWrite` nodes append to the cache
+    /// and output the full cached K/V for attention.
+    pub fn execute_with_kv(
+        &self,
+        inputs: &hologram::GraphInputs,
+        kv_state: &mut hologram::KvCacheState,
+    ) -> anyhow::Result<hologram::GraphOutputs> {
+        use hologram_ai_common::lower::shape_spec_bridge::walk_shape_context;
+        use std::collections::HashMap;
+
+        let mut input_node_shapes: HashMap<u32, Vec<usize>> = HashMap::new();
+        for i in 0..64u32 {
+            if let Some(shape) = inputs.shape(i) {
+                if !shape.is_empty() {
+                    input_node_shapes.insert(i, shape.to_vec());
+                }
+            }
+        }
+
+        let shape_map = match &self.shape_ctx {
+            Some(ctx) => {
+                let mut map = HashMap::new();
+                walk_shape_context(ctx, &input_node_shapes, &HashMap::new(), &mut map);
+                map
+            }
+            None => HashMap::new(),
+        };
+
+        hologram::execute_plan_with_kv_state(&self.plan, inputs, &shape_map, kv_state)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+}
+
+/// Extract a named sub-archive's raw bytes from a pipeline archive.
+///
+/// Uses `LoadedPipeline` to parse the pipeline header, then extracts the
+/// sub-archive bytes from the wrapper's weights region.
+fn extract_sub_archive_bytes(pipeline_bytes: &[u8], name: &str) -> anyhow::Result<Vec<u8>> {
+    use hologram::hologram_archive::loader::pipeline::LoadedPipeline;
+
+    let pipeline = LoadedPipeline::from_bytes(pipeline_bytes)
+        .map_err(|e| anyhow::anyhow!("loading pipeline: {e}"))?;
+
+    // Find the named model and get its raw sub-archive bytes.
+    // LoadedPipeline already parsed the sub-archives; we need to find the
+    // model entry's offset/size in the wrapper weights to extract raw bytes.
+    //
+    // The pipeline header's `models` entries have (offset, size) into the
+    // wrapper weights. We can access this via the header.
+    let header = pipeline.header();
+    let entry = header.models.iter()
+        .find(|m| m.name == name)
+        .ok_or_else(|| anyhow::anyhow!("pipeline has no model named '{name}'"))?;
+
+    // Get the wrapper's weights region.
+    let wrapper = hologram::load_from_bytes(pipeline_bytes)
+        .map_err(|e| anyhow::anyhow!("loading pipeline wrapper: {e}"))?;
+    let weights = wrapper.weights();
+    let start = entry.offset as usize;
+    let end = start + entry.size as usize;
+    if end > weights.len() {
+        anyhow::bail!("sub-archive '{name}' out of bounds: {start}..{end} > {}", weights.len());
+    }
+
+    Ok(weights[start..end].to_vec())
+}
+
+/// Read the [`ShapeContextGraph`] embedded in a compiled `.holo` archive.
+///
+/// Returns `None` if the archive was compiled without a shape context section
+/// (older archives or models compiled with shape context disabled).
+pub fn read_shape_context_from_archive(archive_bytes: &[u8]) -> anyhow::Result<Option<ShapeContextGraph>> {
+    use hologram_ai_common::exec_context::{ExecContext, SECTION_SHAPE_CONTEXT};
+    let plan = hologram::load_from_bytes(archive_bytes)?;
+    let entry = match plan.sections().find(SECTION_SHAPE_CONTEXT) {
+        Some(e) => e,
+        None => return Ok(None),
+    };
+    let start = entry.offset as usize;
+    let end = start + entry.size as usize;
+    if end > archive_bytes.len() {
+        anyhow::bail!(
+            "ShapeContextGraph section out of bounds: offset={} size={} archive_len={}",
+            start,
+            entry.size,
+            archive_bytes.len()
+        );
+    }
+    let ctx = ShapeContextGraph::from_context_bytes(&archive_bytes[start..end])?;
+    Ok(Some(ctx))
+}
+
+/// Execute a compiled archive with shape hints projected from its embedded `ShapeContextGraph`.
+///
+/// This is the correct way to run archives produced by hologram-ai when the
+/// input sequence length or batch size differs from the compile-time value.
+/// The embedded `ShapeContextGraph` projects shapes for all nodes from the
+/// actual runtime input shapes, eliminating shape mismatch errors at seq>1.
+///
+/// Input node shapes are read from `inputs.shape(i)` for each input slot `i`.
+/// Since hologram-ai's builder always registers inputs at indices 0..n_inputs,
+/// the input slot index equals the graph node's `NodeId.index`.
+pub fn run_with_shape_context(
+    archive: &HoloArchive,
+    inputs: &hologram::GraphInputs,
+) -> anyhow::Result<hologram::GraphOutputs> {
+    use hologram_ai_common::lower::shape_spec_bridge::walk_shape_context;
+    use std::collections::HashMap;
+
+    // Build input_node_shapes: graph input slot i → runtime shape.
+    // The builder always registers Input nodes first, so NodeId.index == slot index.
+    let mut input_node_shapes: HashMap<u32, Vec<usize>> = HashMap::new();
+    for i in 0..64u32 {
+        if let Some(shape) = inputs.shape(i) {
+            if !shape.is_empty() {
+                input_node_shapes.insert(i, shape.to_vec());
+            }
+        }
+    }
+
+    let plan = hologram::load_from_bytes(&archive.bytes)?;
+
+    let shape_map = match read_shape_context_from_archive(&archive.bytes)? {
+        Some(ctx) => {
+            let mut map = HashMap::new();
+            walk_shape_context(&ctx, &input_node_shapes, &HashMap::new(), &mut map);
+            map
+        }
+        None => HashMap::new(),
+    };
+
+    hologram::execute_plan_with_shape_hints(&plan, inputs, &shape_map)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 pub fn rebuild_archive_with_section(
     archive: &[u8],
     section: &dyn hologram::hologram_archive::section::EmbeddableSection,

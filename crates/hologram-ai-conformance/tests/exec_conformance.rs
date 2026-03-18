@@ -967,7 +967,10 @@ fn causal_mask_orthogonal_broadcast_matches_ort() {
 /// computation diverges from ORT.
 ///
 /// Skipped if models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx is not present.
+/// Ignored by default: takes 4+ minutes (loads 1GB model). Use
+/// `cargo test --test exec_conformance -- --ignored tinyllama` to run manually.
 #[test]
+#[ignore]
 fn tinyllama_causal_onnx_top1_matches_ort() {
     // Resolve model path relative to workspace root.
     let mut model_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -982,7 +985,10 @@ fn tinyllama_causal_onnx_top1_matches_ort() {
 
     let vocab = 32000usize;
 
-    // Helper closure: run hologram with given seq-len inputs (using a compiled archive).
+    // Helper closure: run hologram with shape-aware execution.
+    // Uses run_with_shape_context() to walk the ShapeContextGraph and project
+    // correct shapes for all nodes — this patches 0-sentinel parameters
+    // (Softmax size, Gather dim, MatMul m/k/n, etc.) at runtime.
     let run_hologram = |archive: &hologram_ai::HoloArchive, ids: &[i64], mask: &[i64]| {
         let seq = ids.len();
         let id_bytes: Vec<u8> = ids.iter().flat_map(|&v| v.to_le_bytes()).collect();
@@ -990,14 +996,14 @@ fn tinyllama_causal_onnx_top1_matches_ort() {
         let mut graph_inputs = hologram::GraphInputs::new();
         graph_inputs.set_with_shape(0, id_bytes, vec![1, seq]);
         graph_inputs.set_with_shape(1, mask_bytes, vec![1, seq]);
-        let plan = hologram::load_from_bytes(&archive.bytes).expect("loading archive");
-        let outputs = hologram::execute_plan(&plan, &graph_inputs).expect("hologram execution failed");
+        let outputs = hologram_ai::run_with_shape_context(archive, &graph_inputs)
+            .expect("hologram execution failed");
         let (_, holo_bytes) = outputs.get(0).expect("no hologram outputs");
         bytemuck::cast_slice::<u8, f32>(holo_bytes).to_vec()
     };
 
     // Hologram: compile from path (same as CLI to avoid OnnxBytes parsing differences).
-    // Compiled shapes are concretized with seq=1.
+    // Compiled shapes are concretized with seq=0 (sentinel for runtime resolution).
     let compiler = hologram_ai::ModelCompiler::default();
     let (archive, _) = compiler
         .compile_with_debug_info(hologram_ai::ModelSource::OnnxPath(model_path.clone()))
@@ -1099,3 +1105,867 @@ fn top_k(logits: &[f32], k: usize) -> Vec<usize> {
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     indexed.into_iter().take(k).map(|(i, _)| i).collect()
 }
+
+// ── Dynamic-seq tests ────────────────────────────────────────────────────────
+
+/// Softmax at dynamic seq lengths (1, 2, 6) matches ORT.
+#[test]
+fn softmax_dynamic_seq_at_seq2_matches_ort() {
+    let hidden = 16usize;
+    let model_bytes = onnx_builder::softmax_dyn_seq(hidden);
+
+    for seq in [1usize, 2, 6] {
+        let x_data: Vec<f32> = (0..seq * hidden).map(|i| (i as f32) * 0.1 - 0.5).collect();
+        let ort_out = run_onnx_all_outputs(
+            &model_bytes,
+            vec![OrtInput { name: "X".into(), shape: vec![1, seq, hidden], data: x_data.clone() }],
+        )
+        .unwrap_or_else(|e| panic!("ORT failed at seq={seq}: {e}"));
+
+        let holo_out = compile_and_execute(
+            &model_bytes,
+            &[("X", vec![1, seq, hidden], x_data)],
+        );
+
+        let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+            &holo_out, &ort_out[0].data, exec_tol(),
+        );
+        assert!(cmp.passed, "softmax dyn seq={seq}: {}", cmp.message);
+    }
+}
+
+/// MatMul at dynamic seq lengths (1, 2, 6) matches ORT.
+#[test]
+fn matmul_dynamic_seq_at_multiple_seq_matches_ort() {
+    let k = 8usize;
+    let n = 4usize;
+    let model_bytes = onnx_builder::matmul_dyn_seq(k, n);
+
+    let w_data: Vec<f32> = (0..k * n).map(|i| (i as f32) * 0.05 + 0.1).collect();
+
+    for seq in [1usize, 2, 6] {
+        let x_data: Vec<f32> = (0..seq * k).map(|i| (i as f32) * 0.05 - 0.3).collect();
+        let ort_out = run_onnx_all_outputs(
+            &model_bytes,
+            vec![
+                OrtInput { name: "X".into(), shape: vec![1, seq, k], data: x_data.clone() },
+                OrtInput { name: "W".into(), shape: vec![k, n], data: w_data.clone() },
+            ],
+        )
+        .unwrap_or_else(|e| panic!("ORT failed at seq={seq}: {e}"));
+
+        let holo_out = compile_and_execute(
+            &model_bytes,
+            &[("X", vec![1, seq, k], x_data), ("W", vec![k, n], w_data.clone())],
+        );
+
+        let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+            &holo_out, &ort_out[0].data, exec_tol(),
+        );
+        assert!(cmp.passed, "matmul dyn seq={seq}: {}", cmp.message);
+    }
+}
+
+/// Reshape unpack-heads at dynamic seq=2 matches ORT.
+#[test]
+fn reshape_unpack_heads_dynamic_seq_at_seq2_matches_ort() {
+    let num_heads = 4usize;
+    let head_dim = 8usize;
+    let hidden = num_heads * head_dim;
+    let model_bytes = onnx_builder::reshape_unpack_heads_dyn_seq(num_heads, head_dim);
+
+    for seq in [1usize, 2] {
+        let x_data: Vec<f32> = (0..seq * hidden).map(|i| (i as f32) * 0.01).collect();
+        let ort_out = run_onnx_all_outputs(
+            &model_bytes,
+            vec![OrtInput { name: "X".into(), shape: vec![1, seq, hidden], data: x_data.clone() }],
+        )
+        .unwrap_or_else(|e| panic!("ORT failed at seq={seq}: {e}"));
+
+        let holo_out = compile_and_execute(
+            &model_bytes,
+            &[("X", vec![1, seq, hidden], x_data)],
+        );
+
+        let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+            &holo_out, &ort_out[0].data, exec_tol(),
+        );
+        assert!(cmp.passed, "reshape unpack heads seq={seq}: {}", cmp.message);
+    }
+}
+
+// ── ShapeContextGraph projection tests ───────────────────────────────────────
+
+/// Verify walk_shape_context projects correct output shape for MatMul.
+#[test]
+fn walk_shape_context_matmul_projects_output_shape() {
+    let m = 2usize;
+    let k = 4usize;
+    let n = 3usize;
+    let model_bytes = onnx_builder::matmul(m, k, n);
+    let compiler = ModelCompiler::default();
+    let (archive, _debug_map, shape_ctx) = compiler
+        .compile_with_shape_context(ModelSource::OnnxBytes(model_bytes))
+        .expect("compile failed");
+
+    let ctx = shape_ctx.expect("shape context should be present");
+    let mut shape_map = std::collections::HashMap::new();
+    let input_shapes: std::collections::HashMap<u32, Vec<usize>> = [
+        (0, vec![m, k]),
+        (1, vec![k, n]),
+    ]
+    .into();
+    hologram_ai_common::lower::shape_spec_bridge::walk_shape_context(
+        &ctx,
+        &input_shapes,
+        &std::collections::HashMap::new(),
+        &mut shape_map,
+    );
+
+    // The output node should have shape [m, n].
+    let output_shapes: Vec<&Vec<usize>> = shape_map
+        .values()
+        .filter(|s| *s == &vec![m, n])
+        .collect();
+    assert!(
+        !output_shapes.is_empty(),
+        "walk_shape_context should project MatMul output to [{m}, {n}]"
+    );
+    let _ = archive;
+}
+
+/// Verify walk_shape_context projects SameAs(0) for RmsNorm.
+#[test]
+fn walk_shape_context_rmsnorm_same_as_input() {
+    let rows = 2usize;
+    let size = 16usize;
+    let model_bytes = onnx_builder::rms_norm(rows, size, 1e-6);
+    let compiler = ModelCompiler::default();
+    let (_archive, _debug_map, shape_ctx) = compiler
+        .compile_with_shape_context(ModelSource::OnnxBytes(model_bytes))
+        .expect("compile failed");
+
+    let ctx = shape_ctx.expect("shape context should be present");
+    let mut shape_map = std::collections::HashMap::new();
+    let input_shapes: std::collections::HashMap<u32, Vec<usize>> = [
+        (0, vec![rows, size]),
+        (1, vec![size]),
+    ]
+    .into();
+    hologram_ai_common::lower::shape_spec_bridge::walk_shape_context(
+        &ctx,
+        &input_shapes,
+        &std::collections::HashMap::new(),
+        &mut shape_map,
+    );
+
+    // The output should preserve [rows, size].
+    let has_output = shape_map.values().any(|s| *s == vec![rows, size]);
+    assert!(has_output, "RmsNorm output should be [{rows}, {size}]");
+}
+
+// ── Mini transformer CI fixture ──────────────────────────────────────────────
+
+const MINI_HIDDEN: usize = 32;
+const MINI_HEADS: usize = 2;
+const MINI_FFN: usize = 64;
+const MINI_VOCAB: usize = 32;
+
+/// Mini transformer output matches ORT for seq = 1 and 7.
+///
+/// Compiles the mini transformer and verifies hologram's output matches ORT
+/// for two sequence lengths. Uses `run_with_shape_context()` for the hologram
+/// path to exercise the ShapeContextGraph projection end-to-end.
+///
+/// This is the fast CI replacement for `tinyllama_causal_onnx_top1_matches_ort`.
+#[test]
+fn mini_transformer_matches_ort() {
+    let model_bytes = onnx_builder::mini_transformer_dyn(MINI_HIDDEN, MINI_HEADS, MINI_FFN, MINI_VOCAB);
+
+    let archive = ModelCompiler::default()
+        .compile(ModelSource::OnnxBytes(model_bytes.clone()))
+        .expect("mini transformer compilation failed");
+
+    for seq in [1usize, 7] {
+        let x: Vec<f32> = (0..seq * MINI_HIDDEN).map(|i| (i as f32) * 0.01 - 0.32).collect();
+
+        let ort_outputs = run_onnx_all_outputs(
+            &model_bytes,
+            vec![OrtInput { name: "X".into(), shape: vec![seq, MINI_HIDDEN], data: x.clone() }],
+        )
+        .unwrap_or_else(|e| panic!("ORT failed at seq={seq}: {e}"));
+
+        let x_bytes: Vec<u8> = bytemuck::cast_slice(&x).to_vec();
+        let mut graph_inputs = hologram::GraphInputs::new();
+        graph_inputs.set_with_shape(0, x_bytes, vec![seq, MINI_HIDDEN]);
+
+        let outputs = hologram_ai::run_with_shape_context(&archive, &graph_inputs)
+            .unwrap_or_else(|e| panic!("hologram failed at seq={seq}: {e}"));
+        let (_, out_bytes) = outputs.get(0).expect("no output");
+        let holo_out: Vec<f32> = bytemuck::cast_slice(out_bytes).to_vec();
+
+        let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
+        let cmp = hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_outputs[0].data, tol);
+        assert!(cmp.passed, "mini transformer seq={seq} mismatch: {}", cmp.message);
+    }
+}
+
+// ── File-based fixture tests ─────────────────────────────────────────────────
+//
+// These tests load real `.onnx` files from the `fixtures/` directory,
+// mimicking how production models are loaded from disk.
+
+use hologram_ai_conformance::ort_runner::fixtures;
+
+/// Multi-head attention with Unsqueeze/Reshape/Transpose patterns matches ORT.
+///
+/// Loads `fixtures/multihead_attention.onnx` — exercises the identity-op shape
+/// changes (Unsqueeze, Squeeze) that caused TinyLlama failures. Tests
+/// `run_with_shape_context()` at variable seq_len.
+///
+/// hidden=32, n_heads=4, head_dim=8. ~17 KB fixture.
+#[test]
+fn multihead_attention_fixture_matches_ort() {
+    let hidden = 32usize;
+    let model_bytes = fixtures::load_or_panic("multihead_attention");
+
+    let archive = ModelCompiler::default()
+        .compile(ModelSource::OnnxBytes(model_bytes.clone()))
+        .expect("multihead attention compilation failed");
+
+    for seq in [1usize, 3, 7] {
+        let x: Vec<f32> = (0..seq * hidden)
+            .map(|i| (i as f32) * 0.01 - 0.16)
+            .collect();
+
+        let ort_outputs = run_onnx_all_outputs(
+            &model_bytes,
+            vec![OrtInput {
+                name: "X".into(),
+                shape: vec![seq, hidden],
+                data: x.clone(),
+            }],
+        )
+        .unwrap_or_else(|e| panic!("ORT failed at seq={seq}: {e}"));
+
+        let x_bytes: Vec<u8> = bytemuck::cast_slice(&x).to_vec();
+        let mut graph_inputs = hologram::GraphInputs::new();
+        graph_inputs.set_with_shape(0, x_bytes, vec![seq, hidden]);
+
+        let outputs = hologram_ai::run_with_shape_context(&archive, &graph_inputs)
+            .unwrap_or_else(|e| panic!("hologram failed at seq={seq}: {e}"));
+        let (_, out_bytes) = outputs.get(0).expect("no output");
+        let holo_out: Vec<f32> = bytemuck::cast_slice(out_bytes).to_vec();
+
+        let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
+        let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+            &holo_out,
+            &ort_outputs[0].data,
+            tol,
+        );
+        assert!(
+            cmp.passed,
+            "multihead attention seq={seq} mismatch: {}",
+            cmp.message
+        );
+    }
+}
+
+/// GQA with Unsqueeze→Expand→Reshape KV head repetition matches ORT.
+///
+/// Loads `fixtures/gqa_expand_attention.onnx` — reproduces the exact TinyLlama
+/// GQA pattern: n_heads=8, n_kv_heads=2, group_size=4. Includes the full
+/// Shape→Gather→Unsqueeze→Concat→Expand chain for dynamic seq.
+///
+/// hidden=128, head_dim=16. ~165 KB fixture.
+#[test]
+fn gqa_expand_attention_fixture_matches_ort() {
+    let hidden = 128usize;
+    let model_bytes = fixtures::load_or_panic("gqa_expand_attention");
+
+    let archive = ModelCompiler::default()
+        .compile(ModelSource::OnnxBytes(model_bytes.clone()))
+        .expect("GQA attention compilation failed");
+
+    for seq in [1usize, 3, 7] {
+        let x: Vec<f32> = (0..1 * seq * hidden)
+            .map(|i| (i as f32) * 0.005 - 0.32)
+            .collect();
+
+        let ort_outputs = run_onnx_all_outputs(
+            &model_bytes,
+            vec![OrtInput {
+                name: "X".into(),
+                shape: vec![1, seq, hidden],
+                data: x.clone(),
+            }],
+        )
+        .unwrap_or_else(|e| panic!("ORT failed at seq={seq}: {e}"));
+
+        let x_bytes: Vec<u8> = bytemuck::cast_slice(&x).to_vec();
+        let mut graph_inputs = hologram::GraphInputs::new();
+        graph_inputs.set_with_shape(0, x_bytes, vec![1, seq, hidden]);
+
+        let outputs = hologram_ai::run_with_shape_context(&archive, &graph_inputs)
+            .unwrap_or_else(|e| panic!("hologram failed at seq={seq}: {e}"));
+        let (_, out_bytes) = outputs.get(0).expect("no output");
+        let holo_out: Vec<f32> = bytemuck::cast_slice(out_bytes).to_vec();
+
+        let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
+        let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+            &holo_out,
+            &ort_outputs[0].data,
+            tol,
+        );
+        assert!(
+            cmp.passed,
+            "GQA expand attention seq={seq} mismatch: {}",
+            cmp.message
+        );
+    }
+}
+
+/// Slice on shape tensor picking dim index 2 — reproduces TinyLlama bug.
+///
+/// TinyLlama's ONNX uses `Shape(X) → Slice(start=2, end=3)` to extract the
+/// hidden dim from the shape vector. hologram's `SliceToGather` pass converts
+/// this to `Gather(shape, [2], axis=0)` where the shape tensor is 1-D i64.
+/// The lowering computes `dim = 1` (row width of a 1-D tensor) and the executor
+/// bounds-checks `index < dim` → `2 < 1` → failure.
+///
+/// Loads `fixtures/slice_shape_to_gather.onnx`. X=[1, seq, 64], output=[64.0].
+#[test]
+fn slice_shape_to_gather_fixture_matches_ort() {
+    let hidden = 64usize;
+    let model_bytes = fixtures::load_or_panic("slice_shape_to_gather");
+
+    let archive = ModelCompiler::default()
+        .compile(ModelSource::OnnxBytes(model_bytes.clone()))
+        .expect("slice_shape_to_gather compilation failed");
+
+    for seq in [1usize, 3] {
+        let x: Vec<f32> = (0..seq * hidden)
+            .map(|i| (i as f32) * 0.01)
+            .collect();
+
+        let ort_outputs = run_onnx_all_outputs(
+            &model_bytes,
+            vec![OrtInput {
+                name: "X".into(),
+                shape: vec![1, seq, hidden],
+                data: x.clone(),
+            }],
+        )
+        .unwrap_or_else(|e| panic!("ORT failed at seq={seq}: {e}"));
+
+        let x_bytes: Vec<u8> = bytemuck::cast_slice(&x).to_vec();
+        let mut graph_inputs = hologram::GraphInputs::new();
+        graph_inputs.set_with_shape(0, x_bytes, vec![1, seq, hidden]);
+
+        let outputs = hologram_ai::run_with_shape_context(&archive, &graph_inputs)
+            .unwrap_or_else(|e| panic!(
+                "hologram failed at seq={seq}: {e}\n\
+                 This is the TinyLlama NodeId(498) regression: SliceToGather \
+                 converts Slice(shape, 2:3) to Gather with dim=1, then \
+                 executor bounds-checks index(2) < dim(1) and fails."
+            ));
+        let (_, out_bytes) = outputs.get(0).expect("no output");
+        let holo_out: Vec<f32> = bytemuck::cast_slice(out_bytes).to_vec();
+
+        let tol = Tolerance { atol: 1e-4, rtol: 1e-4 };
+        let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+            &holo_out,
+            &ort_outputs[0].data,
+            tol,
+        );
+        assert!(
+            cmp.passed,
+            "slice_shape_to_gather seq={seq}: expected [{hidden}.0], got {:?}. {}",
+            holo_out,
+            cmp.message
+        );
+    }
+}
+
+/// Gather on 1-D i64 tensor with index > row-width — TinyLlama regression.
+///
+/// Reproduces the TinyLlama NodeId(498) failure. In hologram's Gather kernel,
+/// `dim` stores the row width (product of dims after the gather axis). For
+/// a 1-D tensor, dim=1. The executor bounds-checks `index < dim` instead of
+/// `index < num_rows`, so any index > 0 on a 1-D i64 tensor fails.
+///
+/// Loads `fixtures/gather_i64_index_gt_dim.onnx`. data=[10,20,30] i64,
+/// Gather(idx=2) → 30 → Cast → 30.0.
+#[test]
+fn gather_i64_index_gt_dim_fixture_matches_ort() {
+    let model_bytes = fixtures::load_or_panic("gather_i64_index_gt_dim");
+
+    let archive = ModelCompiler::default()
+        .compile(ModelSource::OnnxBytes(model_bytes.clone()))
+        .expect("gather_i64_index_gt_dim compilation failed");
+
+    // data = [10, 20, 30] as i64
+    let data_vals: Vec<i64> = vec![10, 20, 30];
+    let data_bytes: Vec<u8> = data_vals.iter().flat_map(|&v| v.to_le_bytes()).collect();
+
+    // ORT reference
+    // Use typed runner for i64 input
+    let ort_out = hologram_ai_conformance::ort_runner::runner::run_onnx_typed(
+        &model_bytes,
+        vec![hologram_ai_conformance::ort_runner::runner::OrtInputTyped::I64 {
+            name: "data".into(),
+            shape: vec![3],
+            data: data_vals,
+        }],
+    )
+    .expect("ORT failed");
+    let ort_val = ort_out[0].data[0]; // should be 30.0
+
+    // Hologram
+    let mut graph_inputs = hologram::GraphInputs::new();
+    graph_inputs.set_with_shape(0, data_bytes, vec![3]);
+
+    let result = hologram_ai::run_with_shape_context(&archive, &graph_inputs);
+    match result {
+        Ok(outputs) => {
+            let (_, out_bytes) = outputs.get(0).expect("no output");
+            let holo_out: Vec<f32> = bytemuck::cast_slice(out_bytes).to_vec();
+            assert!(
+                (holo_out[0] - ort_val).abs() < 1e-4,
+                "gather_i64 mismatch: hologram={}, ORT={ort_val}",
+                holo_out[0]
+            );
+        }
+        Err(e) => {
+            panic!(
+                "hologram Gather i64 failed: {e}\n\
+                 This is the TinyLlama NodeId(498) regression: Gather on 1-D i64 \
+                 with dim=1 bounds-checks index(2) < dim(1). Fix needed in \
+                 hologram executor's Gather kernel: check against num_rows, not dim."
+            );
+        }
+    }
+}
+
+/// Shape(4-D)→Slice(2:4) with dynamic seq — TinyLlama SliceToGather regression.
+///
+/// K=[1, 4, seq, 16]. Shape(K)→Slice(start=2, end=4) picks [seq, 16].
+/// With dynamic seq, the result contains a 0-sentinel and can't be constant-folded.
+/// SliceToGather converts to Gather with indices=[2,3] on a 1-D i64[4] shape tensor.
+/// Gather dim=1 (row width), executor checks index < dim → 2 < 1 or 3 < 1 → fails.
+///
+/// Loads `fixtures/slice_shape_4d_dynamic.onnx`.
+#[test]
+fn slice_shape_4d_dynamic_fixture_matches_ort() {
+    let model_bytes = fixtures::load_or_panic("slice_shape_4d_dynamic");
+    let n_kv_heads = 4usize;
+    let head_dim = 16usize;
+
+    let archive = ModelCompiler::default()
+        .compile(ModelSource::OnnxBytes(model_bytes.clone()))
+        .expect("slice_shape_4d compilation failed");
+
+    for seq in [1usize, 3] {
+        let k: Vec<f32> = (0..n_kv_heads * seq * head_dim)
+            .map(|i| (i as f32) * 0.01)
+            .collect();
+
+        let ort_outputs = run_onnx_all_outputs(
+            &model_bytes,
+            vec![OrtInput {
+                name: "K".into(),
+                shape: vec![1, n_kv_heads, seq, head_dim],
+                data: k.clone(),
+            }],
+        )
+        .unwrap_or_else(|e| panic!("ORT failed at seq={seq}: {e}"));
+
+        let k_bytes: Vec<u8> = bytemuck::cast_slice(&k).to_vec();
+        let mut graph_inputs = hologram::GraphInputs::new();
+        graph_inputs.set_with_shape(0, k_bytes, vec![1, n_kv_heads, seq, head_dim]);
+
+        let outputs = hologram_ai::run_with_shape_context(&archive, &graph_inputs)
+            .unwrap_or_else(|e| panic!(
+                "hologram failed at seq={seq}: {e}\n\
+                 TinyLlama NodeId(498) regression: SliceToGather on 4-D shape \
+                 with dynamic seq creates Gather(dim=1) with index >= 2."
+            ));
+        let (_, out_bytes) = outputs.get(0).expect("no output");
+        let holo_out: Vec<f32> = bytemuck::cast_slice(out_bytes).to_vec();
+
+        let tol = Tolerance { atol: 1e-4, rtol: 1e-4 };
+        let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+            &holo_out,
+            &ort_outputs[0].data,
+            tol,
+        );
+        assert!(
+            cmp.passed,
+            "slice_shape_4d seq={seq}: expected [{seq}.0, {head_dim}.0], got {:?}. {}",
+            holo_out, cmp.message
+        );
+    }
+}
+
+/// Shape→Slice on dynamic-seq tensor: SliceToGather regression.
+///
+/// The dynamic seq dim prevents Shape from being constant-folded.
+/// hologram's SliceToGather pass converts `Slice(Shape(X), 2:3)` to
+/// `Gather(Shape(X), [2], axis=0)` where Shape output is 1-D i64 `[3]`.
+/// Gather gets `dim=1` (row width), and the executor checks `index < dim`
+/// → `2 < 1` → failure. This is the root cause of TinyLlama NodeId(498).
+///
+/// Loads `fixtures/slice_shape_dynamic_seq.onnx`.
+/// X=[1, seq, 64] → Shape→Slice(2:3)→Cast→sqrt→X/sqrt(hidden) → Y.
+#[test]
+fn slice_shape_dynamic_seq_fixture_matches_ort() {
+    let hidden = 64usize;
+    let model_bytes = fixtures::load_or_panic("slice_shape_dynamic_seq");
+
+    let archive = ModelCompiler::default()
+        .compile(ModelSource::OnnxBytes(model_bytes.clone()))
+        .expect("slice_shape_dynamic_seq compilation failed");
+
+    for seq in [1usize, 3] {
+        let x: Vec<f32> = vec![2.0; seq * hidden];
+
+        let ort_outputs = run_onnx_all_outputs(
+            &model_bytes,
+            vec![OrtInput {
+                name: "X".into(),
+                shape: vec![1, seq, hidden],
+                data: x.clone(),
+            }],
+        )
+        .unwrap_or_else(|e| panic!("ORT failed at seq={seq}: {e}"));
+
+        let x_bytes: Vec<u8> = bytemuck::cast_slice(&x).to_vec();
+        let mut graph_inputs = hologram::GraphInputs::new();
+        graph_inputs.set_with_shape(0, x_bytes, vec![1, seq, hidden]);
+
+        let outputs = hologram_ai::run_with_shape_context(&archive, &graph_inputs)
+            .unwrap_or_else(|e| panic!(
+                "hologram failed at seq={seq}: {e}\n\
+                 TinyLlama regression: SliceToGather creates Gather with dim=1 \
+                 on a 1-D i64 shape tensor. Executor bounds-checks index < dim \
+                 instead of index < num_rows."
+            ));
+        let (_, out_bytes) = outputs.get(0).expect("no output");
+        let holo_out: Vec<f32> = bytemuck::cast_slice(out_bytes).to_vec();
+
+        let tol = Tolerance { atol: 1e-4, rtol: 1e-3 };
+        let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+            &holo_out,
+            &ort_outputs[0].data,
+            tol,
+        );
+        assert!(
+            cmp.passed,
+            "slice_shape_dynamic_seq seq={seq} mismatch: {}",
+            cmp.message
+        );
+    }
+}
+
+/// Gather on i64 shape tensor: Shape(X) → Gather(idx=2) → Cast → scalar.
+///
+/// Reproduces the TinyLlama NodeId(498) failure where a Gather on a shape
+/// tensor (dtype=I64, dim=1) bounds-checks the index against `dim` (1)
+/// instead of the table length (3), causing "expected i64 index < 1, got
+/// index = 2".
+///
+/// Loads `fixtures/gather_shape_i64.onnx`. X=[1, seq, 64], output=64.0.
+#[test]
+fn gather_shape_i64_fixture_matches_ort() {
+    let hidden = 64usize;
+    let model_bytes = fixtures::load_or_panic("gather_shape_i64");
+
+    let archive = ModelCompiler::default()
+        .compile(ModelSource::OnnxBytes(model_bytes.clone()))
+        .expect("gather_shape_i64 compilation failed");
+
+    for seq in [1usize, 3, 7] {
+        let x: Vec<f32> = (0..seq * hidden)
+            .map(|i| (i as f32) * 0.01 - 0.32)
+            .collect();
+
+        let ort_outputs = run_onnx_all_outputs(
+            &model_bytes,
+            vec![OrtInput {
+                name: "X".into(),
+                shape: vec![1, seq, hidden],
+                data: x.clone(),
+            }],
+        )
+        .unwrap_or_else(|e| panic!("ORT failed at seq={seq}: {e}"));
+
+        let x_bytes: Vec<u8> = bytemuck::cast_slice(&x).to_vec();
+        let mut graph_inputs = hologram::GraphInputs::new();
+        graph_inputs.set_with_shape(0, x_bytes, vec![1, seq, hidden]);
+
+        let outputs = hologram_ai::run_with_shape_context(&archive, &graph_inputs)
+            .unwrap_or_else(|e| panic!("hologram failed at seq={seq}: {e}"));
+        let (_, out_bytes) = outputs.get(0).expect("no output");
+        let holo_out: Vec<f32> = bytemuck::cast_slice(out_bytes).to_vec();
+
+        let tol = Tolerance { atol: 1e-4, rtol: 1e-4 };
+        let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+            &holo_out,
+            &ort_outputs[0].data,
+            tol,
+        );
+        assert!(
+            cmp.passed,
+            "gather_shape_i64 seq={seq}: expected {hidden}.0, got {:?}. {}",
+            holo_out,
+            cmp.message
+        );
+    }
+}
+
+// ── Fused kernel conformance tests ──────────────────────────────────────────
+//
+// These tests exercise the fused AiOp paths used by GGUF import
+// (GroupedQueryAttention, FusedSwiGLU) by building an AiGraph directly
+// and compiling via ModelSource::AiGraph. The reference output comes from
+// the decomposed ONNX equivalent run through ORT.
+//
+// This is the "fixture-driven regression testing" methodology: when a full
+// model (TinyLlama GGUF) produces incorrect output, isolate the suspect
+// fused kernel into a minimal AiGraph fixture and compare against ORT.
+
+/// Helper: compile an AiGraph through the full pipeline and execute,
+/// returning the final output as f32.
+fn compile_and_execute_aigraph(
+    graph: hologram_ai_common::AiGraph,
+    inputs: &[(&str, Vec<usize>, Vec<f32>)],
+) -> Vec<f32> {
+    let compiler = ModelCompiler::default();
+    let archive = compiler
+        .compile(ModelSource::AiGraph(graph))
+        .expect("AiGraph compilation failed");
+
+    let mut graph_inputs = hologram::GraphInputs::new();
+    for (i, (_name, shape, data)) in inputs.iter().enumerate() {
+        let bytes: Vec<u8> = bytemuck::cast_slice(data).to_vec();
+        graph_inputs.set_with_shape(i as u32, bytes, shape.clone());
+    }
+
+    let plan = hologram::load_from_bytes(&archive.bytes).expect("loading archive");
+    let outputs = hologram::execute_plan(&plan, &graph_inputs).expect("execution failed");
+
+    let (_, out_bytes) = outputs.get(0).expect("no outputs");
+    bytemuck::cast_slice::<u8, f32>(out_bytes).to_vec()
+}
+
+/// Build a minimal AiGraph with a single GroupedQueryAttention op.
+///
+/// Inputs: Q [seq, n_q_heads * head_dim], K [seq, n_kv_heads * head_dim], V [seq, n_kv_heads * head_dim]
+/// Output: [seq, n_q_heads * head_dim]
+fn build_gqa_aigraph(
+    n_q_heads: u32,
+    n_kv_heads: u32,
+    head_dim: u32,
+    seq: usize,
+    causal: bool,
+) -> hologram_ai_common::AiGraph {
+    use hologram_ai_common::{
+        AiGraph, AiNode, AiOp, DType, TensorInfo, shape_from_concrete,
+    };
+    use std::collections::HashMap;
+
+    let q_dim = (n_q_heads * head_dim) as usize;
+    let kv_dim = (n_kv_heads * head_dim) as usize;
+
+    // TensorIds: 0=Q, 1=K, 2=V, 3=output
+    let mut tensor_info = HashMap::new();
+    tensor_info.insert(0u32, TensorInfo::new(DType::F32, shape_from_concrete(&[seq as u64, q_dim as u64])));
+    tensor_info.insert(1u32, TensorInfo::new(DType::F32, shape_from_concrete(&[seq as u64, kv_dim as u64])));
+    tensor_info.insert(2u32, TensorInfo::new(DType::F32, shape_from_concrete(&[seq as u64, kv_dim as u64])));
+    tensor_info.insert(3u32, TensorInfo::new(DType::F32, shape_from_concrete(&[seq as u64, q_dim as u64])));
+
+    AiGraph {
+        name: "gqa_fused_fixture".into(),
+        nodes: vec![AiNode::new(
+            0,
+            AiOp::GroupedQueryAttention {
+                num_heads: n_q_heads,
+                num_kv_heads: n_kv_heads,
+                head_dim,
+                scale: None,
+                causal,
+            },
+            vec![0, 1, 2],
+            vec![3],
+        )],
+        inputs: vec![0, 1, 2],
+        outputs: vec![3],
+        input_names: vec!["Q_flat".into(), "K_flat".into(), "V_flat".into()],
+        output_names: vec!["output".into()],
+        params: HashMap::new(),
+        tensor_info,
+        metadata: HashMap::new(),
+        warnings: vec![],
+        dim_vars: Default::default(),
+        shape_constraints: Default::default(),
+        subgraphs: HashMap::new(),
+        tensor_names: HashMap::new(),
+    }
+}
+
+/// Test: Fused GQA kernel (AiOp::GroupedQueryAttention) matches decomposed ONNX reference.
+///
+/// This exercises the hologram-exec `dispatch_attention` kernel with
+/// num_q_heads=8, num_kv_heads=2 (group_size=4) — the TinyLlama GQA ratio.
+/// The reference is the decomposed ONNX graph run through ORT.
+///
+/// A mismatch here is the primary suspect for GGUF token degeneration.
+#[test]
+fn gqa_fused_kernel_matches_decomposed() {
+    let n_q_heads: usize = 8;
+    let n_kv_heads: usize = 2;
+    let seq: usize = 4;
+    let head_dim: usize = 8;
+
+    let q_dim = n_q_heads * head_dim;
+    let kv_dim = n_kv_heads * head_dim;
+
+    // Generate deterministic test data.
+    let q_data: Vec<f32> = (0..seq * q_dim).map(|i| (i as f32) * 0.02 - 0.5).collect();
+    let k_data: Vec<f32> = (0..seq * kv_dim).map(|i| (i as f32) * 0.015 + 0.1).collect();
+    let v_data: Vec<f32> = (0..seq * kv_dim).map(|i| ((i % 16) as f32) * 0.1 - 0.7).collect();
+
+    // Reference: decomposed ONNX fixture loaded from file (generated by generate.py).
+    let onnx_bytes = hologram_ai_conformance::ort_runner::fixtures::load("gqa_fused_reference")
+        .expect("fixture gqa_fused_reference.onnx not found — run generate.py");
+    let ort_outputs = run_onnx_all_outputs(
+        &onnx_bytes,
+        vec![
+            OrtInput { name: "Q_flat".into(), shape: vec![seq, q_dim], data: q_data.clone() },
+            OrtInput { name: "K_flat".into(), shape: vec![seq, kv_dim], data: k_data.clone() },
+            OrtInput { name: "V_flat".into(), shape: vec![seq, kv_dim], data: v_data.clone() },
+        ],
+    )
+    .expect("ORT failed for gqa_flat_multi_kv reference");
+
+    // Fused: AiGraph with GroupedQueryAttention compiled through hologram.
+    let graph = build_gqa_aigraph(
+        n_q_heads as u32,
+        n_kv_heads as u32,
+        head_dim as u32,
+        seq,
+        true, // causal
+    );
+    let holo_out = compile_and_execute_aigraph(
+        graph,
+        &[
+            ("Q_flat", vec![seq, q_dim], q_data),
+            ("K_flat", vec![seq, kv_dim], k_data),
+            ("V_flat", vec![seq, kv_dim], v_data),
+        ],
+    );
+
+    // GQA attention: looser tolerance due to softmax + multiple matmuls.
+    let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
+    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+        &holo_out,
+        &ort_outputs[0].data,
+        tol,
+    );
+    assert!(
+        cmp.passed,
+        "Fused GQA kernel mismatch vs decomposed ORT reference: {}",
+        cmp.message
+    );
+}
+
+/// Build a minimal AiGraph with a single FusedSwiGLU op.
+///
+/// Inputs: gate [rows, cols], up [rows, cols]
+/// Output: [rows, cols]
+fn build_swiglu_aigraph(rows: usize, cols: usize) -> hologram_ai_common::AiGraph {
+    use hologram_ai_common::{
+        AiGraph, AiNode, AiOp, DType, TensorInfo, shape_from_concrete,
+    };
+    use std::collections::HashMap;
+
+    // TensorIds: 0=gate, 1=up, 2=output
+    let mut tensor_info = HashMap::new();
+    tensor_info.insert(0u32, TensorInfo::new(DType::F32, shape_from_concrete(&[rows as u64, cols as u64])));
+    tensor_info.insert(1u32, TensorInfo::new(DType::F32, shape_from_concrete(&[rows as u64, cols as u64])));
+    tensor_info.insert(2u32, TensorInfo::new(DType::F32, shape_from_concrete(&[rows as u64, cols as u64])));
+
+    AiGraph {
+        name: "swiglu_fused_fixture".into(),
+        nodes: vec![AiNode::new(
+            0,
+            AiOp::FusedSwiGLU,
+            vec![0, 1],
+            vec![2],
+        )],
+        inputs: vec![0, 1],
+        outputs: vec![2],
+        input_names: vec!["gate".into(), "up".into()],
+        output_names: vec!["output".into()],
+        params: HashMap::new(),
+        tensor_info,
+        metadata: HashMap::new(),
+        warnings: vec![],
+        dim_vars: Default::default(),
+        shape_constraints: Default::default(),
+        subgraphs: HashMap::new(),
+        tensor_names: HashMap::new(),
+    }
+}
+
+/// Test: Fused SwiGLU kernel (AiOp::FusedSwiGLU) matches decomposed ONNX reference.
+///
+/// SwiGLU = silu(gate) * up = gate * sigmoid(gate) * up
+/// The decomposed ONNX graph (Sigmoid + Mul + Mul) is run through ORT as reference.
+/// The fused AiGraph path compiles to FloatOp::FusedSwiGLU in hologram.
+///
+/// A mismatch indicates the fused kernel implementation differs from the
+/// standard decomposed computation.
+#[test]
+fn swiglu_fused_kernel_matches_decomposed() {
+    let rows = 4;
+    let cols = 16;
+
+    let gate: Vec<f32> = (0..rows * cols).map(|i| (i as f32) * 0.05 - 1.5).collect();
+    let up: Vec<f32> = (0..rows * cols).map(|i| ((i % 8) as f32) * 0.2 - 0.7).collect();
+
+    // Reference: decomposed ONNX fixture loaded from file (generated by generate.py).
+    let onnx_bytes = hologram_ai_conformance::ort_runner::fixtures::load("swiglu_fused_reference")
+        .expect("fixture swiglu_fused_reference.onnx not found — run generate.py");
+    let ort_outputs = run_onnx_all_outputs(
+        &onnx_bytes,
+        vec![
+            OrtInput { name: "gate".into(), shape: vec![rows, cols], data: gate.clone() },
+            OrtInput { name: "up".into(), shape: vec![rows, cols], data: up.clone() },
+        ],
+    )
+    .expect("ORT failed for swiglu reference");
+
+    // Fused: AiGraph with FusedSwiGLU compiled through hologram.
+    let graph = build_swiglu_aigraph(rows, cols);
+    let holo_out = compile_and_execute_aigraph(
+        graph,
+        &[
+            ("gate", vec![rows, cols], gate),
+            ("up", vec![rows, cols], up),
+        ],
+    );
+
+    let tol = Tolerance { atol: 1e-5, rtol: 1e-4 };
+    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+        &holo_out,
+        &ort_outputs[0].data,
+        tol,
+    );
+    assert!(
+        cmp.passed,
+        "Fused SwiGLU kernel mismatch vs decomposed ORT reference: {}",
+        cmp.message
+    );
+}
+

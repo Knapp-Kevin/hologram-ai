@@ -35,8 +35,8 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         tokenizer: Option<PathBuf>,
     },
-    /// Run a compiled `.holo` archive (delegates to `hologram run`).
-    Run(hologram::hologram_cli::commands::run_cmd::RunArgs),
+    /// Run a compiled `.holo` archive with shape-aware inference.
+    Run(hologram_ai::commands::run_cmd::RunArgs),
     /// Download a model from HuggingFace Hub.
     Download(download::DownloadArgs),
     /// Validate a model: import, optimize, compile, and report results.
@@ -134,7 +134,7 @@ fn main() -> anyhow::Result<()> {
             );
         }
         Command::Run(args) => {
-            run_holo(args)?;
+            hologram_ai::commands::run_cmd::execute(args)?;
         }
         Command::Download(args) => {
             download::run(args)?;
@@ -166,14 +166,6 @@ fn inspect_holo(
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Run a compiled `.holo` archive — delegates to `hologram run`.
-fn run_holo(args: hologram::hologram_cli::commands::run_cmd::RunArgs) -> anyhow::Result<()> {
-    use hologram::hologram_cli::commands::run_cmd::execute;
-    tokio::runtime::Builder::new_current_thread()
-        .build()?
-        .block_on(execute(args))
-        .map_err(|e| anyhow::anyhow!("{e}"))
-}
 
 /// Inspect an ONNX model file (import + print metadata without compilation).
 fn inspect_onnx(path: &std::path::Path) -> anyhow::Result<()> {

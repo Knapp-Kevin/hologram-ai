@@ -121,17 +121,14 @@ impl LoweringStrategy for DeferredStrategy {
 // Symbolic dims become 0-sentinels in the FloatOp and DimVar/Product recipes.
 // Strategy implementations decide whether to accept or reject deferred recipes.
 
-/// Resolve a single-size op: extract `last_dim` from input 0 as a recipe,
-/// then call $make_op(size_u32) to build the FloatOp.
+/// Resolve a single-size op: extract the concrete last-dim from input 0,
+/// or emit 0 when symbolic. `resolve_dynamic_sizes()` in hologram-exec
+/// patches the 0-sentinel at runtime from the actual input shape, so no
+/// `ParamRecipe` is needed here.
 macro_rules! size_op {
-    ($inputs:expr, $ti:expr, $dvn:expr, |$size:ident| $make_op:expr) => {{
-        let recipe = dim_recipe(last_dim_expr($inputs.first(), $ti), $dvn);
-        let $size = recipe.as_ref().map(resolve_or_zero).unwrap_or(0) as u32;
-        let recipes = match recipe {
-            Some(r) => vec![r],
-            None => vec![],
-        };
-        ($make_op, recipes)
+    ($inputs:expr, $ti:expr, $_dvn:expr, |$size:ident| $make_op:expr) => {{
+        let $size = concrete_last_dim($inputs.first(), $ti).unwrap_or(0) as u32;
+        ($make_op, vec![])
     }};
 }
 
@@ -462,14 +459,18 @@ fn resolve_op(
                 .and_then(|d| d.as_concrete())
                 .unwrap_or(0) as i64;
             // Normalize start/end with respect to axis size.
+            // When axis_size=0 (dynamic/unknown sentinel), preserve positive indices
+            // as-is rather than clamping to 0 — they'll be validated at runtime.
             let norm_start = if start < 0 {
-                (axis_size + start).max(0) as u32
-            } else {
+                if axis_size > 0 { (axis_size + start).max(0) as u32 } else { 0 }
+            } else if axis_size > 0 {
                 start.min(axis_size) as u32
+            } else {
+                start as u32
             };
             let norm_end = if end < 0 {
-                (axis_size + end).max(0) as u32
-            } else if end > axis_size {
+                if axis_size > 0 { (axis_size + end).max(0) as u32 } else { 0 }
+            } else if end > axis_size && axis_size > 0 {
                 axis_size as u32
             } else {
                 end as u32
@@ -648,6 +649,27 @@ fn resolve_op(
             )
         }
 
+        // ── KV cache ops ─────────────────────────────────────────────────
+        AiOp::KvSlotWrite { layer, is_key } => {
+            (
+                FloatOp::KvWrite {
+                    layer: *layer as u32,
+                    n_kv_heads: 0,
+                    head_dim: 0,
+                    is_key: *is_key,
+                },
+                vec![],
+            )
+        }
+        AiOp::KvSlotRead { layer } => (
+            FloatOp::KvRead {
+                layer: *layer as u32,
+                n_kv_heads: 0,
+                head_dim: 0,
+            },
+            vec![],
+        ),
+
         _ => return Ok(None),
     };
 
@@ -788,7 +810,8 @@ fn gather_row_width(
     for dim in info.shape.iter().skip(ax + 1) {
         product = product.saturating_mul(dim.as_concrete()?);
     }
-    Some(product.max(1))
+    // Return 0 if any dim is a 0-sentinel (dynamic); resolve_dynamic_sizes handles it.
+    Some(product)
 }
 
 fn concrete_concat_row_size(
@@ -816,7 +839,8 @@ fn concrete_concat_row_size(
     for dim in info.shape.iter().skip(ax + 1) {
         product = product.saturating_mul(dim.as_concrete()? as usize);
     }
-    Some(product.max(1))
+    // Return 0 if any dim is a 0-sentinel (dynamic); resolve_dynamic_sizes handles it.
+    Some(product)
 }
 
 /// Get the quantization code for a tensor: 0=none, 1=Q4_0, 2=Q8_0.
@@ -1012,14 +1036,22 @@ mod tests {
         let mut dim_var_names = HashMap::new();
         dim_var_names.insert(seq_var, 0u32);
 
-        // ConcreteStrategy should reject
+        // ConcreteStrategy: size_op no longer emits a recipe, so symbolic dims
+        // produce size=0 with no recipe — ConcreteStrategy now accepts this.
         let concrete = ConcreteStrategy;
         let result = concrete
             .lower(&AiOp::Softmax { axis: -1 }, &[0], &ti, &dim_var_names)
             .unwrap();
-        assert!(result.is_none());
+        // size=0 (sentinel), no deferred recipes → ConcreteStrategy accepts it.
+        assert!(result.is_some());
+        let lowering = result.unwrap();
+        match lowering.graph_op {
+            GraphOp::Float(FloatOp::Softmax { size }) => assert_eq!(size, 0),
+            _ => panic!("expected Softmax"),
+        }
+        assert!(lowering.recipe.is_none());
 
-        // DeferredStrategy should produce recipe
+        // DeferredStrategy: same — no recipe needed; resolve_dynamic_sizes() handles size=0.
         let deferred = DeferredStrategy;
         let result = deferred
             .lower(&AiOp::Softmax { axis: -1 }, &[0], &ti, &dim_var_names)
@@ -1030,7 +1062,6 @@ mod tests {
             GraphOp::Float(FloatOp::Softmax { size }) => assert_eq!(size, 0),
             _ => panic!("expected Softmax"),
         }
-        let recipe = lowering.recipe.unwrap();
-        assert_eq!(recipe.params, vec![ParamRecipe::DimVar(0)]);
+        assert!(lowering.recipe.is_none());
     }
 }

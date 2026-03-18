@@ -41,3 +41,8 @@ sha2.workspace       = true
 dirs.workspace       = true
 which.workspace      = true
 tokio-util.workspace = true
+
+[dev-dependencies]
+# Provides onnx_builder (pure Rust, no ORT) for mini fixture tests.
+hologram-ai-conformance = { path = "../hologram-ai-conformance" }
+bytemuck = { workspace = true }

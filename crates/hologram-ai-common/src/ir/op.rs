@@ -364,9 +364,11 @@ pub enum AiOp {
     },
 
     // ── KV-cache ─────────────────────────────────────────────────────────────
-    /// Write K/V tensors into the KV-cache for a given layer.
+    /// Write a K or V tensor into the KV-cache for a given layer.
+    /// `is_key`: true for the K tensor, false for V.
     KvSlotWrite {
         layer: usize,
+        is_key: bool,
     },
     /// Read cached K/V tensors from the KV-cache for a given layer.
     KvSlotRead {

@@ -11,3 +11,4 @@ test-output/
 output/
 specs/scratch.md
 .lexicon/
+!crates/hologram-ai-conformance/fixtures/*

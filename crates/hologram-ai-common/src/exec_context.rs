@@ -25,6 +25,9 @@ use hologram::hologram_archive::section::{EmbeddableSection, SECTION_CUSTOM_BASE
 /// Section kind for shape recipe metadata.
 pub const SECTION_SHAPE_RECIPE: u32 = SECTION_CUSTOM_BASE + 0x20;
 
+/// Section kind for the compile-time shape context graph.
+pub const SECTION_SHAPE_CONTEXT: u32 = SECTION_CUSTOM_BASE + 0x21;
+
 // ── ExecContext trait ───────────────────────────────────────────────────────
 
 /// Typed execution context carried inside a `.holo` archive.
@@ -193,6 +196,163 @@ impl RuntimeContext for SimpleRuntimeContext {
 
     fn set<T: Send + Sync + 'static>(&mut self, key: &str, value: T) {
         self.store.insert(key.to_string(), Box::new(value));
+    }
+}
+
+// ── ShapeContextGraph types ──────────────────────────────────────────────────
+
+/// Serializable representation of a single output dimension of an op.
+///
+/// Mirrors hologram's `ShapeDim` but is archive-safe via rkyv.
+#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub enum ShapeDimRepr {
+    /// Constant dimension (e.g., `hidden_size = 2048`).
+    Fixed(u32),
+    /// Inherits from a specific input's axis. Negative axis counts from the end.
+    FromInput { input: u8, axis: i8 },
+    /// Inferred from the total element count divided by the product of known dims.
+    Inferred,
+}
+
+/// Serializable, archive-safe representation of a per-op output shape rule.
+///
+/// Mirrors hologram's `ShapeSpec` but extended with custom variants that carry
+/// baked-in parameters (e.g., `k_hint` for `MatMul`, `dim` for `Gather/Embed`)
+/// so shapes can be resolved without re-reading the `FloatOp` struct.
+#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub enum ShapeSpecRepr {
+    /// Output shape equals input `i`'s shape (unary elementwise, norms, etc.).
+    SameAs(u8),
+    /// Output shape is the broadcast of inputs `a` and `b`.
+    Broadcast(u8, u8),
+    /// Output shape is the broadcast of all inputs (e.g., `Where`).
+    BroadcastAll,
+    /// Output shape is input `i`'s shape with the last dimension dropped (reductions).
+    DropLastDim(u8),
+    /// Output shape specified dimension-by-dimension (gather, embed, etc.).
+    Dims(Vec<ShapeDimRepr>),
+    /// Matrix multiplication: `[..batch, m, n]` from `A[..batch, m, k] × B[k, n]`.
+    /// `k_hint` is the inner dimension baked at compile time (0 = infer from buffer).
+    MatMul { k_hint: u32 },
+    /// GEMM (2-D): `[m, n]` from `A[m, k] × B[k, n]`. `k` baked at compile time.
+    Gemm { k: u32 },
+    /// Gather / embed: indices shape ++ `[dim]`.
+    GatherEmbed { dim: u32 },
+    /// Transpose: permute axes according to `perm[..ndim]`.
+    Transpose { perm: [u8; 8], ndim: u8 },
+    /// Reshape: output shape parsed from shape-value bytes (second input).
+    Reshape,
+    /// Concat along the last axis: `output[-1] = a[-1] + b[-1]`.
+    Concat,
+    /// Contiguous axis slice. `axis_from_end=1` means the last axis.
+    Slice { axis_from_end: u8, start: u32, end: u32 },
+    /// Shape op: output is a 1-D tensor `[ndim_of_input]`.
+    Shape,
+    /// Insert size-1 dims at specified axes. Negative axes count from the end
+    /// of the *output* rank.
+    Unsqueeze { axes: Vec<i8> },
+    /// Remove size-1 dims at specified axes. Negative axes count from the end
+    /// of the *input* rank.
+    Squeeze { axes: Vec<i8> },
+    /// Tile: repeat each dimension by the corresponding factor.
+    Tile { repeats: Vec<u32> },
+    /// Shape cannot be resolved structurally (data-dependent or vision ops).
+    Unknown,
+}
+
+/// A fully-concrete shape known at compile time — used to seed the runtime `ShapeMap`.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct ShapeSeed {
+    /// Graph node ID.
+    pub node_id: u32,
+    /// Concrete shape (no zeros).
+    pub shape: Vec<u32>,
+    /// If this node is a shape-value constant (output of a `Shape` or `Reshape`
+    /// subgraph), these are the i64 values the runtime can read directly.
+    pub known_i64_values: Option<Vec<Option<i64>>>,
+}
+
+/// Compile-time projection rule for one graph node: how the output shape
+/// derives from input shapes.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct ShapeProjectionEntry {
+    /// Graph node ID.
+    pub node_id: u32,
+    /// IDs of the input nodes whose shapes feed this projection (in input order).
+    pub input_node_ids: Vec<u32>,
+    /// Shape derivation rule.
+    pub spec: ShapeSpecRepr,
+    /// If `Some(i)`, input `i` carries raw shape-value bytes (for `Reshape`,
+    /// `Expand`, `Pad`, etc.). The walker reads those bytes from the arena.
+    pub shape_value_input: Option<u8>,
+}
+
+/// Compile-time shape projection map embedded in the `.holo` archive.
+///
+/// At runtime, [`walk_shape_context`] performs a single topological pass over
+/// `projections`, seeded by `seeds` + user-supplied input shapes, to fully
+/// populate the runtime `ShapeMap` before any dispatch.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct ShapeContextGraph {
+    /// Concrete shapes known at compile time (constants, weights, fixed inputs).
+    pub seeds: Vec<ShapeSeed>,
+    /// Per-node projection entries in topological order.
+    pub projections: Vec<ShapeProjectionEntry>,
+}
+
+impl ShapeContextGraph {
+    /// Create an empty graph.
+    pub fn new() -> Self {
+        Self {
+            seeds: Vec::new(),
+            projections: Vec::new(),
+        }
+    }
+
+    /// Whether the graph has no entries.
+    pub fn is_empty(&self) -> bool {
+        self.seeds.is_empty() && self.projections.is_empty()
+    }
+
+    /// Zero-copy access from raw archive bytes.
+    pub fn from_bytes(
+        bytes: &[u8],
+    ) -> Result<&ArchivedShapeContextGraph, rkyv::rancor::Error> {
+        rkyv::access::<ArchivedShapeContextGraph, rkyv::rancor::Error>(bytes)
+    }
+
+    /// Deserialize from raw bytes into an owned `ShapeContextGraph`.
+    pub fn deserialize_from(bytes: &[u8]) -> Result<Self, rkyv::rancor::Error> {
+        rkyv::from_bytes::<Self, rkyv::rancor::Error>(bytes)
+    }
+}
+
+impl Default for ShapeContextGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EmbeddableSection for ShapeContextGraph {
+    fn section_kind(&self) -> u32 {
+        SECTION_SHAPE_CONTEXT
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        rkyv::to_bytes::<rkyv::rancor::Error>(self)
+            .expect("ShapeContextGraph serialization")
+            .to_vec()
+    }
+}
+
+impl ExecContext for ShapeContextGraph {
+    fn section_id() -> u32 {
+        SECTION_SHAPE_CONTEXT
+    }
+
+    fn from_context_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
+        Self::deserialize_from(bytes)
+            .map_err(|e| anyhow::anyhow!("deserialize ShapeContextGraph: {e}"))
     }
 }
 

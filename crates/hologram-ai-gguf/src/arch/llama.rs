@@ -96,7 +96,24 @@ pub fn build_llama_graph(
             b.bsv(kv_dim),
         );
 
-        // Grouped-query attention
+        // KV cache write points — one per tensor (K and V).
+        // Each is an identity pass-through at the AiGraph level; the lowering
+        // pipeline converts them to FloatOp::KvWrite which interacts with
+        // KvCacheState at runtime.
+        let k_cached = b.add_node(
+            AiOp::KvSlotWrite { layer: layer as usize, is_key: true },
+            vec![k_rope],
+            DType::F32,
+            b.bsv(kv_dim),
+        );
+        let v_cached = b.add_node(
+            AiOp::KvSlotWrite { layer: layer as usize, is_key: false },
+            vec![v],
+            DType::F32,
+            b.bsv(kv_dim),
+        );
+
+        // Grouped-query attention uses cached K/V.
         let attn_out = b.add_node(
             AiOp::GroupedQueryAttention {
                 num_heads: params.head_count,
@@ -105,7 +122,7 @@ pub fn build_llama_graph(
                 scale: None,
                 causal: true,
             },
-            vec![q_rope, k_rope, v],
+            vec![q_rope, k_cached, v_cached],
             DType::F32,
             b.bsv(emb_dim),
         );
@@ -369,6 +386,16 @@ impl<'a> GraphAssembler<'a> {
         metadata.insert(
             "n_embd".to_string(),
             hologram_ai_common::MetaValue::Int(self.params.embedding_length as i64),
+        );
+        metadata.insert(
+            "n_kv_heads".to_string(),
+            hologram_ai_common::MetaValue::Int(self.params.head_count_kv as i64),
+        );
+        metadata.insert(
+            "head_dim".to_string(),
+            hologram_ai_common::MetaValue::Int(
+                (self.params.embedding_length / self.params.head_count.max(1)) as i64,
+            ),
         );
 
         Ok(AiGraph {

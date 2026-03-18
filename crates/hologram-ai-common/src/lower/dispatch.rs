@@ -110,9 +110,9 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
         Flatten { .. } => D::GraphOp(GraphOp::Float(FloatOp::Reshape)),
         Embed => D::FloatNeedsShape,
 
-        // ── KV-cache (structural, pass-through at graph level) ──────────
-        KvSlotWrite { .. } => D::Identity,
-        KvSlotRead { .. } => D::Identity,
+        // ── KV-cache ops ────────────────────────────────────────────────
+        KvSlotWrite { .. } => D::FloatNeedsShape,
+        KvSlotRead { .. } => D::FloatNeedsShape,
 
         // ── Identity pass-through ────────────────────────────────────────
         Squeeze { .. } => D::Identity,

@@ -279,6 +279,60 @@ fn tinyllama_gguf_runs_and_produces_english() {
     );
 }
 
+// ── Variable seq_len tests ────────────────────────────────────────────────────
+
+/// Compile TinyLlama ONNX once and run it with different sequence lengths via
+/// the library API. Verifies that the same compiled archive executes correctly
+/// for seq_len = 1, 7, and 128 without shape errors.
+///
+/// Uses fake token IDs (all-1s). We're not checking output quality, only that
+/// the shape projection system handles variable-length inputs without panics or
+/// shape-mismatch errors.
+#[test]
+fn tinyllama_onnx_variable_seq_len_runs() {
+    let model = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
+    if !model.exists() {
+        let causal = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
+        if !causal.exists() {
+            eprintln!("SKIP: no TinyLlama ONNX model found");
+            return;
+        }
+    }
+    let model = {
+        let causal = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
+        if causal.exists() { causal } else { model }
+    };
+
+    // Compile once.
+    let archive = hologram_ai::ModelCompiler::default()
+        .compile(hologram_ai::ModelSource::OnnxPath(model))
+        .expect("TinyLlama ONNX compilation failed");
+
+    // Run with different seq_len values using ShapeContextGraph hints.
+    // TinyLlama ONNX inputs:
+    //   0: input_ids [1, seq_len] (i64)
+    //   1: attention_mask [1, seq_len] (i64, all-ones)
+    for seq_len in [1usize, 7, 128] {
+        let token_ids: Vec<i64> = vec![1i64; seq_len];
+        let attn_mask: Vec<i64> = vec![1i64; seq_len];
+        let id_bytes: Vec<u8> = bytemuck::cast_slice(&token_ids).to_vec();
+        let mask_bytes: Vec<u8> = bytemuck::cast_slice(&attn_mask).to_vec();
+        let mut graph_inputs = hologram::GraphInputs::new();
+        graph_inputs.set_with_shape(0, id_bytes, vec![1, seq_len]);
+        graph_inputs.set_with_shape(1, mask_bytes, vec![1, seq_len]);
+
+        let outputs = hologram_ai::run_with_shape_context(&archive, &graph_inputs)
+            .expect(&format!("seq_len={seq_len} execution failed"));
+
+        assert!(
+            !outputs.get(0).map(|(_, b)| b.is_empty()).unwrap_or(true),
+            "seq_len={seq_len} produced empty output"
+        );
+
+        eprintln!("seq_len={seq_len} OK — {} output bytes", outputs.get(0).map(|(_, b)| b.len()).unwrap_or(0));
+    }
+}
+
 // ── Regression tests for known bugs ──────────────────────────────────────────
 
 /// Regression: NaN detector must not fire false positives on i64 outputs.
