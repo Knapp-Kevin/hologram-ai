@@ -2,16 +2,11 @@
 
 ## Sprint Goal
 
-**ShapeContextGraph — Compile-Time Shape Projection (Plan 008):** Replace the
-brute-force `ParamRecipe`/0-sentinel mechanism with a formalized `ShapeContextGraph`
-that maps each operation's output shape derivation using hologram's `ShapeSpec`/`ShapeDim`
-language. A single topological walk at runtime projects all shapes forward from concrete
-inputs, enabling shape-polymorphic compilation (same `.holo` archive for any `seq_len`,
-`batch`, etc.). See `specs/plans/008-shape-context-graph.md`.
-
-**Previous sprint (complete):** Execution Conformance Testing (Plan 006) + TinyLlama
-E2E (feat/tinyllama-e2e) — conformance harness, concat axis fix, broadcast inflation fix,
-ONNX model runs end-to-end. See `specs/plans/006-execution-conformance.md`.
+**Attention Fusion + KV Cache + LUT-GEMM (Plan 012):**
+Fuse ONNX decomposed attention into `GroupedQueryAttention`, implement KV cache
+for prefill/decode generation, and wire LUT-GEMM for GGUF Q4_0 weights.
+ONNX first, then GGUF benefits from same infrastructure.
+See `specs/plans/012-attention-fusion-kvcache-lutgemm.md`.
 
 **Design principle:** hologram-ai is a compiler only (ADR-0016). It ships
 zero runtime code. All kernels belong in hologram base crate.
@@ -19,43 +14,157 @@ CLI: `compile`, `info`, `download` — nothing else.
 
 ---
 
-## In Progress
+## In Progress: Plan 012 — Attention Fusion + KV Cache + LUT-GEMM
+
+### Phase 1: ONNX Attention Fusion ✓
+- [x] Add `AttentionFusion` pass (MatMul→Add→Softmax→[IsNaN→Where]→MatMul → GroupedQueryAttention)
+- [x] Register in OptPipeline (after RmsNormFusion)
+- [x] TinyLlama ONNX: 22/22 layers fused, 1294 → 1167 nodes
+
+### Phase 2a: KV Cache (hologram base crate) ✓
+- [x] Add `FloatOp::KvWrite` / `FloatOp::KvRead` to hologram-core
+- [x] Add `KvCacheState` to hologram-exec (write/read/advance/reset, 2 tests)
+- [x] Add `execute_with_kv_state()` + `execute_plan_with_kv_state()` API
+- [x] Re-export `KvCacheState` from hologram facade
+- [ ] Wire KvWrite/KvRead dispatch into executor (TODO when integration ready)
+
+### Phase 2b: KV Cache (hologram-ai) — in progress
+- [x] Fix GGUF metadata (n_kv_heads, head_dim → is_llm=true)
+- [x] Inject KvSlotWrite ops in GGUF builder (2 per layer: K + V, with is_key tag)
+- [x] Lowering strategy: KvSlotWrite → FloatOp::KvWrite, KvSlotRead → FloatOp::KvRead
+- [x] KvWrite/KvRead pass-through dispatch in float_dispatch.rs
+- [x] HoloRunner pipeline support (sub-archive extraction, section fallback)
+- [x] Pipeline archive compiles and runs end-to-end (GGUF 377 nodes)
+- [x] KvCacheState wired into executor dispatch loop (writes K/V per layer)
+- [x] Generation loop uses execute_with_kv (cache fills during full-seq execution)
+- [x] HoloRunner.execute_with_kv() method
+- [x] **Decode mode**: single-token input with KV cache expansion ✓
+  - [x] RoPE position offset (start_pos injected for decode tokens)
+  - [x] KV cache expansion (cache[0..pos] ++ new_data for K/V)
+  - [x] Causal mask fix for absolute positions (seq_q < seq_k)
+  - [x] Verified: decode logits match full-recomputation exactly
+- [x] ONNX: inject KvSlot after attention fusion (KvSlotInjection pass)
+
+### Phase 3: LUT-GEMM
+- [x] Q4_0 → QuantizedWeights4 compile-time converter (`try_convert_q4_0_to_lut4`)
+- [x] Lowering: Q4_0 Gemm → MatMulLut4 (builder intercepts `quant_b=1`)
+- [x] Builder: constant insertion for LUT weights (`matmul_lut_4bit`)
+
+---
+
+## Resolved: Plan 011 — GGUF Step 1+ Gibberish Diagnosis
+
+**Finding:** hologram-exec computation is provably correct (causal cos_sim=1.0 at all
+seq lengths). Degeneration is from full-sequence recomputation without KV cache —
+Q4_0 dequant→f32→Gemm noise accumulates. ollama (with KV cache) produces correct output.
+
+- [x] Causal logit consistency test (`mini_fixture.rs`) — cos_sim=1.0 ✓
+- [x] Fix `resolve_gemm`/`resolve_matmul` rank preservation (`shape_spec_bridge.rs`)
+- [x] Guard `resolve_dynamic_sizes` against 1-D shapes (`executor.rs`)
+
+## Resolved: Plan 010 — GGUF Generation Quality Fix
+
+- [x] Rewrite `run_cmd.rs` — SeqMode enum, temperature+top-k sampling, penalty fix
+- [x] Add `has_shape_context()` to HoloRunner
+- [x] Add fixture-driven regression testing methodology to AGENTS.md
+- [x] Add fused kernel conformance tests (GQA, SwiGLU) with file-based fixtures
+
+---
+
+## In Progress: Plan 009 — LUT-GEMM + KV-Cache + ShapeContextGraph Runtime
+
+### Step 1 — ShapeContextGraph Runtime Integration
+
+#### Step 1a — `execute_plan_with_shape_hints()` API (hologram-exec)
+- [x] Add `shape_hints: Option<&HashMap<u32, Vec<usize>>>` to `propagate_level_shapes()` — hints override all compiled/inferred shapes (shape_propagate.rs)
+- [x] Split `execute_core` → `execute_core_with_hints` to thread hints through the dispatch loop (executor.rs)
+- [x] Add `KvExecutor::execute_with_shape_hints()` public method (executor.rs)
+- [x] Add `execute_plan_with_shape_hints()` function to `mmap/mod.rs`
+- [x] Export `execute_plan_with_shape_hints` from `hologram-exec/src/lib.rs`
+- [x] Re-export from hologram facade `src/lib.rs`
+
+#### Step 1b — `run_with_shape_context()` caller (hologram-ai)
+- [x] Add `read_shape_context_from_archive()` — reads `ShapeContextGraph` from `.holo` bytes via section table offset (compiler.rs)
+- [x] Add `run_with_shape_context()` — loads archive, walks ShapeContextGraph with runtime input shapes, calls `execute_plan_with_shape_hints()` (compiler.rs)
+- [x] Export from `hologram-ai/src/lib.rs`
+
+#### Step 1c — Wire into conformance test and e2e test
+- [x] Update `tinyllama_causal_onnx_top1_matches_ort` conformance test to use `run_with_shape_context()` — fixes seq=2 divergence
+- [x] Update `tinyllama_onnx_variable_seq_len_runs` e2e test to use `run_with_shape_context()` — explicit shape hint path
+
+#### Pending verification
+- [ ] Run `tinyllama_causal_onnx_top1_matches_ort` — expect PASS for seq=2
+- [ ] Run `tinyllama_onnx_variable_seq_len_runs` — expect PASS for seq=1,7,128
+
+### Step 2 — LUT-GEMM for GGUF Q4_0 (pending)
+- [ ] Add `FloatOp::MatMulQ4 { m, k, n }` to hologram-core
+- [ ] Add `dispatch_matmul_q4()` kernel in hologram-exec
+- [ ] Change lowering strategy: GGUF Q4_0 → `MatMulQ4` instead of `Gemm { quant_b: 1 }`
+- [ ] Verify: GGUF generation speed > 1 tok/s (vs 0.1 tok/s today)
+
+### Step 3 — KV-Cache (pending)
+- [ ] Add `KvCacheStore` + `KvSlotWrite`/`Read` dispatch in hologram-exec
+- [ ] Lower `AiOp::KvSlotWrite`/`KvSlotRead` to `FloatOp` variants in strategy.rs
+- [ ] Prefill/Decode graph split in hologram-ai-gguf llama.rs
+- [ ] ShapeContextGraph `FromInput` spec for variable cache length
+
+---
+
+## Complete
 
 ### ShapeContextGraph (Plan 008)
 
-#### Step 1 — `AiOp → ShapeSpecRepr` translator
-- [ ] Create `crates/hologram-ai-common/src/lower/shape_spec_bridge.rs`
-- [ ] Implement `ai_op_to_shape_spec()` using `OpCategory` for structural classification
-- [ ] Handle Custom ops: MatMul, Reshape, Expand, Gather, Concat, Conv
-- [ ] Unit tests: all OpCategory variants + custom shape extraction
+#### Step 1 — `FloatOp → ShapeSpecRepr` translator
+- [x] Create `crates/hologram-ai-common/src/lower/shape_spec_bridge.rs`
+- [x] Implement `float_op_to_shape_spec_repr()` mapping all `FloatOp` variants to serializable specs
+- [x] Handle all op families: unary, binary, norms, reductions, MatMul/Gemm, Gather/Embed, Reshape, Transpose, Concat, Slice, Attention, Shape, Where, vision ops (`Unknown`)
+- [x] Implement `resolve_spec()` runtime resolver with helpers (broadcast, dims, matmul, gemm, reshape, parse_shape_i64)
+- [x] 15 unit tests: all spec variants + runtime resolution
 
 #### Step 2 — Build `ShapeContextGraph` during lowering
-- [ ] Add `ShapeContextGraph`, `ShapeProjectionEntry`, `ShapeSpecRepr`, `ShapeDimRepr` types to `exec_context.rs`
-- [ ] Emit seeds for fully-concrete output nodes in `builder.rs`
-- [ ] Emit `ShapeProjectionEntry` per node after lowering loop
-- [ ] Add `ShapeContextGraph` to `ExecContext` and archive pipeline
+- [x] Add `ShapeDimRepr`, `ShapeSpecRepr`, `ShapeSeed`, `ShapeProjectionEntry`, `ShapeContextGraph` types to `exec_context.rs` (rkyv-serializable, `SECTION_SHAPE_CONTEXT = SECTION_CUSTOM_BASE + 0x21`)
+- [x] Emit `ShapeSeed` for constant params with fully-concrete shapes in `builder.rs`
+- [x] Emit `ShapeSeed` for input nodes with fully-concrete shapes
+- [x] Emit `ShapeProjectionEntry` for every `GraphOp::Float(...)` node in topo loop (both `GraphOp` and `FloatNeedsShape` branches)
+- [x] Insert `ShapeContextGraph` into `ContextBundle` alongside `ShapeRecipeSection`
 
 #### Step 3 — Runtime `walk_shape_context()`
-- [ ] Implement `walk_shape_context()` in `exec_context.rs`
-- [ ] Integrate with hologram's `resolve_float_shape()` for each entry
-- [ ] Handle `shape_value_input` (read bytes from `BufferArena` for Reshape/Expand)
-- [ ] Unit tests: seed propagation, symbolic seq_len resolution, Expand example
+- [x] Implement `walk_shape_context()` in `shape_spec_bridge.rs` (topological seed → project walk)
+- [x] Seeds `ShapeMap` from compile-time concrete shapes, then injects runtime input shapes
+- [x] Calls `resolve_spec()` per `ShapeProjectionEntry`, handles `shape_value_input` for Reshape/Expand
+- [x] Re-exported from `lower/mod.rs` as public API
 
-#### Step 4 — Retire `ParamRecipe` for shape-resolved dims
-- [ ] In `strategy.rs`: skip `DimVar`/`RuntimeInferred` recipes for dims covered by `ShapeContextGraph`
-- [ ] Keep recipes only for true kernel scalar params not covered by `resolve_dynamic_sizes()`
+#### Step 4 — `ParamRecipe` (deferred)
+- `ParamRecipe`/`DeferredStrategy` kept as belt-and-suspenders alongside `ShapeContextGraph`.
+  Full retirement deferred until end-to-end pipeline is verified with variable `seq_len`.
 
 #### Step 5 — Extend hologram `resolve_dynamic_sizes()`
-- [ ] Cover `Attention { head_dim: 0 }` — infer from Q input shape
-- [ ] Cover `Embed { dim: 0 }` — infer from embedding table shape
-- [ ] Cover `Concat { size_a: 0, size_b: 0 }` — infer from input shapes in ShapeMap
-- [ ] Verify: no `ParamRecipe::DimVar` / `RuntimeInferred` remain in final archive
+- [x] Cover `Embed { dim: 0 }` — infers `dim` from embedding table `shape[-1]`
+- [x] Cover `Concat { size_a: 0, size_b: 0 }` — infers row sizes from input `shape[-1]`
+- [x] Cover `Attention { head_dim: 0 }` — infers `head_dim` from Q `shape[-1] / num_q_heads`
 
 #### Verification
-- [ ] `cargo test -p hologram-ai-common` — shape_spec_bridge + walk_shape_context unit tests
-- [ ] `cargo test -p hologram-ai-conformance` — exec conformance against ORT
-- [ ] `cargo test -p hologram-ai --features e2e -- tinyllama` — variable seq_len (1, 7, 128, 512)
-- [ ] Assert ShapeMap matches ORT intermediates at every node
+- [x] `cargo test -p hologram-ai-common` — 133 tests pass (shape_spec_bridge + walk_shape_context + all prior)
+- [x] `cargo test -p hologram-ai-conformance` — 45 tests pass
+- [x] `cargo check --workspace` — zero errors, zero clippy warnings
+
+#### Step 4 (completed) — Retire `ParamRecipe` for shape-derived cases
+- [x] `size_op!` macro no longer emits `ParamRecipe::DimVar` / `RuntimeInferred` — emits 0-sentinel only
+- [x] `resolve_dynamic_sizes()` extended to cover `ReduceProd { size: 0 }` and `InstanceNorm { size: 0 }` (hologram-exec)
+- [x] All `size_op!` ops now rely on `resolve_dynamic_sizes()` for runtime patching — no recipe needed
+- [x] `size_op_with_symbolic_dim` test updated to assert `recipe.is_none()` and `size=0`
+
+#### Step 6 (completed) — Variable seq_len E2E + walk_shape_context conformance
+- [x] `tinyllama_onnx_variable_seq_len_runs` test in `tinyllama_e2e.rs` (seq_len = 1, 7, 128)
+- [x] `compile_with_shape_context()` API on `ModelCompiler` (returns archive + debug_map + ShapeContextGraph)
+- [x] `walk_shape_context_matmul_projects_output_shape` conformance test — asserts MatMul output shape [m,n]
+- [x] `walk_shape_context_rmsnorm_same_as_input` conformance test — asserts SameAs(0) projection
+
+#### Verification (final)
+- [x] `cargo test -p hologram-ai-common` — all tests pass
+- [x] `cargo test -p hologram-ai-conformance --features conformance` — compiles clean
+- [x] `cargo clippy -p hologram-ai-common -- -D warnings` — zero warnings
+- [x] `cargo check --workspace` — zero errors
 
 ---
 

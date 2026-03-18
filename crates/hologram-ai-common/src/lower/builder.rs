@@ -4,12 +4,16 @@
 //! increments the builder's index counter; `tid_to_idx` maps `TensorId` → builder index.
 
 use super::dispatch::{dispatch, DispatchTarget};
+use super::shape_spec_bridge::ShapeProjection;
 use super::strategy::{
     ai_dtype_to_float_dtype, input_float_dtype, ConcreteStrategy, DeferredStrategy,
     LoweringStrategy,
 };
 use super::LowerPhase;
-use crate::exec_context::{ContextBundle, NodeShapeRecipe, ShapeRecipeSection};
+use crate::exec_context::{
+    ContextBundle, NodeShapeRecipe, ShapeContextGraph, ShapeProjectionEntry, ShapeRecipeSection,
+    ShapeSeed,
+};
 use crate::ir::{AiGraph, AiNode, AiOp, Dim, DimVarId, TensorId, TensorInfo};
 use crate::mem::KvCacheLayout;
 use anyhow::Context;
@@ -91,6 +95,9 @@ pub fn lower(
     // Collect shape recipes from deferred lowerings.
     let mut node_recipes: Vec<NodeShapeRecipe> = Vec::new();
 
+    // Accumulate the compile-time shape context graph.
+    let mut shape_context = ShapeContextGraph::new();
+
     // Register named graph inputs and insert Input nodes.
     for (i, &tid) in ai_graph.inputs.iter().enumerate() {
         let name = ai_graph.input_name(i);
@@ -98,7 +105,15 @@ pub fn lower(
         builder = builder.node_from_graph_input(GraphOp::Input, i as u32);
         let idx = builder.len() - 1;
         if let Some(shape) = output_shape(Some(&tid), &ai_graph.tensor_info) {
-            builder = builder.set_node_shape(idx, shape);
+            builder = builder.set_node_shape(idx, shape.clone());
+            // Emit a seed only if the shape is fully concrete (no 0-sentinels).
+            if !shape.contains(&0) {
+                shape_context.seeds.push(ShapeSeed {
+                    node_id: idx as u32,
+                    shape: shape.iter().map(|&d| d as u32).collect(),
+                    known_i64_values: None,
+                });
+            }
         }
         let dtype = input_float_dtype(Some(&tid), &ai_graph.tensor_info);
         builder = builder.set_node_dtype(idx, dtype);
@@ -188,6 +203,25 @@ pub fn lower(
             tracing::warn!("constant T{tid} idx={builder_idx} shape/size mismatch: shape={shape_ref:?} elems={shape_elems} expected_bytes={expected_bytes} actual={byte_sz} dtype={dtype:?} param_dtype={param_dtype}");
         }
         tid_to_idx.insert(tid, builder_idx);
+
+        // Emit a seed for constant params whose shape is fully concrete.
+        if let Some(shape) = param_shape(param, tid, &ai_graph.tensor_info) {
+            if !shape.contains(&0) {
+                // Try tensor_info first; fall back to extracting i64 values
+                // directly from small INT64 constant bytes (tensor_info values
+                // may have been cleared by post-concretization passes).
+                let known_i64_values = ai_graph
+                    .tensor_info
+                    .get(&tid)
+                    .and_then(|ti| ti.known_i64_values.clone())
+                    .or_else(|| extract_i64_values_from_param(param, &shape));
+                shape_context.seeds.push(ShapeSeed {
+                    node_id: builder_idx as u32,
+                    shape: shape.iter().map(|&d| d as u32).collect(),
+                    known_i64_values,
+                });
+            }
+        }
     }
 
     // Emit each node in topological order.
@@ -214,6 +248,11 @@ pub fn lower(
 
         match dispatch(&node.op) {
             DispatchTarget::GraphOp(graph_op) => {
+                // Capture the FloatOp for shape projection before move.
+                let float_op_for_spec: Option<FloatOp> = match &graph_op {
+                    GraphOp::Float(fop) => Some(*fop),
+                    _ => None,
+                };
                 builder = builder.node_with_inputs(graph_op, &input_idxs);
                 let idx = builder.len() - 1;
                 if let Some(&tid) = node.outputs.first() {
@@ -244,6 +283,20 @@ pub fn lower(
                     let dtype = input_float_dtype(Some(&tid), &ai_graph.tensor_info);
                     builder = builder.set_node_dtype(idx, dtype);
                     tid_to_idx.insert(tid, idx);
+
+                    // Emit shape projection entry via ShapeProjection trait.
+                    if let Some((spec, shape_value_input)) =
+                        float_op_for_spec.and_then(|fop| fop.shape_spec())
+                    {
+                        let input_node_ids: Vec<u32> =
+                            input_idxs.iter().map(|&i| i as u32).collect();
+                        shape_context.projections.push(ShapeProjectionEntry {
+                            node_id: idx as u32,
+                            input_node_ids,
+                            spec,
+                            shape_value_input,
+                        });
+                    }
                 }
             }
             DispatchTarget::FloatNeedsShape => {
@@ -276,6 +329,46 @@ pub fn lower(
                     )
                 })?;
 
+                // ── LUT-GEMM interception ────────────────────────────────
+                // If the strategy produced a Gemm with quant_b=1 (Q4_0),
+                // convert to MatMulLut4 using the hologram LUT-GEMM kernel.
+                if let GraphOp::Float(FloatOp::Gemm { quant_b: 1, .. }) = &result.graph_op {
+                    if let Some(lut_result) = try_convert_q4_0_to_lut4(
+                        node,
+                        ai_graph,
+                        &input_idxs,
+                    )? {
+                        builder = builder.matmul_lut_4bit(
+                            ConstantData::Bytes(lut_result.serialized_weights),
+                            &[input_idxs[0]], // activation input only
+                        );
+                        let idx = builder.len() - 1;
+                        if let Some(&tid) = node.outputs.first() {
+                            // Output shape: [m, n] (activation rows × weight cols).
+                            let out_shape = output_shape(Some(&tid), &ai_graph.tensor_info);
+                            if let Some(ref s) = out_shape {
+                                builder = builder.set_node_shape(idx, s.clone());
+                            }
+                            let dtype = input_float_dtype(Some(&tid), &ai_graph.tensor_info);
+                            builder = builder.set_node_dtype(idx, dtype);
+                            tid_to_idx.insert(tid, idx);
+                        }
+                        tracing::info!(
+                            node_id = node.id,
+                            rows = lut_result.rows,
+                            cols = lut_result.cols,
+                            "LUT-GEMM: converted Q4_0 Gemm → MatMulLut4"
+                        );
+                        continue; // Skip normal FloatNeedsShape emission.
+                    }
+                }
+
+                // Capture FloatOp for shape projection before move.
+                let float_op_for_spec: Option<FloatOp> = match &result.graph_op {
+                    GraphOp::Float(fop) => Some(*fop),
+                    _ => None,
+                };
+
                 builder = builder.node_with_inputs(result.graph_op, &input_idxs);
                 let idx = builder.len() - 1;
 
@@ -292,15 +385,65 @@ pub fn lower(
                     let dtype = input_float_dtype(Some(&tid), &ai_graph.tensor_info);
                     builder = builder.set_node_dtype(idx, dtype);
                     tid_to_idx.insert(tid, idx);
+
+                    // Emit shape projection entry via ShapeProjection trait.
+                    if let Some((spec, shape_value_input)) =
+                        float_op_for_spec.and_then(|fop| fop.shape_spec())
+                    {
+                        let input_node_ids: Vec<u32> =
+                            input_idxs.iter().map(|&i| i as u32).collect();
+                        shape_context.projections.push(ShapeProjectionEntry {
+                            node_id: idx as u32,
+                            input_node_ids,
+                            spec,
+                            shape_value_input,
+                        });
+                    }
                 }
             }
             DispatchTarget::Identity => {
                 if let (Some(&in_tid), Some(&out_tid)) = (node.inputs.first(), node.outputs.first())
                 {
-                    if let Some(&idx) = tid_to_idx.get(&in_tid) {
-                        tid_to_idx.insert(out_tid, idx);
-                        let dtype = input_float_dtype(Some(&out_tid), &ai_graph.tensor_info);
-                        builder = builder.set_node_dtype(idx, dtype);
+                    if let Some(&in_idx) = tid_to_idx.get(&in_tid) {
+                        let in_shape = output_shape(Some(&in_tid), &ai_graph.tensor_info);
+                        let out_shape_val = output_shape(Some(&out_tid), &ai_graph.tensor_info);
+
+                        let shapes_differ = match (&in_shape, &out_shape_val) {
+                            (Some(a), Some(b)) => a.len() != b.len() || a != b,
+                            _ => false,
+                        };
+
+                        if shapes_differ {
+                            // Shape-changing identity op (Unsqueeze, Squeeze, etc.):
+                            // emit a Reshape node so the ShapeContextGraph has full
+                            // coverage and the walker can propagate shapes through.
+                            builder = builder.node_with_inputs(
+                                GraphOp::Float(FloatOp::Reshape),
+                                &[in_idx],
+                            );
+                            let idx = builder.len() - 1;
+                            if let Some(ref s) = out_shape_val {
+                                builder = builder.set_node_shape(idx, s.clone());
+                            }
+                            let dtype = input_float_dtype(Some(&out_tid), &ai_graph.tensor_info);
+                            builder = builder.set_node_dtype(idx, dtype);
+                            tid_to_idx.insert(out_tid, idx);
+
+                            // Use ShapeProjection trait on the AiOp to get the spec.
+                            if let Some((spec, shape_value_input)) = node.op.shape_spec() {
+                                shape_context.projections.push(ShapeProjectionEntry {
+                                    node_id: idx as u32,
+                                    input_node_ids: vec![in_idx as u32],
+                                    spec,
+                                    shape_value_input,
+                                });
+                            }
+                        } else {
+                            // Pure identity: alias as before.
+                            tid_to_idx.insert(out_tid, in_idx);
+                            let dtype = input_float_dtype(Some(&out_tid), &ai_graph.tensor_info);
+                            builder = builder.set_node_dtype(in_idx, dtype);
+                        }
                     }
                 }
             }
@@ -342,6 +485,9 @@ pub fn lower(
             dim_vars: recipe_dim_vars,
             node_recipes,
         });
+    }
+    if !shape_context.is_empty() {
+        context.insert(&shape_context);
     }
 
     Ok(LoweringOutput {
@@ -868,6 +1014,171 @@ fn infer_reshape_shape(
     }
 
     None
+}
+
+/// Extract i64 values from a small INT64 constant parameter.
+///
+/// Used to seed `ShapeSeed::known_i64_values` when `tensor_info.known_i64_values`
+/// has been cleared by the post-concretization passes. Only extracts values for
+/// small 1-D INT64 tensors (≤16 elements) — these are shape-computation constants
+/// (Reshape targets, Unsqueeze axes, etc.).
+fn extract_i64_values_from_param(
+    param: &crate::ir::AiParam,
+    shape: &[usize],
+) -> Option<Vec<Option<i64>>> {
+    use crate::ir::AiParam;
+
+    // Only extract for small 1-D tensors (shape computation constants).
+    let n_elems: usize = shape.iter().product();
+    if n_elems == 0 || n_elems > 16 {
+        return None;
+    }
+
+    let info = match param {
+        AiParam::Inline { info, .. } => info,
+        AiParam::Mmap { info, .. } => info,
+    };
+
+    // Only INT64 or INT32 dtype.
+    let elem_size = match info.logical_dtype {
+        crate::ir::DType::INT64 => 8usize,
+        crate::ir::DType::INT32 => 4usize,
+        _ => return None,
+    };
+
+    let data = match param {
+        AiParam::Inline { data, .. } => data.as_slice(),
+        AiParam::Mmap { .. } => return None, // Don't read from disk for seeds.
+    };
+
+    if data.len() < n_elems * elem_size {
+        return None;
+    }
+
+    let values: Vec<Option<i64>> = if elem_size == 8 {
+        data.chunks_exact(8)
+            .take(n_elems)
+            .map(|c| Some(i64::from_le_bytes(c.try_into().expect("8 bytes"))))
+            .collect()
+    } else {
+        data.chunks_exact(4)
+            .take(n_elems)
+            .map(|c| Some(i32::from_le_bytes(c.try_into().expect("4 bytes")) as i64))
+            .collect()
+    };
+
+    Some(values)
+}
+
+// ── LUT-GEMM Q4_0 conversion ─────────────────────────────────────────────────
+
+struct Lut4ConversionResult {
+    serialized_weights: Vec<u8>,
+    rows: u32,
+    cols: u32,
+}
+
+/// Try to convert a Q4_0 Gemm node to LUT-GEMM format.
+///
+/// Reads the Q4_0 weight bytes, dequantizes to f32, runs k-means
+/// quantization (16 centroids), and serializes as `QuantizedWeights4`.
+///
+/// Returns `None` if the weight param can't be found or isn't Q4_0.
+fn try_convert_q4_0_to_lut4(
+    node: &AiNode,
+    ai_graph: &AiGraph,
+    input_idxs: &[usize],
+) -> anyhow::Result<Option<Lut4ConversionResult>> {
+    use hologram::hologram_exec::lut_gemm::quantize::quantize_4bit;
+    use hologram_ai_quant::q4_0::dequant_q4_0;
+
+    // Weight is input[1] of the Gemm node.
+    let weight_tid = match node.inputs.get(1) {
+        Some(&tid) => tid,
+        None => return Ok(None),
+    };
+
+    // Check that it's actually Q4_0.
+    let info = match ai_graph.tensor_info.get(&weight_tid) {
+        Some(info) if info.quant.scheme == hologram_ai_quant::QuantScheme::Q4_0 => info,
+        _ => return Ok(None),
+    };
+
+    // Get the weight param bytes.
+    let param = match ai_graph.params.get(&weight_tid) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let raw_bytes = param_bytes_owned(param)?;
+
+    // Extract weight shape from tensor_info.
+    // For trans_b=true Gemm, weight shape is [n, k] (transposed).
+    let trans_b = matches!(node.op, AiOp::Gemm { trans_b: true, .. });
+    let (rows, cols) = {
+        let dims: Vec<usize> = info.shape.iter().filter_map(|d| match d {
+            Dim::Concrete(n) => Some(*n as usize),
+            _ => None,
+        }).collect();
+        if dims.len() >= 2 {
+            if trans_b {
+                // Weight stored as [n, k]; we need [k, n] for LUT-GEMM.
+                (dims[1], dims[0])
+            } else {
+                (dims[0], dims[1])
+            }
+        } else {
+            tracing::warn!("Q4_0 weight shape has <2 concrete dims, skipping LUT conversion");
+            return Ok(None);
+        }
+    };
+
+    // Dequantize Q4_0 → f32.
+    let f32_weights = dequant_q4_0(&raw_bytes);
+    let expected = rows * cols;
+    if f32_weights.len() != expected {
+        tracing::warn!(
+            got = f32_weights.len(),
+            expected,
+            "Q4_0 dequant size mismatch, skipping LUT conversion"
+        );
+        return Ok(None);
+    }
+
+    // Transpose if needed: [n, k] → [k, n] (row-major).
+    let f32_for_kmeans = if trans_b {
+        let n = cols; // after our swap: cols = original dim[0]
+        let k = rows; // rows = original dim[1]
+        // Original layout: [cols_orig, rows_orig] = [n, k] (since we swapped above)
+        // Wait — let's be precise. Original dims[0]=n_orig, dims[1]=k_orig.
+        // trans_b means weight is [n, k]. We set rows=k, cols=n.
+        // f32_weights is in row-major [n, k] order (n_orig rows of k_orig cols).
+        // quantize_4bit expects [rows, cols] = [k, n], so transpose.
+        let mut transposed = vec![0.0f32; k * n];
+        for i in 0..n {
+            for j in 0..k {
+                transposed[j * n + i] = f32_weights[i * k + j];
+            }
+        }
+        transposed
+    } else {
+        f32_weights
+    };
+
+    // K-means quantization → QuantizedWeights4 (16 centroids).
+    let qw4 = quantize_4bit(&f32_for_kmeans, rows as u32, cols as u32);
+
+    // Serialize via rkyv.
+    let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&qw4)
+        .map_err(|e| anyhow::anyhow!("rkyv serialize QuantizedWeights4: {e}"))?
+        .to_vec();
+
+    let _ = input_idxs; // used by caller for activation input
+
+    Ok(Some(Lut4ConversionResult {
+        serialized_weights: serialized,
+        rows: rows as u32,
+        cols: cols as u32,
+    }))
 }
 
 /// Read parameter bytes into an owned `Vec<u8>`.
