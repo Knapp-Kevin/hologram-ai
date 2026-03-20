@@ -39,6 +39,7 @@ models/         — test models for development (TinyLlama ONNX, etc.)
 10. **Clean up after yourself.** Before finishing a task, remove any scratch files, temporary debug files, and `dbg!`/`eprintln!` debugging output that were added during investigation and are not part of the final solution.
 11. **Never use `.unwrap()` in production code.** Use `.expect("descriptive message")` instead so that failures produce actionable context. This applies to all code — library and binary crates alike. The only exception is throwaway scratch files in `/tmp`.
 12. **Keep site docs up to date.** When making structural changes, adding new features, changing APIs, or modifying the compilation pipeline, update the relevant documentation in `specs/docs/` (e.g., `architecture.md`, `lowering.md`, `data-model.md`, `cli.md`). Docs must reflect the current state of the code — stale documentation is worse than no documentation.
+13. **Never suppress `clippy::too_many_arguments`.** If a function triggers this lint, refactor it to accept a params/config struct using the builder pattern. Do not add `#[allow(clippy::too_many_arguments)]`.
 
 ---
 
@@ -213,6 +214,7 @@ These rules apply to all repositories in the Hologram ecosystem.
 - No `unwrap()` in library code — use proper error handling
 - Use traits at API boundaries; use macros to eliminate boilerplate
 - Functions with >3 parameters must use the builder pattern
+- **Never use `#[allow(clippy::too_many_arguments)]`** — if clippy complains about too many arguments, refactor the function to accept a struct with the builder pattern instead of suppressing the lint
 - Use `thiserror` for library errors; `anyhow` only in binaries
 - See ADR-0007 for the full set of Rust development standards
 

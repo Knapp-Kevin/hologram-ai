@@ -543,6 +543,7 @@ fn run_attention_test(
         num_kv_heads: num_kv_heads as u32,
         scale: scale.to_bits(),
         causal,
+        heads_first: false,
     };
     let tol = tolerance_for(&op);
 
