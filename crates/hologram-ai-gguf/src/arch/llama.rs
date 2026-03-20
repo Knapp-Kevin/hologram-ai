@@ -101,13 +101,23 @@ pub fn build_llama_graph(
         // pipeline converts them to FloatOp::KvWrite which interacts with
         // KvCacheState at runtime.
         let k_cached = b.add_node(
-            AiOp::KvSlotWrite { layer: layer as usize, is_key: true },
+            AiOp::KvSlotWrite {
+                layer: layer as usize,
+                is_key: true,
+                n_kv_heads: params.head_count_kv,
+                head_dim,
+            },
             vec![k_rope],
             DType::F32,
             b.bsv(kv_dim),
         );
         let v_cached = b.add_node(
-            AiOp::KvSlotWrite { layer: layer as usize, is_key: false },
+            AiOp::KvSlotWrite {
+                layer: layer as usize,
+                is_key: false,
+                n_kv_heads: params.head_count_kv,
+                head_dim,
+            },
             vec![v],
             DType::F32,
             b.bsv(kv_dim),
@@ -121,6 +131,7 @@ pub fn build_llama_graph(
                 head_dim,
                 scale: None,
                 causal: true,
+                heads_first: false, // GGUF: inputs are [seq, n_heads, head_dim]
             },
             vec![q_rope, k_cached, v_cached],
             DType::F32,

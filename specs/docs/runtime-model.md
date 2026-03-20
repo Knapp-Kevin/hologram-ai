@@ -167,7 +167,8 @@ Steps:
 ### Design
 
 The KV-cache stores the key and value tensors from all attention layers for
-all previously processed tokens. This avoids recomputing them on each decode step.
+all previously processed tokens. This avoids recomputing them on each decode step,
+trading memory for compute — O(seq_len) per decode step instead of O(seq_len^2).
 
 ```rust
 pub struct KvCache {
@@ -193,31 +194,95 @@ pub struct KvCacheLayout {
 }
 ```
 
+### Contiguous allocation (current)
+
+The current implementation pre-allocates flat contiguous buffers per layer,
+sized to `max_seq_len`:
+
+```
+Total KV memory = 2 * n_layers * n_kv_heads * max_seq_len * head_dim * sizeof(dtype)
+```
+
+For TinyLlama (22 layers, 4 KV heads, 64 head_dim, 2048 max_seq): ~90 MB.
+For larger models (70B, 128K context), this can exceed available memory even
+when actual generation is much shorter than the maximum.
+
+### Paged attention (planned — Plan 016)
+
+Paged attention replaces monolithic per-layer buffers with small fixed-size
+pages allocated on demand, borrowing virtual memory concepts from operating systems.
+
+**Core data structures:**
+
+- **Page**: fixed-size block holding `page_size` token slots (e.g., 16 tokens)
+  for one KV head group. Layout: `[page_size, n_kv_heads, head_dim]` as flat f32.
+- **PagePool**: arena of physical pages with a free list for recycling.
+  Pages are never deallocated — reset returns them to the free list.
+- **BlockTable**: per-layer mapping of logical block index to physical page ID.
+  `block_table[i]` holds the page for tokens `[i*page_size .. (i+1)*page_size)`.
+- **PagedKvCache**: wraps pool + per-layer K/V block tables + write_pos.
+
+**How it works:**
+
+1. On `KvWrite`, if `write_pos` crosses a page boundary (`write_pos % page_size == 0`),
+   a new page is allocated from the pool for that layer's K and V.
+2. Data is written to `block_table[write_pos / page_size][write_pos % page_size]`.
+3. On `KvRead`, pages are gathered (iterated in block table order) and concatenated
+   into a contiguous `[seq_cached, n_kv_heads, head_dim]` tensor — paging is invisible
+   to the attention kernel.
+4. On reset, all pages return to the free list. No deallocation, just recycling.
+
+**Benefits:**
+
+- No upfront `max_seq_len` allocation — pages allocated only as the sequence grows
+- A 5-token generation on TinyLlama allocates 1 page per layer (~360 KB) instead of
+  the full 90 MB
+- Foundation for multi-request batching: per-request block tables sharing a global
+  page pool, copy-on-write for shared system prompt prefixes (future phase)
+
+**Configuration:** `kv_page_size` field in `ModelMetaSection`. Value of 0 falls back
+to contiguous allocation for backward compatibility. Default: 16 tokens per page.
+
+See `specs/plans/016-paged-attention.md` for the full implementation plan.
+
 ### KV-cache in the execution plan
 
 Two special node types in the lowered plan:
 
-`KvSlotWrite(layer, seq_offset)` — writes the current token's K/V projections
-into the cache at position `seq_offset`.
+`FloatOp::KvWrite { layer, n_kv_heads, head_dim, is_key }` — writes the current
+token's K/V projections into the cache. Pass-through at the AiGraph level (returns
+input unchanged); lowering converts it to runtime cache writes.
 
-`KvSlotRead(layer, seq_len)` — reads all cached K/V up to `seq_len` for attention computation.
+`FloatOp::KvRead { layer, n_kv_heads, head_dim }` — reads all cached K/V up to
+`write_pos` for attention computation. Shape is runtime-dependent (grows each step).
 
-The session passes `present_len` as a runtime input to the plan on each call.
+These are lowered from their AiGraph equivalents:
+
+- `AiOp::KvSlotWrite { layer, is_key, n_kv_heads, head_dim }` — injected by
+  `KvSlotInjection` pass (ONNX) or during graph construction (GGUF)
+- `AiOp::KvSlotRead { layer, n_kv_heads, head_dim }` — appears in decode-phase graphs
+
+Metadata flows forward (import → IR → lowered graph → archive → runtime), never backward.
+All architecture params (`n_kv_heads`, `head_dim`) are carried on the ops themselves.
 
 ### Prefill vs. decode modes
 
-**Prefill (prompt phase):**
-- Process all prompt tokens in one forward pass (batch = 1, seq = prompt_len)
-- Write all K/V to cache at once
-- More efficient per-token than decode phase
+The compiled LLM produces a **pipeline archive** containing two sub-graphs:
 
-**Decode (generation phase):**
-- Process one token per forward pass
-- Read full cache + write one new slot
-- Autoregressive loop
+**Prefill graph (step 0):**
+- Input: full prompt (variable length, padded to compiled seq_len)
+- Contains `KvSlotWrite` nodes on all K/V projections
+- Returns logits for all positions
+- Populates KV cache for all prompt positions at once
 
-The `InferenceSession` switches between these modes automatically based on
-whether `present_len == 0` (prefill) or `> 0` (decode).
+**Decode graph (steps 1+):**
+- Input: single token (seq=1)
+- Contains both `KvSlotRead` (retrieve cached K/V) and `KvSlotWrite` (append new K/V)
+- Returns logits for the new token only
+- Cache grows by 1 position each step
+
+The runtime routes to the correct sub-graph based on `write_pos`:
+`write_pos == 0` → prefill graph, `write_pos > 0` → decode graph.
 
 ---
 

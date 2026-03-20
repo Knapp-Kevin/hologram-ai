@@ -73,6 +73,7 @@ hologram-ai specific boundary.
 | Lowering design | [lowering.md](lowering.md) |
 | Tokenizer architecture | [tokenizer.md](tokenizer.md) |
 | Runtime model | [runtime-model.md](runtime-model.md) |
+| KV-cache & paged attention | [runtime-model.md — KV-Cache](runtime-model.md#kv-cache) |
 | Testing strategy | [testing-strategy.md](testing-strategy.md) |
 | Roadmap | [roadmap.md](roadmap.md) |
 | Risks | [risks.md](risks.md) |

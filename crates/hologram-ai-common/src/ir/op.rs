@@ -98,6 +98,9 @@ pub enum AiOp {
         head_dim: u32,
         scale: Option<f32>,
         causal: bool,
+        /// If true, Q/K/V are `[n_heads, seq, head_dim]` (ONNX: pre-transposed).
+        /// If false, Q/K/V are `[seq, n_heads, head_dim]` (GGUF: interleaved).
+        heads_first: bool,
     },
     /// Hint from importer; lowering decides if flash attention is available.
     FlashAttentionHint,
@@ -369,10 +372,14 @@ pub enum AiOp {
     KvSlotWrite {
         layer: usize,
         is_key: bool,
+        n_kv_heads: u32,
+        head_dim: u32,
     },
     /// Read cached K/V tensors from the KV-cache for a given layer.
     KvSlotRead {
         layer: usize,
+        n_kv_heads: u32,
+        head_dim: u32,
     },
 
     // ── Fused ops (produced by optimization passes) ────────────────────────

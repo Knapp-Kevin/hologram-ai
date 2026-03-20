@@ -21,6 +21,7 @@ hologram-ai-onnx = { workspace = true, optional = true }
 
 [features]
 conformance = ["ort", "ndarray", "hologram-ai", "hologram-ai-onnx"]
+profile = ["hologram/profile"]
 
 [dev-dependencies]
 approx = { workspace = true }

@@ -20,6 +20,19 @@ See `specs/docs/architecture.md` for project-specific architecture details.
 - Check lints: `cargo clippy -- -D warnings`
 - Format code: `cargo fmt`
 
+## KV-Cache Architecture
+
+The KV-cache avoids recomputing key/value tensors on each decode step.
+
+- **Contiguous mode** (current): pre-allocates flat buffers to `max_seq_len` via `KvCacheState`
+- **Paged mode** (planned — Plan 016): on-demand page allocation with block tables, no upfront `max_seq_len`
+- **Compiler ops**: `AiOp::KvSlotWrite/KvSlotRead` → lowered to `FloatOp::KvWrite/KvRead`
+- **Injection**: `KvSlotInjection` pass (ONNX after `AttentionFusion`) or at import (GGUF)
+- **Pipeline archive**: prefill graph (step 0, full prompt) + decode graph (steps 1+, single token)
+- **Metadata flows forward**: `n_kv_heads`, `head_dim` carried on ops and in `ModelMetaSection`
+- See `specs/docs/runtime-model.md` for full KV-cache documentation
+- See `specs/plans/016-paged-attention.md` for the paged attention plan
+
 ## Conventions
 
 - Use a consistent naming prefix for all crate names
