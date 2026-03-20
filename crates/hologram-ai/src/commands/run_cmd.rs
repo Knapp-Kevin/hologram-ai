@@ -91,7 +91,7 @@ pub fn execute(args: RunArgs) -> anyhow::Result<()> {
             top_k: args.top_k,
             verbose: args.verbose,
         };
-        run_generation(&runner, tok, prompt, &gen_config)?;
+        run_generation(&runner, tok, prompt, &gen_config, model_meta.as_ref())?;
     } else {
         let mut graph_inputs = parse_inputs(&args.inputs)?;
         load_file_inputs(&args.input_files, &mut graph_inputs)?;
@@ -130,15 +130,17 @@ struct GenerationConfig {
 // ── Sequence mode ─────────────────────────────────────────────────────────
 
 /// How the generation loop handles input sequence length.
+///
+/// All shapes are fully baked at compile time — inputs are padded to the
+/// compiled seq_len, and the attention_mask handles which positions are real.
 enum SeqMode {
-    /// Pad inputs to a fixed compiled sequence length (no ShapeContextGraph).
+    /// Pad inputs to the compiled sequence length.
     FixedPad(usize),
-    /// Use actual token count; truncate at max context if needed.
-    /// ShapeContextGraph projects shapes at runtime.
-    Variable { max_ctx: Option<usize> },
 }
 
 fn resolve_seq_mode(runner: &HoloRunner) -> SeqMode {
+    // All shapes are fully baked at compile time — no runtime shape resolution.
+    // Read the compiled seq_len from the layer header (input_ids shape[1]).
     let compiled_seq = runner
         .plan()
         .layer_header()
@@ -150,35 +152,14 @@ fn resolve_seq_mode(runner: &HoloRunner) -> SeqMode {
         .filter(|&s| s > 0)
         .map(|s| s as usize);
 
-    // Determine if the model has an attention_mask input (ONNX models do,
-    // GGUF models don't). Models with explicit attention masks can safely
-    // use FixedPad with proper masking. Models without masks (GGUF) should
-    // prefer variable seq to avoid processing meaningless padding positions.
-    let _has_mask_input = runner
-        .plan()
-        .graph()
-        .input_names
-        .iter()
-        .any(|n| n == "attention_mask");
-
-    if runner.has_shape_context() {
-        // ShapeContextGraph is available — use variable seq mode.
-        // walk_shape_context() projects correct shapes for all nodes from
-        // actual runtime input shapes, and execute_plan_with_shape_hints()
-        // patches all 0-sentinel parameters (Softmax size, Gather dim,
-        // MatMul m/k/n, etc.) at runtime. This is safe for both ONNX and
-        // GGUF models regardless of attention_mask presence.
-        let max_ctx = compiled_seq.or_else(|| load_meta_seq_len(runner));
-        SeqMode::Variable { max_ctx }
-    } else if let Some(seq) = compiled_seq {
-        // No shape context: pad to compiled seq_len.
-        // The attention mask (ONNX) handles padding positions.
+    if let Some(seq) = compiled_seq {
+        // Pad inputs to the compiled seq_len. The attention_mask (ONNX models)
+        // zeroes out padding positions so the model ignores them.
         SeqMode::FixedPad(seq)
     } else {
-        // No shape context, no compiled seq: pad to a reasonable default.
+        // Fallback: read from model metadata or default to 2048.
         let meta_seq = load_meta_seq_len(runner);
-        let pad_to = meta_seq.unwrap_or(2048);
-        SeqMode::FixedPad(pad_to)
+        SeqMode::FixedPad(meta_seq.unwrap_or(2048))
     }
 }
 
@@ -200,6 +181,7 @@ fn run_generation(
     tok_section: &TokenizerSection,
     prompt: &str,
     config: &GenerationConfig,
+    model_meta: Option<&ModelMetaSection>,
 ) -> anyhow::Result<()> {
     let plan = runner.plan();
     let encoder = MiniBpeEncoder::from_tokenizer_section(tok_section);
@@ -216,15 +198,8 @@ fn run_generation(
         encoder.vocab_size(),
         input_dtype.name(),
     );
-    match &seq_mode {
-        SeqMode::FixedPad(n) => eprintln!("seq_mode: fixed pad to {n} (no shape context)"),
-        SeqMode::Variable { max_ctx: Some(n) } => {
-            eprintln!("seq_mode: variable (shape context), max_ctx={n}");
-        }
-        SeqMode::Variable { max_ctx: None } => {
-            eprintln!("seq_mode: variable (shape context), no max_ctx");
-        }
-    }
+    let SeqMode::FixedPad(n) = &seq_mode;
+    eprintln!("seq_mode: fixed pad to {n}");
     eprintln!(
         "sampling: temperature={:.2}, top_k={}, rep_penalty=1.3 (generated tokens only)",
         config.temperature,
@@ -262,6 +237,8 @@ fn run_generation(
         // Build the effective token sequence for this step.
         // With KV cache: step 0 = full prompt (prefill), step 1+ = single token (decode).
         // The executor handles RoPE position offset and KV expansion internally.
+        // With KV cache: step 0 = full prompt (prefill), step 1+ = single token (decode).
+        // The executor handles RoPE position offset and KV expansion internally.
         let (effective_tokens, actual_len) = if use_kv_cache && step > 0 {
             let last = *token_ids.last().expect("no tokens");
             (vec![last], 1)
@@ -289,13 +266,13 @@ fn run_generation(
         let outputs = if use_kv_cache {
             // Lazy-init KV cache on first call.
             if kv_state.is_none() {
-                // Read architecture params from model metadata.
-                let meta = load_section_from_raw::<ModelMetaSection>(
-                    runner.archive_bytes(), SECTION_MODEL_META,
-                );
-                let max_seq = meta.as_ref().map(|m| m.max_seq_len as usize).unwrap_or(2048);
-                // Infer n_kv_heads and head_dim from the layer header.
-                let (n_layers, n_kv_heads, head_dim) = infer_kv_params(plan);
+                // Read KV architecture params from the already-loaded metadata.
+                let meta = model_meta.as_ref()
+                    .expect("KV cache requires ModelMetaSection in archive");
+                let max_seq = meta.max_seq_len as usize;
+                let n_layers = meta.n_layers;
+                let n_kv_heads = meta.n_kv_heads;
+                let head_dim = meta.head_dim;
                 eprintln!(
                     "kv_cache: n_layers={n_layers} n_kv_heads={n_kv_heads} head_dim={head_dim} max_seq={max_seq}"
                 );
@@ -377,27 +354,15 @@ fn run_generation(
 /// Returns `(tokens, actual_len)` where `actual_len` is the number of
 /// real (non-padding) tokens. For variable seq mode these are equal.
 fn build_step_tokens(token_ids: &[u32], mode: &SeqMode) -> (Vec<u32>, usize) {
-    match mode {
-        SeqMode::FixedPad(max_seq) => {
-            let actual_len = token_ids.len().min(*max_seq);
-            if token_ids.len() > *max_seq {
-                let truncated = token_ids[token_ids.len() - max_seq..].to_vec();
-                (truncated, actual_len)
-            } else {
-                let mut padded = token_ids.to_vec();
-                padded.resize(*max_seq, 0);
-                (padded, actual_len)
-            }
-        }
-        SeqMode::Variable { max_ctx } => {
-            if let Some(max) = max_ctx {
-                if token_ids.len() > *max {
-                    let truncated = token_ids[token_ids.len() - max..].to_vec();
-                    return (truncated, *max);
-                }
-            }
-            (token_ids.to_vec(), token_ids.len())
-        }
+    let SeqMode::FixedPad(max_seq) = mode;
+    let actual_len = token_ids.len().min(*max_seq);
+    if token_ids.len() > *max_seq {
+        let truncated = token_ids[token_ids.len() - max_seq..].to_vec();
+        (truncated, actual_len)
+    } else {
+        let mut padded = token_ids.to_vec();
+        padded.resize(*max_seq, 0);
+        (padded, actual_len)
     }
 }
 
@@ -594,51 +559,6 @@ where
         return None;
     }
     T::deserialize_section(&archive_bytes[offset..offset + size]).ok()
-}
-
-/// Infer KV cache architecture params from the compiled model's graph.
-/// Returns (n_layers, n_kv_heads, head_dim) by scanning for KvWrite ops.
-fn infer_kv_params(plan: &hologram::LoadedPlan) -> (u32, u32, u32) {
-    use hologram::hologram_core::op::FloatOp;
-    let mut n_layers = 0u32;
-    let mut n_kv_heads = 0u32;
-    let mut head_dim = 0u32;
-
-    for node in &plan.graph().nodes {
-        if let hologram::GraphOp::Float(FloatOp::KvWrite {
-            layer,
-            n_kv_heads: nkv,
-            head_dim: hd,
-            ..
-        }) = &node.op
-        {
-            n_layers = n_layers.max(*layer + 1);
-            if *nkv > 0 {
-                n_kv_heads = *nkv;
-            }
-            if *hd > 0 {
-                head_dim = *hd;
-            }
-        }
-        // Also check Attention ops for head params.
-        if let hologram::GraphOp::Float(FloatOp::Attention {
-            num_kv_heads,
-            head_dim: hd,
-            ..
-        }) = &node.op
-        {
-            if n_kv_heads == 0 {
-                n_kv_heads = *num_kv_heads;
-            }
-            if head_dim == 0 {
-                head_dim = *hd;
-            }
-        }
-    }
-
-    // n_layers is already the transformer layer count (both K and V KvWrite
-    // nodes share the same layer index).
-    (n_layers.max(1), n_kv_heads.max(1), head_dim.max(1))
 }
 
 /// Load a section from raw archive bytes (loads the plan on-the-fly).

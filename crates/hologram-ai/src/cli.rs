@@ -34,6 +34,10 @@ enum Command {
         /// Path to tokenizer.json (auto-detected from model directory if omitted).
         #[arg(long, value_name = "FILE")]
         tokenizer: Option<PathBuf>,
+        /// Fixed sequence length for compilation (default: model's context_length).
+        /// All shapes are baked to this value. Inputs are padded at runtime.
+        #[arg(long, value_name = "N")]
+        seq_len: Option<u64>,
     },
     /// Run a compiled `.holo` archive with shape-aware inference.
     Run(hologram_ai::commands::run_cmd::RunArgs),
@@ -67,9 +71,14 @@ fn main() -> anyhow::Result<()> {
             model,
             output,
             tokenizer,
+            seq_len,
         } => {
             let source = model_source_from_path(&model)?;
-            let compiled = ModelCompiler::default().compile(source)?;
+            let compiler = ModelCompiler {
+                seq_len_override: seq_len,
+                ..Default::default()
+            };
+            let compiled = compiler.compile(source)?;
             if output.exists() && !output.is_dir() {
                 anyhow::bail!(
                     "'{}' exists and is not a directory. Remove it or choose a different --output path.",
@@ -105,6 +114,9 @@ fn main() -> anyhow::Result<()> {
                 description: format!("{} ({})", compiled.metadata.arch, model.display()),
                 max_seq_len: compiled.metadata.context_len,
                 supports_prompt: tok_path.is_some(),
+                n_layers: compiled.metadata.n_layers,
+                n_kv_heads: compiled.metadata.n_kv_heads,
+                head_dim: compiled.metadata.head_dim,
             };
             let mut final_bytes =
                 hologram_ai::compiler::rebuild_archive_with_section(&compiled.bytes, &model_meta)?;

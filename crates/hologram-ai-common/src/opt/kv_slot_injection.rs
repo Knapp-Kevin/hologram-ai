@@ -94,6 +94,14 @@ impl Pass for KvSlotInjection {
                 continue;
             }
 
+            // Extract architecture params from the GQA node.
+            let (nkv, hd) = match &node.op {
+                AiOp::GroupedQueryAttention { num_kv_heads, head_dim, .. } => {
+                    (*num_kv_heads, *head_dim)
+                }
+                _ => (0, 0),
+            };
+
             let k_tid = node.inputs[1];
             let v_tid = node.inputs[2];
 
@@ -105,7 +113,7 @@ impl Pass for KvSlotInjection {
             });
             let k_node = AiNode::new(
                 next_node_id,
-                AiOp::KvSlotWrite { layer, is_key: true },
+                AiOp::KvSlotWrite { layer, is_key: true, n_kv_heads: nkv, head_dim: hd },
                 vec![k_tid],
                 vec![k_out],
             );
@@ -119,7 +127,7 @@ impl Pass for KvSlotInjection {
             });
             let v_node = AiNode::new(
                 next_node_id,
-                AiOp::KvSlotWrite { layer, is_key: false },
+                AiOp::KvSlotWrite { layer, is_key: false, n_kv_heads: nkv, head_dim: hd },
                 vec![v_tid],
                 vec![v_out],
             );

@@ -367,6 +367,7 @@ fn resolve_op(
                     num_kv_heads: *num_heads,
                     scale: f32_to_bits(s),
                     causal: *causal,
+                    heads_first: false,
                 },
                 vec![],
             )
@@ -377,6 +378,7 @@ fn resolve_op(
             head_dim,
             scale,
             causal,
+            heads_first,
         } => {
             let s = scale.unwrap_or((*head_dim as f32).sqrt().recip());
             (
@@ -386,6 +388,7 @@ fn resolve_op(
                     num_kv_heads: *num_kv_heads,
                     scale: f32_to_bits(s),
                     causal: *causal,
+                    heads_first: *heads_first,
                 },
                 vec![],
             )
@@ -397,6 +400,7 @@ fn resolve_op(
                 num_kv_heads: 1,
                 scale: f32_to_bits(0.125),
                 causal: true,
+                heads_first: false,
             },
             vec![],
         ),
@@ -650,22 +654,22 @@ fn resolve_op(
         }
 
         // ── KV cache ops ─────────────────────────────────────────────────
-        AiOp::KvSlotWrite { layer, is_key } => {
+        AiOp::KvSlotWrite { layer, is_key, n_kv_heads, head_dim } => {
             (
                 FloatOp::KvWrite {
                     layer: *layer as u32,
-                    n_kv_heads: 0,
-                    head_dim: 0,
+                    n_kv_heads: *n_kv_heads,
+                    head_dim: *head_dim,
                     is_key: *is_key,
                 },
                 vec![],
             )
         }
-        AiOp::KvSlotRead { layer } => (
+        AiOp::KvSlotRead { layer, n_kv_heads, head_dim } => (
             FloatOp::KvRead {
                 layer: *layer as u32,
-                n_kv_heads: 0,
-                head_dim: 0,
+                n_kv_heads: *n_kv_heads,
+                head_dim: *head_dim,
             },
             vec![],
         ),

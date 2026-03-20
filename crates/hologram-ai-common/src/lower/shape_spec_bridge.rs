@@ -136,8 +136,22 @@ impl ShapeProjection for FloatOp {
                 None,
             ),
 
-            // ── Attention — output same shape as Q input ──────────────────────
-            FloatOp::Attention { .. } => (ShapeSpecRepr::SameAs(0), None),
+            // ── Attention — output is [num_q_heads, seq_q, head_dim] ──
+            // Can't use SameAs(0) because Q's compiled shape may have
+            // heads*head_dim merged. Encode explicitly; seq_q is Inferred
+            // from total Q elements / (num_q_heads * head_dim).
+            FloatOp::Attention {
+                head_dim,
+                num_q_heads,
+                ..
+            } => {
+                let dims = vec![
+                    ShapeDimRepr::Fixed(*num_q_heads),
+                    ShapeDimRepr::Inferred, // seq_q = Q_elems / (num_q_heads * head_dim)
+                    ShapeDimRepr::Fixed(*head_dim),
+                ];
+                (ShapeSpecRepr::Dims(dims), None)
+            }
 
             // ── Shape op — output is [ndim_of_input] ──────────────────────────
             FloatOp::Shape { .. } => (ShapeSpecRepr::Shape, None),
@@ -249,9 +263,18 @@ impl ShapeProjection for AiOp {
             AiOp::Gemm { .. } => (ShapeSpecRepr::Gemm { k: 0 }, None),
 
             // ── Attention (output = Q input shape) ─────────────────────────
+            // At AiOp level, Q's shape should be correct ([batch, heads, seq, dim]),
+            // so SameAs(0) is fine. The FloatOp level uses explicit Dims.
             AiOp::MultiHeadAttention { .. }
-            | AiOp::GroupedQueryAttention { .. }
             | AiOp::FlashAttentionHint => (ShapeSpecRepr::SameAs(0), None),
+            AiOp::GroupedQueryAttention { num_heads, head_dim, .. } => {
+                let dims = vec![
+                    ShapeDimRepr::Fixed(*num_heads),
+                    ShapeDimRepr::Inferred,
+                    ShapeDimRepr::Fixed(*head_dim),
+                ];
+                (ShapeSpecRepr::Dims(dims), None)
+            }
 
             // ── Shape manipulation ─────────────────────────────────────────
             AiOp::Reshape { .. } | AiOp::Flatten { .. } => {
@@ -414,6 +437,25 @@ pub fn resolve_spec(
             Some(out)
         }
 
+        ShapeSpecRepr::GatherAxis { axis } => {
+            // Gather along axis: output = data.shape with data.shape[axis]
+            // replaced by product(indices.shape).
+            // In hologram, inputs are [indices, data].
+            let indices_shape = input_shapes.first()?;
+            let data_shape = input_shapes.get(1)?;
+            let ax = *axis as usize;
+            if ax >= data_shape.len() {
+                return None;
+            }
+            let indices_count: usize = indices_shape.iter().product::<usize>().max(1);
+            let mut out = data_shape.clone();
+            out[ax] = indices_count;
+            if indices_shape.is_empty() || (indices_shape.len() == 1 && indices_shape[0] == 1) {
+                out.remove(ax);
+            }
+            Some(out)
+        }
+
         ShapeSpecRepr::Reshape => resolve_reshape(input_shapes, shape_value_bytes, input_elems),
 
         ShapeSpecRepr::Transpose { perm, ndim } => {
@@ -430,14 +472,18 @@ pub fn resolve_spec(
         }
 
         ShapeSpecRepr::Concat => {
-            let a = input_shapes.first()?;
-            let b = input_shapes.get(1)?;
-            if a.is_empty() || b.is_empty() {
+            // Concat along the last axis across ALL inputs (not just 2).
+            // output[-1] = sum of all input[-1] values.
+            let first = input_shapes.first()?;
+            if first.is_empty() {
                 return None;
             }
-            let mut out = a.clone();
-            if let (Some(last), Some(b_last)) = (out.last_mut(), b.last()) {
-                *last += b_last;
+            let mut out = first.clone();
+            let last_idx = out.len() - 1;
+            for other in input_shapes.iter().skip(1) {
+                if let Some(&other_last) = other.last() {
+                    out[last_idx] += other_last;
+                }
             }
             Some(out)
         }
@@ -828,6 +874,23 @@ pub fn walk_shape_context(
                 .and_then(|idx| entry.input_node_ids.get(idx as usize))
                 .copied()?;
             let vals = i64_values.get(&snid)?;
+            // Validate: the i64 count (= target rank) must match the Reshape
+            // node's compiled output rank. When Shape(mask)=[batch,seq] feeds
+            // directly into a Concat (without Gather to pick just seq), the
+            // Concat produces more i64 values than the Reshape expects. This
+            // causes the Reshape to change rank (e.g., 4-dim → 5-dim), breaking
+            // downstream Gather index lookups.
+            // Use the shape_value tensor's shape as the authoritative rank.
+            if let Some(sv_shape) = shape_map.get(&snid) {
+                let expected_elems: usize = sv_shape.iter().product();
+                if expected_elems > 0 && vals.len() != expected_elems {
+                    return None;
+                }
+            }
+            // The i64 values are accepted — the Reshape may change rank at
+            // runtime (e.g., from 4-dim to 5-dim) if the Concat assembled more
+            // values from Shape(mask)=[batch,seq] than at compile time.
+            // This is correct: the Reshape target is as the ONNX graph designed.
             Some(
                 vals.iter()
                     .flat_map(|&v| v.to_le_bytes())
@@ -851,7 +914,7 @@ pub fn walk_shape_context(
         if let Some(out_shape) = resolve_spec(&entry.spec, &input_shapes, sv_bytes, input_elems) {
             // Propagate i64 values through shape-compute ops so downstream
             // Reshape nodes can determine their target shape.
-            propagate_i64_values(entry, &input_shapes, &out_shape, &mut i64_values);
+            propagate_i64_values(entry, &input_shapes, &out_shape, &mut i64_values, shape_map);
 
             shape_map.insert(entry.node_id, out_shape);
         }
@@ -869,9 +932,10 @@ fn propagate_i64_values(
     input_shapes: &[Vec<usize>],
     _out_shape: &[usize],
     i64_values: &mut HashMap<u32, Vec<i64>>,
+    shape_map: &HashMap<u32, Vec<usize>>,
 ) {
     match &entry.spec {
-        // Shape op: output i64 values = the input tensor's shape.
+        // Shape op: output i64 values = the input tensor's shape dimensions.
         ShapeSpecRepr::Shape => {
             if let Some(in_shape) = input_shapes.first() {
                 if !in_shape.is_empty() {
@@ -891,7 +955,17 @@ fn propagate_i64_values(
                 .collect::<Option<Vec<_>>>()
                 .map(|vecs| vecs.into_iter().flatten().collect());
             if let Some(vals) = all {
-                i64_values.insert(entry.node_id, vals);
+                // Validate: the concatenated i64 count must match the output
+                // tensor's element count. If a Shape upstream contributed too many
+                // values (e.g., Shape(mask)=[batch,seq] instead of Gather'd [seq]),
+                // the chain is broken — skip to prevent wrong Reshape targets.
+                let expected = shape_map
+                    .get(&entry.node_id)
+                    .map(|s| s.iter().product::<usize>())
+                    .unwrap_or(0);
+                if expected == 0 || vals.len() == expected {
+                    i64_values.insert(entry.node_id, vals);
+                }
             }
         }
 
@@ -915,9 +989,9 @@ fn propagate_i64_values(
             }
         }
 
-        // Gather/Embed (when used for shape-dim picking): pick i64 values at indices.
+        // GatherAxis (shape-dim picking): pick i64 values at indices.
         // In hologram's representation, inputs are SWAPPED: (indices, data).
-        ShapeSpecRepr::GatherEmbed { .. } => {
+        ShapeSpecRepr::GatherAxis { .. } | ShapeSpecRepr::GatherEmbed { .. } => {
             let indices_id = entry.input_node_ids.first().copied();
             let data_id = entry.input_node_ids.get(1).copied();
             if let (Some(idx_id), Some(dat_id)) = (indices_id, data_id) {

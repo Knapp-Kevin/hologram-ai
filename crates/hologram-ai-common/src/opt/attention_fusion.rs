@@ -79,23 +79,20 @@ impl Pass for AttentionFusion {
                 &consumers,
                 &graph,
             ) {
-                // Extract attention parameters from shapes.
-                let q_tid = node.inputs[0];
-                let k_tid = node.inputs[1]; // K^T (already transposed)
-                let v_tid = chain.v_tid;
+                // Extract Q, K, V tensor IDs from the SDPA chain.
+                let q_tid = node.inputs[0]; // Q: [batch, heads, seq, dim]
+                let k_tid = node.inputs[1]; // K^T: [batch, heads, dim, seq] (pre-multiplied with scale)
+                let v_tid = chain.v_tid;    // V: [batch, heads, seq, dim] (expanded to num_q_heads)
 
-                // Infer head dimensions from tensor shapes.
-                // Only fuse when we can confidently extract head params (4D tensors).
-                let (num_heads, num_kv_heads, head_dim) = {
+                // Infer head dimensions from Q's shape.
+                let (num_heads, head_dim) = {
                     let inferred = infer_all_head_params(q_tid, k_tid, chain.v_tid, &graph);
                     if inferred.0 > 0 && inferred.2 > 0 {
-                        inferred
+                        (inferred.0, inferred.2)
                     } else if let Some(cached) = cached_heads {
-                        // Reuse architecture params from a previously-fused layer.
-                        // All transformer layers share the same head count/dim.
-                        (cached.0, cached.1, cached.2)
+                        (cached.0, cached.2)
                     } else {
-                        (inferred.0, inferred.1, inferred.2)
+                        (inferred.0, inferred.2)
                     }
                 };
 
@@ -104,29 +101,34 @@ impl Pass for AttentionFusion {
                     continue;
                 }
 
-                // Cache for subsequent layers.
                 if cached_heads.is_none() {
-                    cached_heads = Some((num_heads, num_kv_heads, head_dim));
+                    cached_heads = Some((num_heads, num_heads, head_dim));
                 }
 
-                // Extract scale from the chain (if Mul node found).
-                let scale = chain.scale;
-
-                // Find the Q input BEFORE the RoPE multiplication (trace back through
-                // the graph to find the pre-rotation Q). For now, use Q as-is since
-                // the fused Attention op receives post-RoPE Q/K.
+                // In ONNX exports, K and V are already expanded to num_q_heads
+                // via unsqueeze→expand→reshape before the SDPA MatMul. Scale is
+                // applied as Mul on K^T before the Q@K^T MatMul, or as Mul on the
+                // scores after. Either way, scale=1.0 for the kernel since it's
+                // already applied in the data or chain.
                 //
-                // The fused op takes Q, K, V in [batch, heads, seq, dim] layout
-                // (ONNX convention after Transpose). We need to trace back to find
-                // the un-transposed K to get the actual K (not K^T).
-                let k_actual = find_pre_transpose(k_tid, &tid_to_node, &graph)
-                    .unwrap_or(k_tid);
+                // The kernel receives Q and V in [heads, seq, dim] layout.
+                // K is in K^T layout [heads, dim, seq] — we trace back through
+                // the Transpose to get un-transposed K in [heads, seq, dim].
+                let (k_actual, effective_scale) = {
+                    let (k, k_scale) = find_pre_transpose_with_scale(k_tid, &tid_to_node, &graph);
+                    // Combine: scale from K path * scale from chain (Mul after Q@K^T).
+                    let eff = k_scale.unwrap_or(1.0) * chain.scale;
+                    (k, eff)
+                };
+
+                // All inputs use num_q_heads (K/V already expanded).
+                let num_kv_heads = num_heads;
 
                 // Mark all chain nodes for removal.
                 for &idx in &chain.node_indices {
                     to_remove.insert(idx);
                 }
-                to_remove.insert(node_idx); // The Q@K^T MatMul itself.
+                to_remove.insert(node_idx);
 
                 let fused = AiNode::new(
                     next_id,
@@ -134,22 +136,32 @@ impl Pass for AttentionFusion {
                         num_heads,
                         num_kv_heads,
                         head_dim,
-                        scale: Some(scale),
+                        scale: Some(effective_scale),
                         causal: chain.has_mask,
+                        heads_first: true,
                     },
                     vec![q_tid, k_actual, v_tid],
                     vec![chain.output_tid],
                 );
                 next_id += 1;
 
-                // The fused node replaces the LAST node in the chain (the output MatMul).
                 replacements.insert(chain.output_matmul_idx, fused);
+
+                // Ensure the output tensor's shape matches Q's shape:
+                // [batch, num_heads, seq, head_dim]. Must preserve this so
+                // downstream Transpose/Reshape nodes operate correctly.
+                {
+                    let q_shape = graph.tensor_info.get(&q_tid).cloned();
+                    if let (Some(qs), Some(out_info)) = (q_shape, graph.tensor_info.get_mut(&chain.output_tid)) {
+                        out_info.shape = qs.shape;
+                    }
+                }
 
                 tracing::debug!(
                     num_heads,
                     num_kv_heads,
                     head_dim,
-                    scale,
+                    effective_scale,
                     causal = chain.has_mask,
                     "AttentionFusion: fused SDPA chain"
                 );
@@ -184,8 +196,10 @@ struct SdpaChain {
     v_tid: TensorId,
     /// Scale factor (from Mul node or default 1.0).
     scale: f32,
-    /// Whether a causal mask (Add) was detected.
+    /// Whether a mask (Add) was detected.
     has_mask: bool,
+    /// Mask tensor ID (the additive mask input to the Add node), if present.
+    mask_tid: Option<TensorId>,
     /// Output tensor of the final MatMul (attention @ V).
     output_tid: TensorId,
     /// Node index of the output MatMul (for replacement).
@@ -238,13 +252,21 @@ fn match_sdpa_chain(
         }
     }
 
-    // Optional: Add(scores, causal_mask) — apply attention mask.
+    // Optional: Add(scores, mask) — absorb into chain and capture mask tensor ID.
+    // The mask tensor is passed as a 4th input to the fused Attention op,
+    // which applies it as an additive mask before Softmax.
+    let mut mask_tid: Option<TensorId> = None;
     if let Some(next) = find_consumer_by_op(current_tid, consumers, graph, |op| matches!(op, AiOp::Add)) {
         let n = &graph.nodes[next];
         if matches!(n.op, AiOp::Add) && n.inputs.len() >= 2 {
-            // One input should be current_tid, the other is the mask.
             if n.inputs[0] == current_tid || n.inputs[1] == current_tid {
                 has_mask = true;
+                // Identify the mask tensor (the Add input that isn't the scores).
+                mask_tid = if n.inputs[0] == current_tid {
+                    Some(n.inputs[1])
+                } else {
+                    Some(n.inputs[0])
+                };
                 chain_indices.push(next);
                 current_tid = *n.outputs.first()?;
             }
@@ -302,6 +324,7 @@ fn match_sdpa_chain(
         v_tid,
         scale,
         has_mask,
+        mask_tid,
         output_tid,
         output_matmul_idx: out_matmul,
         node_indices: chain_indices,
@@ -404,19 +427,62 @@ fn extract_heads_dim(tid: TensorId, graph: &AiGraph) -> Option<u64> {
     None
 }
 
-/// Trace a tensor back through a Transpose to find the pre-transpose input.
-/// Returns the input to the Transpose if found, otherwise None.
-fn find_pre_transpose(
+/// Trace a tensor back through Transpose/Reshape/View/Mul nodes to find the
+/// un-transposed K input and any scale applied on the K path.
+///
+/// Returns `(k_tensor_id, optional_scale)`:
+/// - `k_tensor_id`: the un-transposed K (input to the Transpose), or the
+///   original `tid` if no Transpose is found.
+/// - `optional_scale`: scalar from any Mul(K, scalar) node on the path.
+fn find_pre_transpose_with_scale(
     tid: TensorId,
     tid_to_node: &HashMap<TensorId, usize>,
     graph: &AiGraph,
-) -> Option<TensorId> {
-    let &node_idx = tid_to_node.get(&tid)?;
-    let node = &graph.nodes[node_idx];
-    match &node.op {
-        AiOp::Transpose { .. } => node.inputs.first().copied(),
-        _ => None,
+) -> (TensorId, Option<f32>) {
+    let mut current = tid;
+    let mut accumulated_scale: Option<f32> = None;
+
+    // Walk back through at most 5 nodes looking for a Transpose.
+    for _ in 0..5 {
+        let node_idx = match tid_to_node.get(&current) {
+            Some(&idx) => idx,
+            None => return (tid, accumulated_scale),
+        };
+        let node = &graph.nodes[node_idx];
+        match &node.op {
+            AiOp::Transpose { .. } => {
+                let pre = node.inputs.first().copied().unwrap_or(tid);
+                return (pre, accumulated_scale);
+            }
+            // Reshape/View/Unsqueeze don't change data layout — keep tracing.
+            AiOp::Reshape { .. }
+            | AiOp::Flatten { .. }
+            | AiOp::Squeeze { .. }
+            | AiOp::Unsqueeze { .. }
+            | AiOp::Identity => {
+                current = match node.inputs.first() {
+                    Some(&inp) => inp,
+                    None => return (tid, accumulated_scale),
+                };
+            }
+            // Mul(tensor, scalar): extract scale and continue tracing the tensor.
+            AiOp::Mul if node.inputs.len() >= 2 => {
+                let s1 = scalar_param(node.inputs[1], graph);
+                let s0 = scalar_param(node.inputs[0], graph);
+                if let Some(sv) = s1 {
+                    accumulated_scale = Some(accumulated_scale.unwrap_or(1.0) * sv);
+                    current = node.inputs[0];
+                } else if let Some(sv) = s0 {
+                    accumulated_scale = Some(accumulated_scale.unwrap_or(1.0) * sv);
+                    current = node.inputs[1];
+                } else {
+                    return (tid, accumulated_scale);
+                }
+            }
+            _ => return (tid, accumulated_scale),
+        }
     }
+    (tid, accumulated_scale)
 }
 
 #[cfg(test)]
@@ -568,6 +634,7 @@ mod tests {
                 head_dim,
                 scale,
                 causal,
+                ..
             } => {
                 assert_eq!(*num_heads, 4);
                 assert_eq!(*num_kv_heads, 4);

@@ -39,6 +39,8 @@ pub struct ModelMetadata {
     pub context_len: u32,
     pub n_layers: u32,
     pub n_embd: u32,
+    pub n_kv_heads: u32,
+    pub head_dim: u32,
 }
 
 // ── Compilation output ──────────────────────────────────────────────────────
@@ -102,11 +104,22 @@ impl CompiledModel {
 pub struct ModelCompiler {
     /// Use memory-mapping for weight loading when possible.
     pub mmap: bool,
+    /// Override the sequence length for compilation.
+    /// When `Some(n)`, all seq-like dims are set to `n` instead of the
+    /// model's `context_length`. Use `None` to auto-detect from metadata.
+    pub seq_len_override: Option<u64>,
+    /// Force single-graph compilation (skip LLM pipeline detection).
+    /// Used internally for the decode sub-graph in LLM pipelines.
+    pub force_single_graph: bool,
 }
 
 impl Default for ModelCompiler {
     fn default() -> Self {
-        Self { mmap: true }
+        Self {
+            mmap: true,
+            seq_len_override: None,
+            force_single_graph: false,
+        }
     }
 }
 
@@ -117,20 +130,34 @@ impl ModelCompiler {
     /// archive with named layer entrypoints. For simpler models (ONNX), produces
     /// a single-graph archive.
     pub fn compile(&self, source: ModelSource) -> anyhow::Result<HoloArchive> {
+        // Save the source path for decode re-import (LLM pipeline needs seq=1 decode graph).
+        let source_path = match &source {
+            ModelSource::OnnxPath(p) => Some(p.clone()),
+            ModelSource::GgufPath(p) => Some(p.clone()),
+            ModelSource::GgmlPath(p) => Some(p.clone()),
+            _ => None,
+        };
+
         // Step 1 — import.
         let ai_graph = self.import(source)?;
         info!(nodes = ai_graph.nodes.len(), params = ai_graph.params.len(), "import complete");
 
         // Step 2 — optimize.
-        let ai_graph = OptPipeline::mvp()
+        let mut ai_graph = OptPipeline::mvp()
             .run(ai_graph)
             .context("optimization pass failed")?;
         info!(nodes = ai_graph.nodes.len(), "optimization complete");
 
+        // Step 2a — infer LLM metadata from fused attention nodes.
+        // ONNX models don't carry arch/n_layers/n_kv_heads metadata natively.
+        // After AttentionFusion, we can extract these from GroupedQueryAttention
+        // nodes so the MemoryPlanner and LLM pipeline detection work correctly.
+        infer_llm_metadata_from_graph(&mut ai_graph);
+
         // Step 2b — concretize all symbolic/dynamic dims for compilation.
         // The runtime doesn't yet support deferred shape resolution, so we
         // bake in concrete values: Var dims → upper bounds, Dynamic → 1.
-        let ai_graph = concretize_all_dims(ai_graph).context("shape concretization failed")?;
+        let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override).context("shape concretization failed")?;
 
         // Step 2c — post-concretization shape repair.
         // After Var→concrete substitution, most shapes are already correct.
@@ -204,10 +231,12 @@ impl ModelCompiler {
             use hologram_ai_common::Dim;
             for info in ai_graph.tensor_info.values_mut() {
                 for dim in info.shape.iter_mut() {
-                    if matches!(dim, Dim::Dynamic) {
-                        *dim = Dim::Concrete(0);
-                    } else if matches!(dim, Dim::Var(_)) {
-                        *dim = Dim::Concrete(0);
+                    if matches!(dim, Dim::Dynamic | Dim::Var(_)) {
+                        // Use 1 as fallback for any remaining non-concrete dims.
+                        // concretize_all_dims already set seq-like dims to the
+                        // correct context_length; these are edge cases from the
+                        // aggressive pipeline introducing new Dynamic dims.
+                        *dim = Dim::Concrete(1);
                     }
                 }
             }
@@ -429,8 +458,8 @@ impl ModelCompiler {
             "starting compilation"
         );
 
-        let archive_bytes = if is_llm {
-            self.compile_llm_pipeline(&ai_graph, &mem_plan)?
+        let archive_bytes = if is_llm && !self.force_single_graph {
+            self.compile_llm_pipeline(&ai_graph, &mem_plan, source_path.as_deref())?
         } else {
             self.compile_single_graph(&ai_graph, &mem_plan)?
         };
@@ -467,10 +496,14 @@ impl ModelCompiler {
         info!(nodes = ai_graph.nodes.len(), params = ai_graph.params.len(), "import complete (debug)");
 
         // Capture tensor_names before optimization passes (passes preserve it).
-        let ai_graph = OptPipeline::mvp()
+        let mut ai_graph = OptPipeline::mvp()
             .run(ai_graph)
             .context("optimization pass failed")?;
-        let ai_graph = concretize_all_dims(ai_graph).context("shape concretization failed")?;
+
+        // Infer LLM metadata from GQA nodes (same as compile()).
+        infer_llm_metadata_from_graph(&mut ai_graph);
+
+        let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override).context("shape concretization failed")?;
 
         // Post-concretization repair (same as compile()).
         let mut ai_graph = ai_graph;
@@ -509,10 +542,12 @@ impl ModelCompiler {
             use hologram_ai_common::Dim;
             for info in ai_graph.tensor_info.values_mut() {
                 for dim in info.shape.iter_mut() {
-                    if matches!(dim, Dim::Dynamic) {
-                        *dim = Dim::Concrete(0);
-                    } else if matches!(dim, Dim::Var(_)) {
-                        *dim = Dim::Concrete(0);
+                    if matches!(dim, Dim::Dynamic | Dim::Var(_)) {
+                        // Use 1 as fallback for any remaining non-concrete dims.
+                        // concretize_all_dims already set seq-like dims to the
+                        // correct context_length; these are edge cases from the
+                        // aggressive pipeline introducing new Dynamic dims.
+                        *dim = Dim::Concrete(1);
                     }
                 }
             }
@@ -606,7 +641,7 @@ impl ModelCompiler {
         let ai_graph = OptPipeline::mvp()
             .run(ai_graph)
             .context("optimization pass failed")?;
-        let ai_graph = concretize_all_dims(ai_graph).context("shape concretization failed")?;
+        let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override).context("shape concretization failed")?;
 
         let mut ai_graph = ai_graph;
         for info in ai_graph.tensor_info.values_mut() {
@@ -644,10 +679,12 @@ impl ModelCompiler {
             use hologram_ai_common::Dim;
             for info in ai_graph.tensor_info.values_mut() {
                 for dim in info.shape.iter_mut() {
-                    if matches!(dim, Dim::Dynamic) {
-                        *dim = Dim::Concrete(0);
-                    } else if matches!(dim, Dim::Var(_)) {
-                        *dim = Dim::Concrete(0);
+                    if matches!(dim, Dim::Dynamic | Dim::Var(_)) {
+                        // Use 1 as fallback for any remaining non-concrete dims.
+                        // concretize_all_dims already set seq-like dims to the
+                        // correct context_length; these are edge cases from the
+                        // aggressive pipeline introducing new Dynamic dims.
+                        *dim = Dim::Concrete(1);
                     }
                 }
             }
@@ -766,10 +803,14 @@ impl ModelCompiler {
     }
 
     /// Compile an LLM into a pipeline archive with prefill + decode sub-archives.
+    ///
+    /// Prefill: compiled at the configured seq_len (full prompt).
+    /// Decode: compiled at seq=1 (single token per step).
     fn compile_llm_pipeline(
         &self,
         ai_graph: &AiGraph,
         mem_plan: &hologram_ai_common::MemoryPlan,
+        source_path: Option<&std::path::Path>,
     ) -> anyhow::Result<Vec<u8>> {
         use hologram::hologram_archive::writer::pipeline_writer::PipelineWriter;
 
@@ -808,31 +849,51 @@ impl ModelCompiler {
         )?;
         info!(archive_bytes = prefill_archive.len(), "prefill archive assembled");
 
-        // Lower + compile + single-pass assemble for decode graph.
-        let decode_out = lower(
-            ai_graph,
-            &mem_plan.kv_cache_layout,
-            &opts,
-            &LowerPhase::Decode,
-        )
-        .context("lowering decode graph failed")?;
-        debug!(graph_nodes = decode_out.graph.node_count(), "decode lowered");
-        let decode_compiled =
-            hologram::compile(decode_out.graph).context("compiling decode graph failed")?;
-        debug!(archive_bytes = decode_compiled.archive.len(), "decode compiled");
-        let decode_unpacked = unpack_archive(&decode_compiled.archive)?;
-        let decode_lh = build_tensor_port_header(&decode_unpacked.plan, ai_graph);
-        let decode_bundle = if decode_out.context.is_empty() {
-            None
+        // ── Decode graph: seq=1 ──
+        // Re-compile from source with seq=1 so all ops have single-token shapes.
+        // This is the correct approach: decode sees only 1 new token per step,
+        // with KV cache providing all previous K/V data.
+        let decode_archive = if let Some(path) = source_path {
+            info!("compiling decode graph (seq=1) from {}", path.display());
+            let decode_compiler = ModelCompiler {
+                seq_len_override: Some(1),
+                force_single_graph: true, // prevent recursive pipeline
+                ..ModelCompiler::default()
+            };
+            let source = if path.extension().map(|e| e == "onnx").unwrap_or(false) {
+                ModelSource::OnnxPath(path.to_path_buf())
+            } else {
+                ModelSource::GgufPath(path.to_path_buf())
+            };
+            let decode_archive_obj = decode_compiler.compile(source)
+                .context("compiling decode graph (seq=1) failed")?;
+            decode_archive_obj.bytes
         } else {
-            Some(&decode_out.context)
+            // Fallback: use prefill graph for decode (same seq, less optimal).
+            warn!("no source path for decode re-import; using prefill graph for decode");
+            let decode_out = lower(
+                ai_graph,
+                &mem_plan.kv_cache_layout,
+                &opts,
+                &LowerPhase::Decode,
+            )
+            .context("lowering decode graph failed")?;
+            let decode_compiled =
+                hologram::compile(decode_out.graph).context("compiling decode graph failed")?;
+            let decode_unpacked = unpack_archive(&decode_compiled.archive)?;
+            let decode_lh = build_tensor_port_header(&decode_unpacked.plan, ai_graph);
+            let decode_bundle = if decode_out.context.is_empty() {
+                None
+            } else {
+                Some(&decode_out.context)
+            };
+            build_final_archive(
+                decode_unpacked,
+                extra_weights.clone(),
+                Some(decode_lh),
+                decode_bundle,
+            )?
         };
-        let decode_archive = build_final_archive(
-            decode_unpacked,
-            extra_weights,
-            Some(decode_lh),
-            decode_bundle,
-        )?;
         info!(archive_bytes = decode_archive.len(), "decode archive assembled");
 
         // Bundle into pipeline.
@@ -1098,6 +1159,8 @@ fn extract_metadata(graph: &AiGraph) -> ModelMetadata {
     let context_len = meta_u32(graph, "context_length").unwrap_or(0);
     let n_layers = meta_u32(graph, "n_layers").unwrap_or(0);
     let n_embd = meta_u32(graph, "n_embd").unwrap_or(0);
+    let n_kv_heads = meta_u32(graph, "n_kv_heads").unwrap_or(0);
+    let head_dim = meta_u32(graph, "head_dim").unwrap_or(0);
 
     ModelMetadata {
         arch,
@@ -1105,85 +1168,124 @@ fn extract_metadata(graph: &AiGraph) -> ModelMetadata {
         context_len,
         n_layers,
         n_embd,
+        n_kv_heads,
+        head_dim,
     }
+}
+
+/// Infer LLM architecture metadata from fused GroupedQueryAttention nodes.
+///
+/// ONNX models don't carry `arch`, `n_layers`, `n_kv_heads`, etc. natively.
+/// After AttentionFusion, we can extract these from the GQA nodes so that
+/// `compute_kv_layout` and `is_llm` detection work correctly.
+/// Only sets metadata fields that are not already present (GGUF sets them
+/// during import, so this is a no-op for GGUF models).
+fn infer_llm_metadata_from_graph(graph: &mut AiGraph) {
+    use hologram_ai_common::ir::op::AiOp;
+    use hologram_ai_common::MetaValue;
+
+    let gqa_params: Vec<(u32, u32, u32)> = graph
+        .nodes
+        .iter()
+        .filter_map(|n| match &n.op {
+            AiOp::GroupedQueryAttention {
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                ..
+            } => Some((*num_heads, *num_kv_heads, *head_dim)),
+            _ => None,
+        })
+        .collect();
+
+    if gqa_params.is_empty() {
+        return;
+    }
+
+    let n_layers = gqa_params.len() as u32;
+
+    // Only infer LLM metadata for models with multiple attention layers.
+    // Single-layer fixtures/tests should compile as single-graph, not pipeline.
+    if n_layers < 2 {
+        return;
+    }
+    let (num_heads, n_kv_heads, head_dim) = gqa_params[0];
+    let n_embd = num_heads * head_dim;
+
+    graph
+        .metadata
+        .entry("arch".into())
+        .or_insert(MetaValue::Str("llama".into()));
+    graph
+        .metadata
+        .entry("n_layers".into())
+        .or_insert(MetaValue::Int(n_layers as i64));
+    graph
+        .metadata
+        .entry("n_kv_heads".into())
+        .or_insert(MetaValue::Int(n_kv_heads as i64));
+    graph
+        .metadata
+        .entry("head_dim".into())
+        .or_insert(MetaValue::Int(head_dim as i64));
+    graph
+        .metadata
+        .entry("n_embd".into())
+        .or_insert(MetaValue::Int(n_embd as i64));
+    graph
+        .metadata
+        .entry("context_length".into())
+        .or_insert(MetaValue::Int(2048));
+
+    info!(
+        n_layers,
+        n_kv_heads,
+        head_dim,
+        n_embd,
+        "inferred LLM metadata from {} GQA nodes",
+        gqa_params.len()
+    );
 }
 
 /// Concretize all symbolic and dynamic dimensions in the graph.
 ///
-/// - `DimExpr::Var` dims → substituted with a concrete value
-/// - `DimExpr::Dynamic` dims → replaced with `Concrete(0)` (0-sentinel for runtime resolution)
+/// ALL dims become concrete at compile time. No 0-sentinels, no runtime
+/// shape resolution needed. The executor simply dispatches with baked shapes.
 ///
-/// For Var dims with an upper bound (e.g., GGUF models), uses the upper bound.
-/// For Var dims without an upper bound (e.g., ONNX models), uses heuristic
-/// defaults: batch-like dims → 1, sequence-like dims → 2048, others → 1.
+/// - `DimExpr::Var` (sequence-like) → `context_length` from model metadata
+/// - `DimExpr::Var` (batch-like) → 1
+/// - `DimExpr::Dynamic` → inferred from context or defaulted
 ///
-/// The `ShapeRecipeSection` is still embedded for future runtime resolution.
-fn concretize_all_dims(mut graph: AiGraph) -> anyhow::Result<AiGraph> {
+/// For LLM pipeline archives, the caller compiles prefill (seq=context_len)
+/// and decode (seq=1) as separate graphs — both fully concrete.
+fn concretize_all_dims(mut graph: AiGraph, seq_len_override: Option<u64>) -> anyhow::Result<AiGraph> {
     use hologram_ai_common::Dim;
 
-    // Set upper bounds for ONNX dim vars that don't have them,
-    // using heuristic defaults based on the variable name.
-    //
-    // Sequence-like vars are fixed to 0 (sentinel) rather than a concrete value.
-    // The executor resolves them at runtime from actual input buffer sizes,
-    // enabling dynamic-length inference without padding to a fixed seq_len.
+    // Use override if provided, otherwise extract from model metadata.
+    let context_len = seq_len_override
+        .unwrap_or_else(|| meta_u32(&graph, "context_length").unwrap_or(2048) as u64);
+    info!(context_len, "concretizing all dims (fully static shapes)");
+
+    // Set concrete values for all dim vars based on their name.
+    // Sequence-like dims get context_length; batch-like dims get 1.
     for (_, entry) in graph.dim_vars.iter_mut() {
         if entry.fixed.is_some() {
             continue;
         }
-        if entry.upper.is_none() {
-            let name_lower = entry.name.to_lowercase();
-            if name_lower.contains("seq") || name_lower.contains("length") {
-                // Emit as 0-sentinel: runtime resolves from actual token count.
-                entry.fixed = Some(0);
-            } else {
-                entry.upper = Some(1u64);
-            }
+        let name_lower = entry.name.to_lowercase();
+        if name_lower.contains("seq") || name_lower.contains("length") || name_lower.contains("position") {
+            entry.fixed = Some(context_len);
+        } else {
+            // Batch-like dims default to 1.
+            entry.upper = Some(1u64);
         }
     }
 
-    // Concretize Var dims to their upper bounds.
-    let _ = graph.dim_vars.concretize_to_upper(); // ok if no vars
+    // Concretize Var dims to their fixed/upper values.
+    let _ = graph.dim_vars.concretize_to_upper();
     let subs = graph.dim_vars.fixed_substitutions();
 
-    // Diagnostic: count Dynamic dims before concretization.
-    {
-        let mut dyn_count = 0u32;
-        let mut dyn_tensors = Vec::new();
-        let producers: std::collections::HashMap<u32, &hologram_ai_common::AiOp> = graph
-            .nodes
-            .iter()
-            .flat_map(|n| n.outputs.iter().map(move |&tid| (tid, &n.op)))
-            .collect();
-        for (&tid, info) in &graph.tensor_info {
-            for (di, dim) in info.shape.iter().enumerate() {
-                if matches!(dim, Dim::Dynamic) {
-                    dyn_count += 1;
-                    if dyn_tensors.len() < 20 {
-                        let op_str = producers
-                            .get(&tid)
-                            .map(|op| format!("{op:?}"))
-                            .unwrap_or_else(|| "input/param".into());
-                        dyn_tensors.push(format!(
-                            "  T{tid}[{di}]: shape={:?} (from {})",
-                            info.shape.as_slice(),
-                            &op_str[..op_str.len().min(60)]
-                        ));
-                    }
-                }
-            }
-        }
-        if dyn_count > 0 {
-            warn!(count = dyn_count, "Dynamic dims remain after shape propagation");
-            for line in &dyn_tensors {
-                debug!("{line}");
-            }
-        }
-    }
-
-    // Apply Var substitutions and replace Dynamic→Concrete(0) (0-sentinel).
-    // After this, all dims are concrete. The post-concretization aggressive
-    // pipeline will re-infer correct shapes from these concrete anchors.
+    // Apply substitutions and replace any remaining non-concrete dims.
     for info in graph.tensor_info.values_mut() {
         for dim in info.shape.iter_mut() {
             for (var_id, replacement) in &subs {
@@ -1192,12 +1294,10 @@ fn concretize_all_dims(mut graph: AiGraph) -> anyhow::Result<AiGraph> {
             if let Some(v) = dim.evaluate() {
                 *dim = Dim::Concrete(v);
             }
-            if matches!(dim, Dim::Dynamic) {
-                *dim = Dim::Concrete(0);
-            } else if matches!(dim, Dim::Var(_)) {
-                // Safety net: any remaining Var (e.g. seq-like fixed=0) that
-                // wasn't substituted above gets the 0-sentinel treatment.
-                *dim = Dim::Concrete(0);
+            // Any remaining Dynamic or Var dims get context_length (seq-like)
+            // rather than 0-sentinel. This ensures all shapes are fully concrete.
+            if matches!(dim, Dim::Dynamic | Dim::Var(_)) {
+                *dim = Dim::Concrete(context_len);
             }
         }
     }
@@ -1277,6 +1377,10 @@ pub struct HoloRunner {
     _raw_bytes: Vec<u8>,
     /// Single-graph plan (non-pipeline) or the prefill sub-model.
     plan: hologram::LoadedPlan,
+    /// Decode sub-model plan (pipeline only, compiled at seq=1).
+    decode_plan: Option<hologram::LoadedPlan>,
+    /// Decode sub-archive bytes (for section lookups).
+    _decode_bytes: Option<Vec<u8>>,
     shape_ctx: Option<ShapeContextGraph>,
     /// True if the archive is a pipeline (prefill + decode).
     is_pipeline: bool,
@@ -1298,10 +1402,22 @@ impl HoloRunner {
             .map_err(|e| anyhow::anyhow!("loading plan: {e}"))?;
         let shape_ctx = read_shape_context_from_archive(&effective_bytes)?;
 
+        // Load decode sub-archive if pipeline.
+        let (decode_plan, decode_bytes) = if is_pipeline {
+            let db = extract_sub_archive_bytes(&bytes, "lm.decode")?;
+            let dp = hologram::load_from_bytes(&db)
+                .map_err(|e| anyhow::anyhow!("loading decode plan: {e}"))?;
+            (Some(dp), Some(db))
+        } else {
+            (None, None)
+        };
+
         Ok(Self {
             effective_bytes,
             _raw_bytes: bytes,
             plan,
+            decode_plan,
+            _decode_bytes: decode_bytes,
             shape_ctx,
             is_pipeline,
         })
@@ -1314,35 +1430,12 @@ impl HoloRunner {
         Self::from_bytes(bytes)
     }
 
-    /// Execute with shape hints projected from the embedded `ShapeContextGraph`.
+    /// Execute the compiled graph with the given inputs.
     ///
-    /// Input node shapes are read from `inputs.shape(i)` for each slot `i`.
-    /// When a `ShapeContextGraph` is present, `walk_shape_context()` projects
-    /// all node shapes forward before dispatch. Falls back to standard
-    /// execution (0-sentinel resolution) when no context is available.
+    /// All shapes are fully baked at compile time — no runtime shape
+    /// resolution needed. Just dispatches ops directly.
     pub fn execute(&self, inputs: &hologram::GraphInputs) -> anyhow::Result<hologram::GraphOutputs> {
-        use hologram_ai_common::lower::shape_spec_bridge::walk_shape_context;
-        use std::collections::HashMap;
-
-        let mut input_node_shapes: HashMap<u32, Vec<usize>> = HashMap::new();
-        for i in 0..64u32 {
-            if let Some(shape) = inputs.shape(i) {
-                if !shape.is_empty() {
-                    input_node_shapes.insert(i, shape.to_vec());
-                }
-            }
-        }
-
-        let shape_map = match &self.shape_ctx {
-            Some(ctx) => {
-                let mut map = HashMap::new();
-                walk_shape_context(ctx, &input_node_shapes, &HashMap::new(), &mut map);
-                map
-            }
-            None => HashMap::new(),
-        };
-
-        hologram::execute_plan_with_shape_hints(&self.plan, inputs, &shape_map)
+        hologram::execute_plan(&self.plan, inputs)
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
@@ -1372,36 +1465,23 @@ impl HoloRunner {
 
     /// Execute with a mutable KV cache state for autoregressive generation.
     ///
-    /// Projects shapes via `ShapeContextGraph`, then dispatches through the
-    /// KV-cache-aware executor path. `KvWrite` nodes append to the cache
-    /// and output the full cached K/V for attention.
+    /// Uses the prefill graph for step 0, decode graph (seq=1) for subsequent steps.
+    /// All shapes are baked at compile time. `KvWrite` nodes append to the
+    /// cache; `KvRead` nodes read back cached K/V for attention.
     pub fn execute_with_kv(
         &self,
         inputs: &hologram::GraphInputs,
         kv_state: &mut hologram::KvCacheState,
     ) -> anyhow::Result<hologram::GraphOutputs> {
-        use hologram_ai_common::lower::shape_spec_bridge::walk_shape_context;
         use std::collections::HashMap;
-
-        let mut input_node_shapes: HashMap<u32, Vec<usize>> = HashMap::new();
-        for i in 0..64u32 {
-            if let Some(shape) = inputs.shape(i) {
-                if !shape.is_empty() {
-                    input_node_shapes.insert(i, shape.to_vec());
-                }
-            }
-        }
-
-        let shape_map = match &self.shape_ctx {
-            Some(ctx) => {
-                let mut map = HashMap::new();
-                walk_shape_context(ctx, &input_node_shapes, &HashMap::new(), &mut map);
-                map
-            }
-            None => HashMap::new(),
+        let empty: HashMap<u32, Vec<usize>> = HashMap::new();
+        // Use decode plan (seq=1) for decode steps, prefill plan for step 0.
+        let plan = if kv_state.write_pos() > 0 {
+            self.decode_plan.as_ref().unwrap_or(&self.plan)
+        } else {
+            &self.plan
         };
-
-        hologram::execute_plan_with_kv_state(&self.plan, inputs, &shape_map, kv_state)
+        hologram::execute_plan_with_kv_state(plan, inputs, &empty, kv_state)
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 }
@@ -1475,36 +1555,16 @@ pub fn read_shape_context_from_archive(archive_bytes: &[u8]) -> anyhow::Result<O
 /// Input node shapes are read from `inputs.shape(i)` for each input slot `i`.
 /// Since hologram-ai's builder always registers inputs at indices 0..n_inputs,
 /// the input slot index equals the graph node's `NodeId.index`.
+/// Execute a compiled archive directly.
+///
+/// All shapes are fully baked at compile time — no runtime shape resolution.
+/// Inputs should be padded to the compiled seq_len (FixedPad mode).
 pub fn run_with_shape_context(
     archive: &HoloArchive,
     inputs: &hologram::GraphInputs,
 ) -> anyhow::Result<hologram::GraphOutputs> {
-    use hologram_ai_common::lower::shape_spec_bridge::walk_shape_context;
-    use std::collections::HashMap;
-
-    // Build input_node_shapes: graph input slot i → runtime shape.
-    // The builder always registers Input nodes first, so NodeId.index == slot index.
-    let mut input_node_shapes: HashMap<u32, Vec<usize>> = HashMap::new();
-    for i in 0..64u32 {
-        if let Some(shape) = inputs.shape(i) {
-            if !shape.is_empty() {
-                input_node_shapes.insert(i, shape.to_vec());
-            }
-        }
-    }
-
     let plan = hologram::load_from_bytes(&archive.bytes)?;
-
-    let shape_map = match read_shape_context_from_archive(&archive.bytes)? {
-        Some(ctx) => {
-            let mut map = HashMap::new();
-            walk_shape_context(&ctx, &input_node_shapes, &HashMap::new(), &mut map);
-            map
-        }
-        None => HashMap::new(),
-    };
-
-    hologram::execute_plan_with_shape_hints(&plan, inputs, &shape_map)
+    hologram::execute_plan(&plan, inputs)
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 

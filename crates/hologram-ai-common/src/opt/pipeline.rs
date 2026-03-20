@@ -41,14 +41,7 @@ impl OptPipeline {
             // scalar epsilon and exponent params are already materialized as
             // AiParam::Inline (otherwise scalar_f32_param returns None).
             Box::new(RmsNormFusion),
-            // Fuse decomposed SDPA chains (MatMul→Mul→Add→Softmax→MatMul)
-            // into AiOp::GroupedQueryAttention. Must run after RmsNormFusion
-            // and ConstantFolding so scale factors are resolved.
             Box::new(AttentionFusion),
-            // Inject KvSlotWrite on K/V inputs of fused attention layers.
-            // Enables runtime KV cache for both ONNX and GGUF models.
-            // GGUF already injects these during graph construction, so this
-            // is a no-op for GGUF (no GQA nodes without existing KvSlotWrite).
             Box::new(KvSlotInjection),
             // Decompose compound ops (ReduceL1/L2, DepthToSpace, SpaceToDepth)
             // into primitive ops before lowering.

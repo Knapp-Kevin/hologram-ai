@@ -236,8 +236,11 @@ pub enum ShapeSpecRepr {
     MatMul { k_hint: u32 },
     /// GEMM (2-D): `[m, n]` from `A[m, k] × B[k, n]`. `k` baked at compile time.
     Gemm { k: u32 },
-    /// Gather / embed: indices shape ++ `[dim]`.
+    /// Embed: indices shape ++ `[dim]` (embedding lookup).
     GatherEmbed { dim: u32 },
+    /// Gather along axis: `data.shape` with `data.shape[axis]` replaced by
+    /// `product(indices.shape)`. In hologram inputs: [indices, data].
+    GatherAxis { axis: u32 },
     /// Transpose: permute axes according to `perm[..ndim]`.
     Transpose { perm: [u8; 8], ndim: u8 },
     /// Reshape: output shape parsed from shape-value bytes (second input).

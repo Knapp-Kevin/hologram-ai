@@ -285,10 +285,12 @@ fn infer_custom_output_shapes(
             head_dim,
             ..
         } => {
-            if !inputs.is_empty() && inputs[0].len() >= 2 {
-                let mut shape = inputs[0][..inputs[0].len() - 1].to_vec();
-                shape.push(DimExpr::Concrete((*num_heads as u64) * (*head_dim as u64)));
-                vec![Shape::from(shape)]
+            // Output shape = same as Q input shape.
+            // Q is [batch, num_heads, seq, head_dim] (heads_first) or
+            // [batch, seq, num_heads, head_dim] (seq_first).
+            // Preserve Q's shape exactly — the kernel output matches Q's layout.
+            if !inputs.is_empty() && !inputs[0].is_empty() {
+                vec![Shape::from(inputs[0].clone())]
             } else {
                 vec![Shape::new()]
             }
