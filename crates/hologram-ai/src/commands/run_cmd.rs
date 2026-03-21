@@ -145,12 +145,14 @@ enum SeqMode {
 fn resolve_seq_mode(runner: &HoloRunner) -> SeqMode {
     let max_seq = load_meta_seq_len(runner).unwrap_or(2048);
 
-    // TODO: Enable Variable mode once hologram executor resolves baked FloatOp
-    // params (m/k/n) from runtime buffer sizes for all op types. Currently
-    // hits BLAS zero-dim errors when input is shorter than compiled seq_len.
-    // if runner.has_shape_context() {
-    //     return SeqMode::Variable { max_seq };
-    // }
+    // TODO(variable-length): Variable mode requires hologram executor to resolve
+    // baked FloatOp params (m/k/n in MatMul, size in Softmax) from runtime buffer
+    // sizes when they differ from compiled values. Currently the executor only
+    // resolves 0-sentinel params, but concretize_all_dims bakes all dims to
+    // concrete values leaving no sentinels. Two paths forward:
+    //   1. Compile with 0-sentinels for seq dims (don't concretize seq_len)
+    //   2. Have the executor re-derive params when buffer sizes don't match
+    // Until then, use FixedPad with the compiled seq_len.
 
     // Pad to compiled seq_len.
     let compiled_seq = runner
