@@ -6,8 +6,8 @@
 
 use anyhow::Context;
 use hologram_ai_common::{
-    exec_context::ShapeContextGraph, lower, AiGraph, AiParam, LowerPhase, LoweringOptions,
-    MemoryPlanner, OptPipeline, Pass,
+    exec_context::ShapeContextGraph, lower, walk_shape_context, AiGraph, AiParam, LowerPhase,
+    LoweringOptions, MemoryPlanner, OptPipeline, Pass,
 };
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -1432,11 +1432,17 @@ impl HoloRunner {
 
     /// Execute the compiled graph with the given inputs.
     ///
-    /// All shapes are fully baked at compile time — no runtime shape
-    /// resolution needed. Just dispatches ops directly.
+    /// When a `ShapeContextGraph` is available, projects shapes from the
+    /// actual runtime input dimensions (variable-length support). Otherwise
+    /// falls back to the compiled static shapes.
     pub fn execute(&self, inputs: &hologram::GraphInputs) -> anyhow::Result<hologram::GraphOutputs> {
-        hologram::execute_plan(&self.plan, inputs)
-            .map_err(|e| anyhow::anyhow!("{e}"))
+        let shape_hints = self.project_shapes(inputs, &self.plan);
+        if shape_hints.is_empty() {
+            hologram::execute_plan(&self.plan, inputs)
+        } else {
+            hologram::execute_plan_with_shape_hints(&self.plan, inputs, &shape_hints)
+        }
+        .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// Access the underlying loaded plan (for layer headers, weights, etc.).
@@ -1466,23 +1472,54 @@ impl HoloRunner {
     /// Execute with a mutable KV cache state for autoregressive generation.
     ///
     /// Uses the prefill graph for step 0, decode graph (seq=1) for subsequent steps.
-    /// All shapes are baked at compile time. `KvWrite` nodes append to the
-    /// cache; `KvRead` nodes read back cached K/V for attention.
+    /// Projects shapes from runtime inputs via `ShapeContextGraph` when available.
     pub fn execute_with_kv(
         &self,
         inputs: &hologram::GraphInputs,
         kv_state: &mut hologram::KvCacheState,
     ) -> anyhow::Result<hologram::GraphOutputs> {
-        use std::collections::HashMap;
-        let empty: HashMap<u32, Vec<usize>> = HashMap::new();
-        // Use decode plan (seq=1) for decode steps, prefill plan for step 0.
         let plan = if kv_state.write_pos() > 0 {
             self.decode_plan.as_ref().unwrap_or(&self.plan)
         } else {
             &self.plan
         };
-        hologram::execute_plan_with_kv_state(plan, inputs, &empty, kv_state)
+        let shape_hints = self.project_shapes(inputs, plan);
+        hologram::execute_plan_with_kv_state(plan, inputs, &shape_hints, kv_state)
             .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// Project shapes from runtime inputs using the embedded ShapeContextGraph.
+    ///
+    /// Returns an empty map when no shape context is available (falls back to
+    /// compiled static shapes in the executor).
+    fn project_shapes(
+        &self,
+        inputs: &hologram::GraphInputs,
+        plan: &hologram::LoadedPlan,
+    ) -> std::collections::HashMap<u32, Vec<usize>> {
+        let ctx = match &self.shape_ctx {
+            Some(c) => c,
+            None => return std::collections::HashMap::new(),
+        };
+
+        // Build runtime input shapes from GraphInputs.
+        // hologram-ai's builder registers inputs at sequential node IDs,
+        // so input slot i maps to node ID i in the ShapeContextGraph seeds.
+        let sg = plan.graph();
+        let mut runtime_inputs = std::collections::HashMap::new();
+        for (i, _name) in sg.input_names.iter().enumerate() {
+            if let Some(shape) = inputs.shape(i as u32) {
+                runtime_inputs.insert(i as u32, shape.to_vec());
+            }
+        }
+
+        let mut shape_map = std::collections::HashMap::new();
+        walk_shape_context(ctx, &runtime_inputs, &std::collections::HashMap::new(), &mut shape_map);
+        // Filter out shapes with 0-sentinels — let the executor resolve those
+        // from buffer sizes instead. This prevents stale/incorrect projections
+        // from overriding the executor's more robust inference.
+        shape_map.retain(|_, shape| !shape.contains(&0) && !shape.is_empty());
+        shape_map
     }
 }
 

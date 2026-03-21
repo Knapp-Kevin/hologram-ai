@@ -17,40 +17,42 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] **Fully static shapes at compile time** — all dims concretized to
   `context_length` (seq-like) or 1 (batch-like). No 0-sentinels, no runtime
   shape walker needed. `--seq-len` CLI flag for user override.
-- [x] **Disabled AttentionFusion** — the fused SDPA kernel had K^T routing,
-  scale placement, and output shape bugs. Individual ops (MatMul, Softmax,
-  Add, Transpose) are proven correct by 1156-node conformance comparison.
-- [x] **Disabled KvSlotInjection** — depends on AttentionFusion.
+- [x] **AttentionFusion** — 22 SDPA chains fused into GroupedQueryAttention
+  ops. Conformance tests pass (GQA flat, expanded, scaled dot product).
+- [x] **KvSlotInjection** — KV cache write/read ops injected after fusion.
+  Pipeline archive: prefill (full seq) + decode (seq=1).
 - [x] **Node-by-node inspector** — `tinyllama_node_inspector` test dumps all
   intermediate buffers; `compare_node_by_node.py` finds first divergent node.
 - [x] **TinyLlama ONNX matches ORT** — all 1156 compared nodes pass.
   Top-5 token predictions identical. Zero failures.
+- [x] **TinyLlama generates coherent English** — "I'm not a joke teller,
+  I just like to laugh at them!" (causal model, KV cache decode, 1.4 tok/s)
 
 ---
 
-## Short Term: Performance (make it fast)
+## Active: Performance (make it fast)
 
-### P1: Release build + smaller seq compilation
-- [ ] Add release build CI step
-- [ ] Document `--seq-len` workflow: compile at prompt-length seq, not full context
-- [ ] Benchmark: measure tok/s at seq=64 vs seq=2048
+### P1: Variable-length prefill (IN PROGRESS)
+- [ ] Wire `ShapeContextGraph` into `HoloRunner.execute()` — project shapes
+  at runtime from actual input dimensions instead of compiled seq_len
+- [ ] Add `SeqMode::Variable` — no padding, process actual prompt length
+- [ ] Expected: prefill ~13s → ~40ms for 6-token prompt (~340x speedup)
 
-### P2: Re-enable RoPE + attention fusion (correctly)
-- [ ] Write conformance tests for the fused attention kernel covering:
-  - Scale on K (pre-MatMul) vs scale on scores (post-MatMul) vs split scale (Q and K)
-  - GQA with expanded K/V (32 heads) vs raw K/V (4 heads) + group mapping
-  - K^T input (transposed layout) vs K input (un-transposed)
-  - Causal mask via flag vs explicit additive mask tensor
-- [ ] Fix `AttentionFusion` to handle all ONNX SDPA export variants
-- [ ] Re-enable `AttentionFusion` with conformance gate (only fuse when test passes)
-- [ ] Verify: fused TinyLlama still matches ORT
+### P2: Decode speed — wire Sprint 13 infrastructure (IN PROGRESS)
+- [ ] Wire weight cache (`WeightCache`) — eliminate per-dispatch rkyv
+  deserialization of quantized weights (currently ~5-10x overhead)
+- [ ] Wire tape executor (`Tape`, `Instruction`) — eliminate per-node
+  dispatch overhead via pre-resolved fn pointers (currently 2-3x overhead)
+- [ ] Wire `dispatch_float_into` — buffer reuse, eliminate per-op allocation
+- [ ] Expected: decode 0.7s/token → <0.1s/token
 
-### P3: KV cache for autoregressive generation
-- [ ] Compile two graphs: prefill (seq=context_len) + decode (seq=1)
-- [ ] Re-enable `KvSlotInjection` (requires working AttentionFusion)
-- [ ] Prefill: run full prompt through prefill graph, cache K/V
-- [ ] Decode: run single-token decode graph, read cached K/V
-- [ ] Verify: multi-token generation produces coherent English
+### P3: Compilation speed (Plan 017)
+- [ ] Release profile with LTO (`codegen-units = 1, lto = "thin"`)
+- [ ] Early convergence detection in fixpoint loop (break when dynamic dims
+  stop decreasing, saves up to 9 pass invocations)
+- [ ] Avoid double LLM compilation (clone AiGraph after MVP, concretize
+  twice instead of re-importing from disk)
+- [ ] Cache `topo_order` on AiGraph (called ~40 times per compilation)
 
 ---
 
@@ -59,8 +61,7 @@ zero runtime code. All kernels belong in hologram base crate.
 ### Any ONNX model
 - [x] Test with ResNet-50 (vision, no attention) — **compilation works** (225 nodes
   after BatchNorm decomposition + constant folding). Conv2d conformance tests pass
-  (single Conv2d, stride variants). Execution blocked on naive Conv2d being too slow
-  at full 224×224 resolution for practical e2e testing.
+  (single Conv2d, stride variants, Conv+Relu+GAP+Flatten+Gemm mini classifier).
 - [ ] Test with BERT (encoder-only, bidirectional attention)
 - [ ] Test with Stable Diffusion UNet (vision + attention + cross-attention)
 - [ ] Test with Whisper (encoder-decoder, audio)
@@ -84,11 +85,8 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] Multi-modal output trait (text, images, audio, etc.)
 
 ### Architecture
-- [ ] Remove dead `ShapeContextGraph` walker code (replaced by static shapes)
-- [ ] Remove `ShapeRecipeSection` / `ParamRecipe` (no more deferred dims)
 - [ ] Simplify post-concretization pipeline (3 fixpoint iterations → 1)
 - [ ] Break up large functions, apply Builder pattern
-- [ ] Clean up clippy warnings
 
 ---
 
@@ -119,10 +117,19 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] `onnx_builder::conv2d()` and `mini_vision_classifier()` test builders
 - [x] `position_ids` injection pass for KV cache decode
 
+### Sprint 13 hologram correctness fixes
+- [x] **Softmax precision**: restored `f32::exp()` — Sprint 13's `fast_exp()`
+  (~1.5% error) compounded across 22 layers producing gibberish
+- [x] **Shape-aware GlobalAvgPool**: `infer_nchw` heuristic failed for
+  non-standard channel counts. Added `dispatch_global_avg_pool_with_shapes`
+- [x] **KV cache overflow**: `read_k_through`/`read_v_through` clamped to
+  buffer capacity. `set_advance_override` for padded prefill
+- [x] **Clippy clean**: all warnings resolved in both repos
+
 ### Root causes found and fixed
 - [x] **Shape bug**: seq-like dims set to 0-sentinel → RoPE slices produce `[32,1]`
   instead of `[1,4,5,32]` → 1051 of 1067 nodes fail
-- [x] **Attention fusion bugs** (disabled, not fixed):
+- [x] **Attention fusion bugs** (documented, fusion now works):
   - K^T not un-transposed (find_pre_transpose stops at Mul)
   - Scale applied on K path not detected (double-scaling)
   - Output shape `[1,1,5,2048]` instead of `[1,32,5,64]`
@@ -132,4 +139,4 @@ zero runtime code. All kernels belong in hologram base crate.
 
 ## Previous sprints
 
-See git history for Plans 005-013.
+See git history for Plans 005-016. Plan 017: performance optimization.

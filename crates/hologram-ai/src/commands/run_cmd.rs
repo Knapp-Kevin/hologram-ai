@@ -136,11 +136,23 @@ struct GenerationConfig {
 enum SeqMode {
     /// Pad inputs to the compiled sequence length.
     FixedPad(usize),
+    /// Variable-length: use actual prompt length (no padding).
+    /// Requires ShapeContextGraph for runtime shape projection.
+    #[allow(dead_code)]
+    Variable { max_seq: usize },
 }
 
 fn resolve_seq_mode(runner: &HoloRunner) -> SeqMode {
-    // All shapes are fully baked at compile time — no runtime shape resolution.
-    // Read the compiled seq_len from the layer header (input_ids shape[1]).
+    let max_seq = load_meta_seq_len(runner).unwrap_or(2048);
+
+    // TODO: Enable Variable mode once hologram executor resolves baked FloatOp
+    // params (m/k/n) from runtime buffer sizes for all op types. Currently
+    // hits BLAS zero-dim errors when input is shorter than compiled seq_len.
+    // if runner.has_shape_context() {
+    //     return SeqMode::Variable { max_seq };
+    // }
+
+    // Pad to compiled seq_len.
     let compiled_seq = runner
         .plan()
         .layer_header()
@@ -152,15 +164,7 @@ fn resolve_seq_mode(runner: &HoloRunner) -> SeqMode {
         .filter(|&s| s > 0)
         .map(|s| s as usize);
 
-    if let Some(seq) = compiled_seq {
-        // Pad inputs to the compiled seq_len. The attention_mask (ONNX models)
-        // zeroes out padding positions so the model ignores them.
-        SeqMode::FixedPad(seq)
-    } else {
-        // Fallback: read from model metadata or default to 2048.
-        let meta_seq = load_meta_seq_len(runner);
-        SeqMode::FixedPad(meta_seq.unwrap_or(2048))
-    }
+    SeqMode::FixedPad(compiled_seq.unwrap_or(max_seq))
 }
 
 /// Try to read max_seq_len from embedded ModelMetaSection.
@@ -198,8 +202,10 @@ fn run_generation(
         encoder.vocab_size(),
         input_dtype.name(),
     );
-    let SeqMode::FixedPad(n) = &seq_mode;
-    eprintln!("seq_mode: fixed pad to {n}");
+    match &seq_mode {
+        SeqMode::FixedPad(n) => eprintln!("seq_mode: fixed pad to {n}"),
+        SeqMode::Variable { max_seq } => eprintln!("seq_mode: variable (max {max_seq})"),
+    }
     eprintln!(
         "sampling: temperature={:.2}, top_k={}, rep_penalty=1.3 (generated tokens only)",
         config.temperature,
@@ -358,11 +364,14 @@ fn run_generation(
             break;
         }
 
-        let text = encoder.decode(&[next_token]);
-        print!("{text}");
-        std::io::stdout().flush().ok();
-
+        // Stream the new token text. decode() strips leading ▁-spaces
+        // which are word boundaries. Decode the growing suffix to preserve them.
+        let prev_len = encoder.decode(&token_ids[prompt_len..]).len();
         token_ids.push(next_token);
+        let full = encoder.decode(&token_ids[prompt_len..]);
+        let new_text = &full[prev_len..];
+        print!("{new_text}");
+        std::io::stdout().flush().ok();
 
         if step == 0 {
             let prefill_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -390,15 +399,28 @@ fn run_generation(
 /// Returns `(tokens, actual_len)` where `actual_len` is the number of
 /// real (non-padding) tokens. For variable seq mode these are equal.
 fn build_step_tokens(token_ids: &[u32], mode: &SeqMode) -> (Vec<u32>, usize) {
-    let SeqMode::FixedPad(max_seq) = mode;
-    let actual_len = token_ids.len().min(*max_seq);
-    if token_ids.len() > *max_seq {
-        let truncated = token_ids[token_ids.len() - max_seq..].to_vec();
-        (truncated, actual_len)
-    } else {
-        let mut padded = token_ids.to_vec();
-        padded.resize(*max_seq, 0);
-        (padded, actual_len)
+    match mode {
+        SeqMode::FixedPad(max_seq) => {
+            let max_seq = *max_seq;
+            let actual_len = token_ids.len().min(max_seq);
+            if token_ids.len() > max_seq {
+                let truncated = token_ids[token_ids.len() - max_seq..].to_vec();
+                (truncated, actual_len)
+            } else {
+                let mut padded = token_ids.to_vec();
+                padded.resize(max_seq, 0);
+                (padded, actual_len)
+            }
+        }
+        SeqMode::Variable { max_seq } => {
+            let actual_len = token_ids.len().min(*max_seq);
+            let tokens = if token_ids.len() > *max_seq {
+                token_ids[token_ids.len() - max_seq..].to_vec()
+            } else {
+                token_ids.to_vec()
+            };
+            (tokens, actual_len)
+        }
     }
 }
 
