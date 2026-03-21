@@ -1384,6 +1384,12 @@ pub struct HoloRunner {
     shape_ctx: Option<ShapeContextGraph>,
     /// True if the archive is a pipeline (prefill + decode).
     is_pipeline: bool,
+    /// Pre-compiled execution tape for the prefill graph.
+    /// Built at load time to eliminate per-node op matching at inference time.
+    tape: Option<hologram::hologram_exec::tape::BoxedTape>,
+    /// Pre-compiled execution tape for the decode graph (pipeline only).
+    /// Will be wired into `execute_with_kv` once `execute_tape_with_kv_state` is available.
+    _decode_tape: Option<hologram::hologram_exec::tape::BoxedTape>,
 }
 
 impl HoloRunner {
@@ -1412,6 +1418,13 @@ impl HoloRunner {
             (None, None)
         };
 
+        // Build pre-compiled execution tapes (best-effort — fall back to
+        // execute_plan if tape building fails for unsupported ops).
+        let tape = hologram::build_tape_from_plan(&plan).ok();
+        let decode_tape = decode_plan
+            .as_ref()
+            .and_then(|dp| hologram::build_tape_from_plan(dp).ok());
+
         Ok(Self {
             effective_bytes,
             _raw_bytes: bytes,
@@ -1420,6 +1433,8 @@ impl HoloRunner {
             _decode_bytes: decode_bytes,
             shape_ctx,
             is_pipeline,
+            tape,
+            _decode_tape: decode_tape,
         })
     }
 
@@ -1438,6 +1453,14 @@ impl HoloRunner {
     pub fn execute(&self, inputs: &hologram::GraphInputs) -> anyhow::Result<hologram::GraphOutputs> {
         let shape_hints = self.project_shapes(inputs, &self.plan);
         if shape_hints.is_empty() {
+            // Try tape executor first (eliminates per-node op match + HashMap lookups).
+            // Falls back to execute_plan if the tape fails (e.g., ops with dynamic
+            // size params like Softmax that need resolve_dynamic_sizes at runtime).
+            if let Some(tape) = &self.tape {
+                if let Ok(result) = hologram::execute_tape(tape, &self.plan, inputs) {
+                    return Ok(result);
+                }
+            }
             hologram::execute_plan(&self.plan, inputs)
         } else {
             hologram::execute_plan_with_shape_hints(&self.plan, inputs, &shape_hints)

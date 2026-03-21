@@ -39,11 +39,27 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] Expected: prefill ~13s → ~40ms for 6-token prompt (~340x speedup)
 
 ### P2: Decode speed — wire Sprint 13 infrastructure (IN PROGRESS)
-- [ ] Wire weight cache (`WeightCache`) — eliminate per-dispatch rkyv
-  deserialization of quantized weights (currently ~5-10x overhead)
-- [ ] Wire tape executor (`Tape`, `Instruction`) — eliminate per-node
-  dispatch overhead via pre-resolved fn pointers (currently 2-3x overhead)
+
+#### P2a: Execution hot-path fast paths (hologram base, no cross-repo dep)
+- [ ] SameAs(0) fast path in `propagate_level_shapes` — skip full shape
+  resolution for elementwise ops (~60-70% of nodes, just copy input[0] shape)
+- [ ] Skip `input_shapes` gathering in `dispatch_level` for unary ops and
+  non-broadcasting binary ops (eliminate per-input HashMap lookups)
+
+#### P2b: Tape executor (hologram base)
+- [ ] `TapeBuilder` — pre-resolve kernel fn pointers + `output_elem_size`
+  per node at graph-load time (eliminates per-dispatch op match + HashMap
+  lookups for `compiled_dtypes`)
+- [ ] Wire tape executor into hologram public API (`build_tape_from_plan`,
+  `execute_tape`, `execute_tape_with_kv_state`)
+
+#### P2c: Integration (hologram-ai + hologram base)
+- [ ] Wire tape executor from `HoloRunner` — build tape at load time, use
+  for inference with fallback to `execute_plan`
+- [ ] Wire `WeightCache` into tape executor — cache deserialized quantized
+  weights across dispatches (currently ~5-10x overhead)
 - [ ] Wire `dispatch_float_into` — buffer reuse, eliminate per-op allocation
+
 - [ ] Expected: decode 0.7s/token → <0.1s/token
 
 ### P3: Compilation speed (Plan 017)
