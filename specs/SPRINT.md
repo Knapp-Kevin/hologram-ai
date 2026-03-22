@@ -40,7 +40,7 @@ zero runtime code. All kernels belong in hologram base crate.
   `--prompt` (e.g. `<|user|>\nTell me a joke</s>\n<|assistant|>` for
   TinyLlama-Chat). The CLI does not apply templates automatically.
 
-### P2: Decode speed — wire Sprint 13 infrastructure (IN PROGRESS)
+### P2: Decode speed — wire Sprint 13 infrastructure (DONE)
 
 #### P2a: Execution hot-path fast paths (DONE — hologram base)
 - [x] SameAs(0) fast path in `propagate_level_shapes` — skip full shape
@@ -61,13 +61,14 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Wire tape executor from `HoloRunner` — build tape at load time, use
   for inference with fallback to `execute_plan`
 
-#### P2d: Remaining decode optimizations (Plan 020)
+#### P2d: Remaining decode optimizations (DONE — Plan 020)
 - [x] Wire `dispatch_float_into` — buffer reuse, wired into tape executor
   via `BoxedInstruction::FloatInto` (eliminates per-op allocations)
 - [x] Wire `WeightCache` into tape executor — `TapeContext.weight_cache`
   caches deserialized quantized weights across dispatches
-- [ ] Level-aware tape execution for KV cache decode path — split tape
-  around KvWrite/KvRead ops per level (design only)
+- [x] Level-aware tape execution — `Tape.level_offsets` splits execution by
+  level; KvWrite/KvRead as `TapeKernel` enum variants; parallel level
+  execution via rayon (`execute_parallel()`)
 - Note: f32 ONNX decode at 13.6 tok/s is near memory bandwidth ceiling
   (4.1 GB weights × ~60 GB/s DDR ≈ 15 tok/s theoretical max). Further
   speedup requires weight quantization — see GGUF models section.
@@ -120,7 +121,8 @@ zero runtime code. All kernels belong in hologram base crate.
 
 ### GGUF models
 - [ ] Verify GGUF TinyLlama matches ORT (same approach as ONNX)
-- [ ] LUT-GEMM for Q4_0: `FloatOp::MatMulQ4` kernel
+- [x] LUT-GEMM for Q4_0/Q8_0: `TapeKernel::MatMulLut4`/`MatMulLut8` with
+  `WeightCache` and `psumbook` pre-computed partial sums (hologram base)
 - [ ] Goal: GGUF generation at >1 tok/s
 
 ---
@@ -128,10 +130,13 @@ zero runtime code. All kernels belong in hologram base crate.
 ## Long Term: Production readiness
 
 ### Performance
-- [ ] Fused attention kernel (proven correct via conformance)
-- [ ] KV cache with variable-length sequences
-- [ ] Parallel dispatch (rayon level scheduling)
-- [ ] Memory-mapped weight loading
+- [x] Fused attention kernel — online softmax (Flash Attention-style) in
+  hologram base `attention.rs`, avoids materializing full scores matrix
+- [x] Parallel dispatch — rayon `execute_parallel()` with adaptive threshold
+  (≥4 instructions per level), excludes shared-state ops (LUT-GEMM, KvCache)
+- [x] Memory-mapped weight loading — mmap zero-copy execution with
+  `MADV_RANDOM`/`MADV_SEQUENTIAL` page discipline
+- [ ] KV cache with variable-length sequences (blocked on P5)
 - [ ] Multi-modal output trait (text, images, audio, etc.)
 - [ ] MatMul + Activation fusion (MatMulRelu, MatMulGelu — inline activation
   in matmul output write, avoid intermediate buffer)
@@ -147,7 +152,8 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] GPU backend: WebGPU via wgpu crate
 
 ### Architecture
-- [ ] Simplify post-concretization pipeline (3 fixpoint iterations → 1)
+- [x] Simplify post-concretization pipeline — extracted shared
+  `post_concretization_repair()` with early convergence detection
 - [ ] Break up large functions, apply Builder pattern
 
 ---
@@ -197,6 +203,20 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] `AddRmsNormFusion` pass — fuses `Add(x, residual) → RmsNorm(sum, w, eps)`
   into `FusedLayerNormResidual`. Wired into MVP pipeline, lowering maps to
   `FloatOp::AddRmsNorm`. Kernel implemented in hologram base.
+
+### Decode optimizations (P2d)
+- [x] `dispatch_float_into` buffer reuse in tape executor
+- [x] `WeightCache` wired into `TapeContext` for quantized weight caching
+- [x] Level-aware tape execution with `level_offsets`, KvWrite/KvRead enum
+  dispatch, and rayon parallel level execution
+
+### Hologram base infrastructure (Sprint 13+)
+- [x] Online softmax attention kernel (Flash Attention-style)
+- [x] `FusedSwiGLU` kernel (binary elementwise: `silu(a) * b`)
+- [x] `AddRmsNorm` kernel in `float_dispatch/norm.rs`
+- [x] LUT-GEMM Q4/Q8 (`MatMulLut4`/`MatMulLut8`) with `WeightCache`
+- [x] Rayon parallel level execution (`execute_parallel()`)
+- [x] Memory-mapped weight loading with madvise page discipline
 
 ### Sprint 13 hologram correctness fixes
 - [x] **Softmax precision**: restored `f32::exp()` — Sprint 13's `fast_exp()`
