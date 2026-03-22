@@ -61,12 +61,11 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Wire tape executor from `HoloRunner` — build tape at load time, use
   for inference with fallback to `execute_plan`
 
-#### P2d: Remaining decode optimizations (requires hologram base — Plan 020)
-- [ ] Wire `dispatch_float_into` — buffer reuse, eliminate ~1000 per-op
-  allocations per decode token (API exists in hologram base, not wired)
-- [ ] Wire `WeightCache` into tape executor — cache deserialized quantized
-  weights across dispatches (currently ~5-10x overhead for GGUF; impl exists
-  at `kv/weight_cache.rs`, not wired)
+#### P2d: Remaining decode optimizations (Plan 020)
+- [x] Wire `dispatch_float_into` — buffer reuse, wired into tape executor
+  via `BoxedInstruction::FloatInto` (eliminates per-op allocations)
+- [x] Wire `WeightCache` into tape executor — `TapeContext.weight_cache`
+  caches deserialized quantized weights across dispatches
 - [ ] Level-aware tape execution for KV cache decode path — split tape
   around KvWrite/KvRead ops per level (design only)
 - Note: f32 ONNX decode at 13.6 tok/s is near memory bandwidth ceiling
@@ -77,9 +76,9 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] SwiGLU fusion pass — pattern-match `SiLU(gate) * up` into
   `FusedSwiGLU`. Implemented in `swiglu_fusion.rs`, wired into MVP pipeline.
   Eliminates 1 intermediate tensor + 1 dispatch per transformer layer.
-- [x] Add+RMSNorm residual fusion — `AddRmsNormFusion` pass fully
-  implemented in `add_rmsnorm_fusion.rs`, wired into MVP pipeline, lowering
-  maps to `FloatOp::AddRmsNorm`. **Waiting on hologram base kernel.**
+- [x] Add+RMSNorm residual fusion — `AddRmsNormFusion` pass in
+  `add_rmsnorm_fusion.rs`, wired into MVP pipeline; lowering maps to
+  `FloatOp::AddRmsNorm`; kernel implemented in hologram base.
 - [ ] QK-Norm + RoPE + KV-Store pre-attention fusion — fuse 5-7 nodes
   (Split/RmsNorm/RoPE/KvWrite) into extended `Attention` op. Design first,
   implement after tape executor is stable. Requires hologram base changes.
@@ -197,7 +196,7 @@ zero runtime code. All kernels belong in hologram base crate.
   1 dispatch per transformer layer (LLaMA, Qwen, Mistral, Gemma).
 - [x] `AddRmsNormFusion` pass — fuses `Add(x, residual) → RmsNorm(sum, w, eps)`
   into `FusedLayerNormResidual`. Wired into MVP pipeline, lowering maps to
-  `FloatOp::AddRmsNorm`. Waiting on hologram base kernel to activate.
+  `FloatOp::AddRmsNorm`. Kernel implemented in hologram base.
 
 ### Sprint 13 hologram correctness fixes
 - [x] **Softmax precision**: restored `f32::exp()` — Sprint 13's `fast_exp()`

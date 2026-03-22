@@ -14,27 +14,24 @@ changes are cross-repo and noted as such.
 
 ## Status Assessment
 
-### P2d: Remaining decode optimizations — NOT STARTED (hologram base)
-
-All three tasks exist only in Plan 018 and SPRINT.md. No implementation work
-has begun in either repo:
+### P2d: Remaining decode optimizations — MOSTLY DONE
 
 | Task | Status | Repo | Notes |
 |------|--------|------|-------|
-| `dispatch_float_into` — buffer reuse | Not wired | hologram base | API exists, not connected to tape executor |
-| `WeightCache` — cache deserialized quantized weights | Not wired | hologram base | Implementation exists at `kv/weight_cache.rs` |
+| `dispatch_float_into` — buffer reuse | **DONE** | hologram base | Wired into tape executor via `BoxedInstruction::FloatInto` |
+| `WeightCache` — cache deserialized quantized weights | **DONE** | hologram base | `TapeContext.weight_cache` caches across dispatches |
 | Level-aware tape execution for KV decode | Design only | hologram base | Split tape around KvWrite/KvRead per level |
 
 **Key constraint:** f32 ONNX decode at 13.6 tok/s is near memory bandwidth
 ceiling (4.1 GB weights x ~60 GB/s DDR = ~15 tok/s theoretical max). Further
 speedup requires weight quantization (GGUF models).
 
-### P3: Compiler fusion passes — hologram-ai side DONE
+### P3: Compiler fusion passes — MOSTLY DONE
 
 | Task | Status | Repo | Notes |
 |------|--------|------|-------|
 | SwiGLU fusion | **DONE** | hologram-ai | `swiglu_fusion.rs` wired into MVP pipeline |
-| Add+RMSNorm residual fusion | **hologram-ai DONE** | Cross-repo | Pass + lowering complete; waiting on hologram base `AddRmsNorm` kernel |
+| Add+RMSNorm residual fusion | **DONE** | Both | Pass + lowering in hologram-ai; kernel + dispatch in hologram base |
 | QK-Norm + RoPE + KV-Store fusion | Design only | Cross-repo | Depends on stable tape executor + hologram base Attention op extension |
 
 ### P4: Compilation speed — DONE
@@ -74,21 +71,16 @@ requires hologram base to resolve baked params from runtime buffer sizes.
 4. ~~Cache `topo_order` on AiGraph~~ (P4) — DONE
 5. ~~Avoid double LLM compilation~~ (P4) — DONE
 
-### Tier 3: Cross-repo — blocked on hologram base
+### Tier 3: Cross-repo — DONE
 
-6. **Wire `dispatch_float_into`** (P2d)
-   - Effort: Medium (hologram base)
-   - Impact: HIGH — eliminates ~1000 per-op allocations per decode token
-   - **Blocked:** purely hologram base work, nothing to do in hologram-ai
+6. ~~Wire `dispatch_float_into`~~ (P2d) — **DONE** in hologram base.
+   Wired into tape executor via `BoxedInstruction::FloatInto`.
 
-7. **Wire `WeightCache` into tape executor** (P2d)
-   - Effort: Medium (hologram base)
-   - Impact: HIGH for GGUF — 5-10x overhead reduction for quantized weights
-   - **Blocked:** purely hologram base work, nothing to do in hologram-ai
+7. ~~Wire `WeightCache` into tape executor~~ (P2d) — **DONE** in hologram base.
+   `TapeContext.weight_cache` caches deserialized quantized weights.
 
-8. **Add+RMSNorm residual fusion** (P3)
-   - hologram-ai side: **DONE** (pass, lowering, pipeline wiring)
-   - **Blocked:** needs `FloatOp::AddRmsNorm` kernel in hologram base
+8. ~~Add+RMSNorm residual fusion~~ (P3) — **DONE** end-to-end.
+   hologram-ai: pass + lowering + pipeline. hologram base: kernel + dispatch.
 
 ### Tier 4: Blocked / deferred
 
@@ -105,9 +97,8 @@ detection.
 
 **Phase B (Tier 2):** DONE. Cached topo_order + avoid double LLM compilation.
 
-**Phase C (Tier 3):** Blocked on hologram base. hologram-ai side of
-Add+RMSNorm fusion is complete. dispatch_float_into and WeightCache are
-purely hologram base work.
+**Phase C (Tier 3):** DONE. dispatch_float_into and WeightCache already
+wired in hologram base tape executor. AddRmsNorm kernel already implemented.
 
 **Phase D (Tier 4):** Blocked until prerequisites are met.
 
