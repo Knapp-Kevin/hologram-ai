@@ -77,21 +77,23 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] SwiGLU fusion pass — pattern-match `SiLU(gate) * up` into
   `FusedSwiGLU`. Implemented in `swiglu_fusion.rs`, wired into MVP pipeline.
   Eliminates 1 intermediate tensor + 1 dispatch per transformer layer.
-- [ ] Add+RMSNorm residual fusion — extend `rmsnorm_fusion.rs` to detect
-  `Add(x, residual) → RmsNorm` and emit `FusedAddRmsNorm`. Needs new
-  FloatOp + kernel in hologram base (cross-repo).
+- [x] Add+RMSNorm residual fusion — `AddRmsNormFusion` pass fully
+  implemented in `add_rmsnorm_fusion.rs`, wired into MVP pipeline, lowering
+  maps to `FloatOp::AddRmsNorm`. **Waiting on hologram base kernel.**
 - [ ] QK-Norm + RoPE + KV-Store pre-attention fusion — fuse 5-7 nodes
   (Split/RmsNorm/RoPE/KvWrite) into extended `Attention` op. Design first,
-  implement after tape executor is stable.
+  implement after tape executor is stable. Requires hologram base changes.
 
-### P4: Compilation speed (Plans 017, 020)
-- [ ] Release profile with LTO (`codegen-units = 1, lto = "thin"`)
-- [ ] Extract shared `post_concretization_repair` (fixpoint code duplicated 3x)
-- [ ] Early convergence detection in fixpoint loop (break when dynamic dims
+### P4: Compilation speed (DONE — Plans 017, 020)
+- [x] Release profile with LTO (`codegen-units = 1, lto = "thin"`)
+- [x] Extract shared `post_concretization_repair` (was duplicated 3x in
+  compiler.rs, now a single function with early convergence detection)
+- [x] Early convergence detection in fixpoint loop (break when dynamic dims
   stop decreasing, saves up to 9 pass invocations)
-- [ ] Cache `topo_order` on AiGraph (called ~40 times per compilation)
-- [ ] Avoid double LLM compilation (clone AiGraph after MVP, concretize
-  twice instead of re-importing from disk)
+- [x] Cache `topo_order` on AiGraph (was called ~40 times per compilation,
+  each building 3 HashMaps; now cached with `RefCell` + invalidation)
+- [x] Avoid double LLM compilation (clone AiGraph after MVP, concretize
+  twice instead of re-importing from disk — ~50% LLM compile time savings)
 
 ### P5: Variable-length prefill (deferred from P1 — BLOCKED)
 - [ ] Wire `ShapeContextGraph` into `HoloRunner.execute()` — project shapes
@@ -178,10 +180,24 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] `onnx_builder::conv2d()` and `mini_vision_classifier()` test builders
 - [x] `position_ids` injection pass for KV cache decode
 
-### SwiGLU fusion pass
+### Compilation speed (P4)
+- [x] `[profile.release]` with `lto = "thin"`, `codegen-units = 1`
+- [x] `post_concretization_repair()` — extracted from 3x duplication in
+  compiler.rs, with early convergence detection (breaks when dynamic dim
+  count stops decreasing)
+- [x] `topo_order()` caching on AiGraph via `RefCell<Option<Vec<NodeId>>>`
+  with `invalidate_topo_cache()` in all structural mutation passes
+- [x] Avoid double LLM compilation — clone pre-concretized graph, re-concretize
+  at seq=1 for decode instead of re-importing from disk (~50% savings)
+- [x] `Clone` derived for `AiGraph` (cheap: large weights use `Mmap`)
+
+### Compiler fusion passes (P3)
 - [x] `SwiGluFusion` pass — fuses `SiLU(gate) * up` → `FusedSwiGLU`, wired
   into MVP pipeline after RmsNormFusion. Eliminates 1 intermediate tensor +
   1 dispatch per transformer layer (LLaMA, Qwen, Mistral, Gemma).
+- [x] `AddRmsNormFusion` pass — fuses `Add(x, residual) → RmsNorm(sum, w, eps)`
+  into `FusedLayerNormResidual`. Wired into MVP pipeline, lowering maps to
+  `FloatOp::AddRmsNorm`. Waiting on hologram base kernel to activate.
 
 ### Sprint 13 hologram correctness fixes
 - [x] **Softmax precision**: restored `f32::exp()` — Sprint 13's `fast_exp()`

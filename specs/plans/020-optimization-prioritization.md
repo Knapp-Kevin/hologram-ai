@@ -29,22 +29,23 @@ has begun in either repo:
 ceiling (4.1 GB weights x ~60 GB/s DDR = ~15 tok/s theoretical max). Further
 speedup requires weight quantization (GGUF models).
 
-### P3: Compiler fusion passes — PARTIALLY DONE
+### P3: Compiler fusion passes — hologram-ai side DONE
 
 | Task | Status | Repo | Notes |
 |------|--------|------|-------|
 | SwiGLU fusion | **DONE** | hologram-ai | `swiglu_fusion.rs` wired into MVP pipeline |
-| Add+RMSNorm residual fusion | Not started | Cross-repo | Needs `FloatOp::AddRmsNorm` + kernel in hologram base |
-| QK-Norm + RoPE + KV-Store fusion | Design only | Cross-repo | Depends on stable tape executor |
+| Add+RMSNorm residual fusion | **hologram-ai DONE** | Cross-repo | Pass + lowering complete; waiting on hologram base `AddRmsNorm` kernel |
+| QK-Norm + RoPE + KV-Store fusion | Design only | Cross-repo | Depends on stable tape executor + hologram base Attention op extension |
 
-### P4: Compilation speed — NOT STARTED
+### P4: Compilation speed — DONE
 
 | Task | Status | Repo | Notes |
 |------|--------|------|-------|
-| Release profile with LTO | Not done | hologram-ai | Only `[profile.dev]` exists |
-| Early convergence detection | Not done | hologram-ai | Fixpoint runs exactly 3 iterations; code duplicated 3x |
-| Cache `topo_order` | Not done | hologram-ai | Called ~40x per compilation, builds 3 HashMaps each |
-| Avoid double LLM compilation | Not done | hologram-ai | `compile_llm_pipeline` re-imports from disk |
+| Release profile with LTO | **DONE** | hologram-ai | `[profile.release]` with `lto="thin"`, `codegen-units=1` |
+| Extract `post_concretization_repair` | **DONE** | hologram-ai | Was duplicated 3x, now a single function |
+| Early convergence detection | **DONE** | hologram-ai | Breaks when dynamic dim count stops decreasing |
+| Cache `topo_order` | **DONE** | hologram-ai | `RefCell<Option<Vec<NodeId>>>` with invalidation |
+| Avoid double LLM compilation | **DONE** | hologram-ai | Clone pre-optimized graph, re-concretize at seq=1 |
 
 ### P5: Variable-length prefill — BLOCKED
 
@@ -62,48 +63,32 @@ requires hologram base to resolve baked params from runtime buffer sizes.
 
 ## Priority Order
 
-### Tier 1: Quick wins — hologram-ai only, no dependencies
+### Tier 1: Quick wins — DONE
 
-1. **Release profile with LTO** (P4)
-   - Effort: Tiny (3 lines in Cargo.toml)
-   - Impact: HIGH — 10-20% speedup for compilation and execution
-   - File: `Cargo.toml`
+1. ~~Release profile with LTO~~ (P4) — DONE
+2. ~~Extract shared `post_concretization_repair`~~ (P4) — DONE
+3. ~~Early convergence detection in fixpoint loop~~ (P4) — DONE
 
-2. **Extract shared `post_concretization_repair` function** (P4)
-   - Effort: Small (refactor)
-   - Impact: LOW directly, enables convergence detection
-   - File: `crates/hologram-ai/src/compiler.rs`
+### Tier 2: Compilation speed — DONE
 
-3. **Early convergence detection in fixpoint loop** (P4)
-   - Effort: Small
-   - Impact: MEDIUM — saves up to 9 pass invocations
-   - File: `crates/hologram-ai/src/compiler.rs`
+4. ~~Cache `topo_order` on AiGraph~~ (P4) — DONE
+5. ~~Avoid double LLM compilation~~ (P4) — DONE
 
-### Tier 2: Compilation speed — hologram-ai only
-
-4. **Cache `topo_order` on AiGraph** (P4)
-   - Effort: Medium
-   - Impact: MEDIUM — eliminates ~40 redundant HashMap constructions per compile
-   - File: `crates/hologram-ai-common/src/ir/graph.rs`
-
-5. **Avoid double LLM compilation** (P4)
-   - Effort: Large
-   - Impact: HIGH — saves ~50% of LLM compile time
-   - File: `crates/hologram-ai/src/compiler.rs`
-
-### Tier 3: Cross-repo — requires hologram base changes
+### Tier 3: Cross-repo — blocked on hologram base
 
 6. **Wire `dispatch_float_into`** (P2d)
    - Effort: Medium (hologram base)
    - Impact: HIGH — eliminates ~1000 per-op allocations per decode token
+   - **Blocked:** purely hologram base work, nothing to do in hologram-ai
 
 7. **Wire `WeightCache` into tape executor** (P2d)
    - Effort: Medium (hologram base)
    - Impact: HIGH for GGUF — 5-10x overhead reduction for quantized weights
+   - **Blocked:** purely hologram base work, nothing to do in hologram-ai
 
 8. **Add+RMSNorm residual fusion** (P3)
-   - Effort: Medium (cross-repo)
-   - Impact: MEDIUM — 1 tensor + 1 dispatch eliminated per residual x N_layers
+   - hologram-ai side: **DONE** (pass, lowering, pipeline wiring)
+   - **Blocked:** needs `FloatOp::AddRmsNorm` kernel in hologram base
 
 ### Tier 4: Blocked / deferred
 
@@ -115,15 +100,16 @@ requires hologram base to resolve baked params from runtime buffer sizes.
 
 ## Execution Plan
 
-**Phase A (Tier 1):** Single commit. Release profile, fixpoint dedup,
-convergence detection. All hologram-ai, no dependencies.
+**Phase A (Tier 1):** DONE. Release profile, fixpoint dedup, convergence
+detection.
 
-**Phase B (Tier 2):** Cached topo_order + avoid double LLM compilation.
+**Phase B (Tier 2):** DONE. Cached topo_order + avoid double LLM compilation.
 
-**Phase C (Tier 3):** Coordinate with hologram base for dispatch_float_into,
-WeightCache, and AddRmsNorm FloatOp.
+**Phase C (Tier 3):** Blocked on hologram base. hologram-ai side of
+Add+RMSNorm fusion is complete. dispatch_float_into and WeightCache are
+purely hologram base work.
 
-**Phase D (Tier 4):** Park until prerequisites are met.
+**Phase D (Tier 4):** Blocked until prerequisites are met.
 
 ---
 
