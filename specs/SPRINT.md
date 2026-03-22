@@ -81,8 +81,9 @@ zero runtime code. All kernels belong in hologram base crate.
   `add_rmsnorm_fusion.rs`, wired into MVP pipeline; lowering maps to
   `FloatOp::AddRmsNorm`; kernel implemented in hologram base.
 - [ ] QK-Norm + RoPE + KV-Store pre-attention fusion — fuse 5-7 nodes
-  (Split/RmsNorm/RoPE/KvWrite) into extended `Attention` op. Design first,
-  implement after tape executor is stable. Requires hologram base changes.
+  (Split/RmsNorm/RoPE/KvWrite) into extended `Attention` op. Design in
+  Plan 019. Requires extending `FloatOp::Attention` with `qk_norm`, `rope`,
+  `rope_base` fields in hologram base, plus inline norm+rope in kernel.
 
 ### P4: Compilation speed (DONE — Plans 017, 020)
 - [x] Release profile with LTO (`codegen-units = 1, lto = "thin"`)
@@ -121,7 +122,8 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] Goal: `hologram-ai compile -m model.onnx` works for top-20 HuggingFace models
 
 ### GGUF models
-- [ ] Verify GGUF TinyLlama matches ORT (same approach as ONNX)
+- [x] Verify GGUF TinyLlama causal logit consistency — `gguf_causal_logit_consistency`
+  test passes (logits at position P identical for seq=P+1 and seq=P+2)
 - [x] LUT-GEMM for Q4_0/Q8_0: `TapeKernel::MatMulLut4`/`MatMulLut8` with
   `WeightCache` and `psumbook` pre-computed partial sums (hologram base)
 - [ ] Goal: GGUF generation at >1 tok/s
@@ -146,11 +148,13 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Concat + MatMul fusion — `ConcatMatMulFusion` pass in hologram-ai
   fuses Concat+MatMul into `ConcatMatMul`. AiOp variant + lowering added.
   Awaiting fused FloatOp kernel in hologram base.
-- [ ] F16 compute kernels (most impactful with GPU backend; CPU uses mixed
-  precision with F16 storage, F32 compute)
-- [ ] Online softmax: benchmark vs BLAS for decode on macOS, make
-  path selection runtime-configurable
-- [ ] GPU backend: `trait Kernel` abstraction at tape level (Plan 019)
+- [ ] F16 compute kernels — deferred to GPU backend (CPU already uses mixed
+  precision: F16 storage with F32 compute via dequant in cast.rs)
+- [x] Online softmax benchmarked: row-based 2-4x faster standalone; online
+  softmax's real win is in fused attention (avoids scores matrix). Current
+  split (online in fused attention, row-based standalone) is optimal.
+- [ ] GPU backend: `ComputeBackend` abstraction in hologram base (in progress)
+  — will enable Metal, CUDA, WebGPU backends alongside CPU enum dispatch
 - [ ] GPU backend: Metal MatMul + Attention kernels
 - [ ] GPU backend: CUDA MatMul + Attention kernels
 - [ ] GPU backend: WebGPU via wgpu crate
@@ -158,7 +162,9 @@ zero runtime code. All kernels belong in hologram base crate.
 ### Architecture
 - [x] Simplify post-concretization pipeline — extracted shared
   `post_concretization_repair()` with early convergence detection
-- [ ] Break up large functions, apply Builder pattern
+- [x] Break up large functions — `compile()` reduced from 257→98 lines by
+  extracting `log_post_repair_diagnostics()` (160 lines of diagnostics)
+  and `post_concretization_repair()` (100 lines of fixpoint repair)
 
 ---
 

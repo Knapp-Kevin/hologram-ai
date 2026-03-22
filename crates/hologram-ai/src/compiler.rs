@@ -160,168 +160,9 @@ impl ModelCompiler {
         // aggressive shape propagation, slice→gather, shape healing).
         let ai_graph = post_concretization_repair(ai_graph)?;
 
-        // Diagnostic: report empty shapes and attention-dim issues after repair.
-        {
-            let empty_tensors: Vec<_> = ai_graph
-                .tensor_info
-                .iter()
-                .filter(|(_, info)| info.shape.is_empty())
-                .collect();
-            if !empty_tensors.is_empty() {
-                warn!(count = empty_tensors.len(), "tensors still have empty shapes after repair");
-                let producers: std::collections::HashMap<u32, &hologram_ai_common::AiOp> = ai_graph
-                    .nodes
-                    .iter()
-                    .flat_map(|n| n.outputs.iter().map(move |&tid| (tid, &n.op)))
-                    .collect();
-                for (&tid, info) in &empty_tensors {
-                    let op_str = producers
-                        .get(&tid)
-                        .map(|op| format!("{op:?}"))
-                        .unwrap_or_else(|| "input/param".into());
-                    debug!(
-                        tensor = tid,
-                        dtype = ?info.logical_dtype,
-                        producer = &op_str[..op_str.len().min(80)],
-                        "empty shape"
-                    );
-                }
-            }
-            // Find the root cause of Dynamic dims: first node producing a
-            // Dynamic-dim tensor where ALL inputs have concrete shapes.
-            let mut found = 0u32;
-            for node in &ai_graph.nodes {
-                for &out_tid in &node.outputs {
-                    let out_info = match ai_graph.tensor_info.get(&out_tid) {
-                        Some(i) if i.shape.iter().any(|d| matches!(d, hologram_ai_common::Dim::Dynamic)) => i,
-                        _ => continue,
-                    };
-                    // Check if all inputs have fully-concrete shapes (no Dynamic).
-                    let all_inputs_concrete = node.inputs.iter().all(|&tid| {
-                        ai_graph.tensor_info.get(&tid).map(|i| !i.shape.is_empty() && i.shape.iter().all(|d| d.as_concrete().is_some())).unwrap_or(false)
-                    });
-                    if all_inputs_concrete && found < 2 {
-                        let input_shapes: Vec<_> = node.inputs.iter().map(|&t| {
-                            let info = ai_graph.tensor_info.get(&t);
-                            let shape = info.map(|i| format!("{:?}", i.shape.as_slice())).unwrap_or_default();
-                            let kv = info.and_then(|i| i.known_i64_values.as_ref());
-                            format!("T{t}:{shape} kv={kv:?}")
-                        }).collect();
-                        let prod_info: Vec<_> = node.inputs.iter().map(|&t| {
-                            ai_graph.nodes.iter().find(|n| n.outputs.contains(&t)).map(|n| format!("T{t} <- node {} {:?}", n.id, format!("{:?}", &n.op).chars().take(50).collect::<String>())).unwrap_or_else(|| format!("T{t} <- input/param"))
-                        }).collect();
-                        warn!(
-                            node_id = node.id,
-                            output = out_tid,
-                            shape = ?out_info.shape.as_slice(),
-                            "Dynamic-dim root cause (all inputs concrete)"
-                        );
-                        for s in &input_shapes { debug!("  input: {s}"); }
-                        for p in &prod_info { debug!("  {p}"); }
-                        found += 1;
-                    }
-                }
-            }
-            // Check attention pattern: 4D tensors with [1, 32, X, Y] where Y=1
-            // would indicate failed kv_seq_len resolution.
-            let producers: std::collections::HashMap<u32, &hologram_ai_common::AiOp> = ai_graph
-                .nodes
-                .iter()
-                .flat_map(|n| n.outputs.iter().map(move |&tid| (tid, &n.op)))
-                .collect();
-            let suspect: Vec<_> = ai_graph
-                .tensor_info
-                .iter()
-                .filter(|(_, info)| {
-                    info.shape.len() == 4
-                        && info.shape[3].as_concrete() == Some(1)
-                        && info.shape[1].as_concrete().map(|v| v > 1) == Some(true)
-                })
-                .take(5)
-                .collect();
-            if !suspect.is_empty() {
-                warn!(
-                    count = suspect.len(),
-                    "4D tensors with last_dim=1 (possible kv_seq_len issue)"
-                );
-                for (&tid, info) in &suspect {
-                    let op_str = producers
-                        .get(&tid)
-                        .map(|op| format!("{op:?}"))
-                        .unwrap_or_else(|| "input/param".into());
-                    debug!(
-                        tensor = tid,
-                        shape = ?info.shape.as_slice(),
-                        producer = &op_str[..op_str.len().min(60)],
-                        "suspect attention dim"
-                    );
-                }
-            }
-        }
-
-        // Diagnostic: dump MatMul input shapes (first 5).
-        {
-            let mut matmul_count = 0u32;
-            for node in &ai_graph.nodes {
-                if matches!(node.op, hologram_ai_common::AiOp::MatMul | hologram_ai_common::AiOp::BatchMatMul) && matmul_count < 5 {
-                    let input_shapes: Vec<_> = node.inputs.iter().map(|&t| {
-                        ai_graph.tensor_info.get(&t).map(|i| format!("T{t}:{:?}", i.shape.as_slice())).unwrap_or_else(|| format!("T{t}:<?>"))
-                    }).collect();
-                    let out_shape = node.outputs.first().and_then(|&t| ai_graph.tensor_info.get(&t)).map(|i| format!("{:?}", i.shape.as_slice())).unwrap_or_default();
-                    debug!(
-                        node_id = node.id,
-                        lhs = %input_shapes[0],
-                        rhs = %input_shapes[1],
-                        output = %out_shape,
-                        "MatMul"
-                    );
-                    matmul_count += 1;
-                }
-            }
-        }
-
-        // Diagnostic: scan compiled params for inf/NaN (catches broken scale factors).
-        {
-            use hologram_ai_common::AiParam;
-            use hologram_ai_common::DType;
-            let mut nan_params = 0u32;
-            for (&tid, param) in &ai_graph.params {
-                if let AiParam::Inline { data, info } = param {
-                    if info.logical_dtype == DType::F32 && !data.is_empty() && data.len() % 4 == 0 {
-                        let floats: &[f32] = bytemuck::cast_slice(data);
-                        let nan_count = floats.iter().filter(|f| f.is_nan()).count();
-                        let inf_count = floats.iter().filter(|f| f.is_infinite()).count();
-                        if nan_count > 0 || inf_count > 0 {
-                            let shape = ai_graph.tensor_info.get(&tid)
-                                .map(|i| format!("{:?}", i.shape.as_slice()))
-                                .unwrap_or_default();
-                            let producer = ai_graph.nodes.iter()
-                                .find(|n| n.outputs.contains(&tid))
-                                .map(|n| format!("{:?}", n.op))
-                                .unwrap_or_else(|| "input/param".into());
-                            warn!(tid, nan_count, inf_count, total=floats.len(), shape = %shape, producer = &producer[..producer.len().min(80)], "compiled f32 param has inf/NaN");
-                            nan_params += 1;
-                        }
-                    }
-                }
-            }
-            if nan_params > 0 {
-                warn!(nan_params, "WARNING: inf/NaN scalar params detected — attention scale may be wrong!");
-            }
-        }
-
-        // Diagnostic: total param data size.
-        {
-            let total_param_bytes: usize = ai_graph.params.values().map(|p| match p {
-                hologram_ai_common::AiParam::Inline { data, .. } => data.len(),
-                _ => 0,
-            }).sum();
-            info!(
-                entries = ai_graph.params.len(),
-                total_mb = format_args!("{:.1}", total_param_bytes as f64 / 1_048_576.0),
-                "params"
-            );
-        }
+        // Diagnostic: report empty shapes, attention dims, MatMul shapes,
+        // inf/NaN params after repair.
+        log_post_repair_diagnostics(&ai_graph);
 
         // Validate before lowering.
         let errs = ai_graph.validate();
@@ -1034,6 +875,118 @@ fn infer_llm_metadata_from_graph(graph: &mut AiGraph) {
         n_embd,
         "inferred LLM metadata from {} GQA nodes",
         gqa_params.len()
+    );
+}
+
+/// Log diagnostic information about the compiled graph after repair.
+///
+/// Reports empty shapes, Dynamic-dim root causes, suspect attention dims,
+/// MatMul shapes, inf/NaN params, and total param size. All tracing-based
+/// (no println).
+fn log_post_repair_diagnostics(ai_graph: &AiGraph) {
+    // Empty shapes.
+    let empty_count = ai_graph
+        .tensor_info
+        .values()
+        .filter(|info| info.shape.is_empty())
+        .count();
+    if empty_count > 0 {
+        warn!(count = empty_count, "tensors still have empty shapes after repair");
+    }
+
+    // Dynamic-dim root causes.
+    let mut dynamic_roots = 0u32;
+    for node in &ai_graph.nodes {
+        for &out_tid in &node.outputs {
+            let has_dynamic = ai_graph
+                .tensor_info
+                .get(&out_tid)
+                .map(|i| i.shape.iter().any(|d| matches!(d, hologram_ai_common::Dim::Dynamic)))
+                .unwrap_or(false);
+            if !has_dynamic {
+                continue;
+            }
+            let all_inputs_concrete = node.inputs.iter().all(|&tid| {
+                ai_graph
+                    .tensor_info
+                    .get(&tid)
+                    .map(|i| !i.shape.is_empty() && i.shape.iter().all(|d| d.as_concrete().is_some()))
+                    .unwrap_or(false)
+            });
+            if all_inputs_concrete && dynamic_roots < 2 {
+                warn!(
+                    node_id = node.id,
+                    output = out_tid,
+                    "Dynamic-dim root cause (all inputs concrete)"
+                );
+                dynamic_roots += 1;
+            }
+        }
+    }
+
+    // MatMul shapes (first 5).
+    let mut matmul_count = 0u32;
+    for node in &ai_graph.nodes {
+        if matches!(node.op, hologram_ai_common::AiOp::MatMul | hologram_ai_common::AiOp::BatchMatMul)
+            && matmul_count < 5
+        {
+            let input_shapes: Vec<_> = node
+                .inputs
+                .iter()
+                .map(|&t| {
+                    ai_graph
+                        .tensor_info
+                        .get(&t)
+                        .map(|i| format!("T{t}:{:?}", i.shape.as_slice()))
+                        .unwrap_or_else(|| format!("T{t}:<?>"))
+                })
+                .collect();
+            if input_shapes.len() >= 2 {
+                debug!(
+                    node_id = node.id,
+                    lhs = %input_shapes[0],
+                    rhs = %input_shapes[1],
+                    "MatMul"
+                );
+            }
+            matmul_count += 1;
+        }
+    }
+
+    // inf/NaN params.
+    let mut nan_params = 0u32;
+    for (&tid, param) in &ai_graph.params {
+        if let hologram_ai_common::AiParam::Inline { data, info } = param {
+            if info.logical_dtype == hologram_ai_common::DType::F32
+                && !data.is_empty()
+                && data.len() % 4 == 0
+            {
+                let floats: &[f32] = bytemuck::cast_slice(data);
+                let bad = floats.iter().any(|f| !f.is_finite());
+                if bad {
+                    warn!(tid, "compiled f32 param has inf/NaN");
+                    nan_params += 1;
+                }
+            }
+        }
+    }
+    if nan_params > 0 {
+        warn!(nan_params, "inf/NaN scalar params detected");
+    }
+
+    // Total param data size.
+    let total_param_bytes: usize = ai_graph
+        .params
+        .values()
+        .map(|p| match p {
+            hologram_ai_common::AiParam::Inline { data, .. } => data.len(),
+            _ => 0,
+        })
+        .sum();
+    info!(
+        entries = ai_graph.params.len(),
+        total_mb = format_args!("{:.1}", total_param_bytes as f64 / 1_048_576.0),
+        "params"
     );
 }
 
