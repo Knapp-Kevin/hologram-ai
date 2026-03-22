@@ -70,6 +70,30 @@ impl OptPipeline {
         ])
     }
 
+    /// Generic optimization pipeline for non-transformer components.
+    ///
+    /// Runs shape/data propagation, constant evaluation/folding, op
+    /// decomposition, and dead node elimination. Skips attention fusion,
+    /// KV-cache injection, and other LLM-specific passes.
+    pub fn generic() -> Self {
+        use super::{
+            const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,
+            constant_fold::ConstantFolding, data_prop::DataPropagation,
+            dead_node::DeadNodeElimination, decompose::OpDecomposition,
+            shape_prop::ShapePropagation,
+        };
+        Self::new(vec![
+            Box::new(ShapePropagation),
+            Box::new(DataPropagation),
+            Box::new(ShapePropagation),
+            Box::new(ConstantEvaluation),
+            Box::new(ConstantFolding),
+            Box::new(OpDecomposition),
+            Box::new(ConstantDeduplication),
+            Box::new(DeadNodeElimination),
+        ])
+    }
+
     /// Run all passes in order, short-circuiting on error.
     ///
     /// After running all passes on the main graph, recursively runs the same

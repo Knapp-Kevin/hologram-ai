@@ -28,6 +28,27 @@ pub enum ModelSource {
     GgmlPath(PathBuf),
     /// Pre-built `AiGraph` (bypass importer).
     AiGraph(AiGraph),
+    /// Multiple ONNX files forming a multi-component model.
+    ///
+    /// Each component is independently imported, optimized, and compiled.
+    /// The result is a pipeline archive with a `MetaSection` describing
+    /// component roles and connections.
+    MultiOnnx {
+        components: Vec<ComponentInput>,
+        connections: Vec<hologram_ai_common::sections::meta::ComponentConnection>,
+    },
+}
+
+/// Input specification for a single component in a multi-ONNX model.
+pub struct ComponentInput {
+    /// Pipeline key (e.g., "ae.encoder", "backbone").
+    pub name: String,
+    /// Path to the ONNX file for this component.
+    pub path: PathBuf,
+    /// What role this component plays.
+    pub role: hologram_ai_common::sections::meta::ComponentRole,
+    /// Components sharing this value share weights.
+    pub weight_group: String,
 }
 
 // ── Model metadata ────────────────────────────────────────────────────────────
@@ -158,6 +179,11 @@ impl ModelCompiler {
     /// archive with named layer entrypoints. For simpler models (ONNX), produces
     /// a single-graph archive.
     pub fn compile(&self, source: ModelSource) -> anyhow::Result<HoloArchive> {
+        // Multi-component models have their own compilation path.
+        if let ModelSource::MultiOnnx { components, connections } = source {
+            return self.compile_multi_onnx(components, connections);
+        }
+
         // Step 1 — import.
         let ai_graph = self.import(source)?;
         info!(nodes = ai_graph.nodes.len(), params = ai_graph.params.len(), "import complete");
@@ -592,6 +618,145 @@ impl ModelCompiler {
         Ok(pipeline)
     }
 
+    /// Compile multiple ONNX files into a multi-component pipeline archive.
+    ///
+    /// Each component is independently imported, optimized, concretized,
+    /// and compiled. The result is a single `.holo` pipeline archive with
+    /// a `MetaSection` describing component roles and connections.
+    ///
+    /// This is the generic path for any multi-component ONNX model:
+    /// CALM, Whisper, Stable Diffusion, encoder-decoder, etc.
+    fn compile_multi_onnx(
+        &self,
+        components: Vec<ComponentInput>,
+        connections: Vec<hologram_ai_common::sections::meta::ComponentConnection>,
+    ) -> anyhow::Result<HoloArchive> {
+        use hologram_ai_common::sections::meta::ComponentRole;
+
+        info!(
+            components = components.len(),
+            connections = connections.len(),
+            "compiling multi-ONNX pipeline"
+        );
+
+        // Track first-seen weight groups for dedup.
+        let mut weight_group_first: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+
+        // Import, optimize, and build ComponentSpecs.
+        let mut graphs: Vec<AiGraph> = Vec::with_capacity(components.len());
+        let mut mem_plans: Vec<hologram_ai_common::MemoryPlan> = Vec::with_capacity(components.len());
+        let mut spec_data: Vec<(String, hologram_ai_common::sections::meta::ComponentRole, String, usize)> =
+            Vec::with_capacity(components.len());
+
+        for (idx, comp) in components.iter().enumerate() {
+            // Import.
+            let ai_graph = hologram_ai_onnx::import_onnx_path(&comp.path, Default::default())
+                .with_context(|| format!("importing ONNX component '{}' from {:?}", comp.name, comp.path))?;
+            info!(
+                component = %comp.name,
+                nodes = ai_graph.nodes.len(),
+                "imported component"
+            );
+
+            // Optimize with appropriate profile.
+            let is_transformer = matches!(
+                comp.role,
+                ComponentRole::Prefill | ComponentRole::Decode | ComponentRole::Backbone
+            );
+            let ai_graph = if is_transformer {
+                OptPipeline::mvp().run(ai_graph).with_context(|| {
+                    format!("optimizing component '{}' (Llm profile)", comp.name)
+                })?
+            } else {
+                OptPipeline::generic().run(ai_graph).with_context(|| {
+                    format!("optimizing component '{}' (Generic profile)", comp.name)
+                })?
+            };
+
+            // Concretize.
+            let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override)
+                .with_context(|| format!("concretizing component '{}'", comp.name))?;
+            let ai_graph = post_concretization_repair(ai_graph)?;
+
+            // Memory plan.
+            let mem_plan = if is_transformer {
+                hologram_ai_common::MemoryPlanner
+                    .plan(&ai_graph)
+                    .with_context(|| format!("planning memory for component '{}'", comp.name))?
+            } else {
+                hologram_ai_common::MemoryPlan::empty()
+            };
+
+            // Track weight group ownership.
+            weight_group_first
+                .entry(comp.weight_group.clone())
+                .or_insert(idx);
+
+            spec_data.push((comp.name.clone(), comp.role.clone(), comp.weight_group.clone(), idx));
+            graphs.push(ai_graph);
+            mem_plans.push(mem_plan);
+        }
+
+        // Collect weights and build ComponentSpecs.
+        let mut specs: Vec<ComponentSpec<'_>> = Vec::with_capacity(graphs.len());
+        let mut weight_cache: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+
+        for (i, (name, role, weight_group, idx)) in spec_data.iter().enumerate() {
+            let graph = &graphs[i];
+            let is_first_in_group = weight_group_first.get(weight_group) == Some(idx);
+
+            let weights = if is_first_in_group {
+                let w = collect_weight_bytes(graph)?;
+                if !w.is_empty() {
+                    weight_cache.insert(weight_group.clone(), w.clone());
+                    Some(w)
+                } else {
+                    None
+                }
+            } else {
+                // Reuse weights from the first component in this group.
+                weight_cache.get(weight_group).cloned()
+            };
+
+            specs.push(ComponentSpec {
+                name: name.clone(),
+                role: role.clone(),
+                weight_group: weight_group.clone(),
+                opt_profile: hologram_ai_common::OptProfile::Generic,
+                graph,
+                mem_plan: &mem_plans[i],
+                phase: LowerPhase::Named(name.clone()),
+                weights,
+            });
+        }
+
+        let total_weight_bytes: u64 = weight_cache.values().map(|w| w.len() as u64).sum();
+        let total_nodes: usize = graphs.iter().map(|g| g.nodes.len()).sum();
+
+        let archive_bytes = self.compile_components(specs, connections)?;
+
+        Ok(HoloArchive {
+            bytes: archive_bytes,
+            metadata: ModelMetadata {
+                arch: "multi-onnx".into(),
+                vocab_size: 0,
+                context_len: self.seq_len_override.unwrap_or(0) as u32,
+                n_layers: 0,
+                n_embd: 0,
+                n_kv_heads: 0,
+                head_dim: 0,
+            },
+            stats: CompileStats {
+                import_warnings: 0,
+                validation_errors: 0,
+                total_weight_bytes,
+                node_count: total_nodes,
+            },
+        })
+    }
+
     fn import(&self, source: ModelSource) -> anyhow::Result<AiGraph> {
         match source {
             ModelSource::OnnxPath(path) => {
@@ -617,6 +782,9 @@ impl ModelCompiler {
                     .with_context(|| format!("importing GGML from {path:?}"))
             }
             ModelSource::AiGraph(g) => Ok(g),
+            ModelSource::MultiOnnx { .. } => {
+                unreachable!("MultiOnnx is handled before import()")
+            }
         }
     }
 }
