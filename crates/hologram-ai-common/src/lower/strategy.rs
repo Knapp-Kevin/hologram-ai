@@ -218,7 +218,13 @@ fn resolve_op(
 ) -> Result<Option<(FloatOp, Vec<ParamRecipe>)>> {
     let result = match op {
         // ── MatMul family ───────────────────────────────────────────────
-        AiOp::MatMul | AiOp::BatchMatMul => {
+        AiOp::MatMul | AiOp::BatchMatMul
+        | AiOp::MatMulRelu | AiOp::MatMulGelu | AiOp::MatMulSilu
+        | AiOp::ConcatMatMul { .. } => {
+            // TODO: lower MatMulRelu/Gelu/Silu to fused FloatOp variants once
+            // hologram base adds FloatOp::MatMulRelu etc. For now, lower as
+            // plain MatMul (activation is lost — the fusion pass should not be
+            // registered in the pipeline until fused kernels exist).
             let (m, k, n, recipes) = match matmul_recipes(inputs, tensor_info, dim_var_names) {
                 Some(v) => v,
                 None => return Ok(None),

@@ -387,6 +387,16 @@ pub enum AiOp {
     FusedSwiGLU,
     /// x + residual → rmsnorm. Inputs: [x, residual, weight].
     FusedLayerNormResidual { epsilon: f32 },
+    /// MatMul + Relu fused: out = relu(A × B). Inputs: [a, b].
+    MatMulRelu,
+    /// MatMul + Gelu fused: out = gelu(A × B). Inputs: [a, b].
+    MatMulGelu,
+    /// MatMul + Silu fused: out = silu(A × B). Inputs: [a, b].
+    MatMulSilu,
+    /// Concat + MatMul fused: out = concat(inputs) × W.
+    /// Avoids materializing the concatenated buffer.
+    /// Inputs: [h1, h2, ..., hN, W]. Last input is the weight matrix.
+    ConcatMatMul { n_concat_inputs: u32 },
 
     // ── Control flow (subgraph ops) ────────────────────────────────────────
     /// Conditional: execute then_branch or else_branch subgraph based on
@@ -500,6 +510,10 @@ impl AiOp {
             // ── Custom: op-specific shape/dtype/value rules ───────────────
             AiOp::MatMul
             | AiOp::BatchMatMul
+            | AiOp::MatMulRelu
+            | AiOp::MatMulGelu
+            | AiOp::MatMulSilu
+            | AiOp::ConcatMatMul { .. }
             | AiOp::Gemm { .. }
             | AiOp::Einsum { .. }
             | AiOp::MultiHeadAttention { .. }

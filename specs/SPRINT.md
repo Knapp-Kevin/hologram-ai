@@ -139,10 +139,13 @@ zero runtime code. All kernels belong in hologram base crate.
   `MADV_RANDOM`/`MADV_SEQUENTIAL` page discipline
 - [ ] KV cache with variable-length sequences (P5 blocker resolved)
 - [ ] Multi-modal output trait (text, images, audio, etc.)
-- [ ] MatMul + Activation fusion (MatMulRelu, MatMulGelu — inline activation
-  in matmul output write, avoid intermediate buffer)
-- [ ] Concat + MatMul fusion (multi-head output projection — avoid
-  materializing concatenated heads buffer)
+- [x] MatMul + Activation fusion — `MatMulActivationFusion` pass in
+  hologram-ai fuses MatMul+Relu/Gelu/Silu into `MatMulRelu`/`MatMulGelu`/
+  `MatMulSilu`. AiOp variants + lowering added. Awaiting fused FloatOp
+  kernels in hologram base (currently lowers as plain MatMul).
+- [x] Concat + MatMul fusion — `ConcatMatMulFusion` pass in hologram-ai
+  fuses Concat+MatMul into `ConcatMatMul`. AiOp variant + lowering added.
+  Awaiting fused FloatOp kernel in hologram base.
 - [ ] F16 compute kernels (most impactful with GPU backend; CPU uses mixed
   precision with F16 storage, F32 compute)
 - [ ] Online softmax: benchmark vs BLAS for decode on macOS, make

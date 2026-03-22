@@ -258,7 +258,12 @@ impl ShapeProjection for AiOp {
             | AiOp::Scatter { .. } => (ShapeSpecRepr::SameAs(0), None),
 
             // ── Linear algebra (k_hint=0 at AiOp level; concrete in FloatOp) ─
-            AiOp::MatMul | AiOp::BatchMatMul => {
+            AiOp::MatMul
+            | AiOp::BatchMatMul
+            | AiOp::MatMulRelu
+            | AiOp::MatMulGelu
+            | AiOp::MatMulSilu
+            | AiOp::ConcatMatMul { .. } => {
                 (ShapeSpecRepr::MatMul { k_hint: 0 }, None)
             }
             AiOp::Gemm { .. } => (ShapeSpecRepr::Gemm { k: 0 }, None),
