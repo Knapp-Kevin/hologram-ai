@@ -95,6 +95,29 @@ impl CompiledModel {
     }
 }
 
+// ── Multi-component compilation ──────────────────────────────────────────────
+
+/// Specification for a single component in a multi-component pipeline.
+///
+/// Used by [`ModelCompiler::compile_components`] to compile N independent
+/// graphs into a single pipeline archive via `PipelineWriter`.
+pub struct ComponentSpec<'a> {
+    /// Pipeline key (e.g., "lm.prefill", "ae.encoder").
+    pub name: String,
+    /// Which optimization passes to run.
+    pub opt_profile: hologram_ai_common::OptProfile,
+    /// The component's graph (already imported, possibly pre-optimized).
+    pub graph: &'a AiGraph,
+    /// Memory plan for this component. Use `MemoryPlan::empty()` for
+    /// components without attention / KV-cache.
+    pub mem_plan: &'a hologram_ai_common::MemoryPlan,
+    /// Lowering phase — determines layer name in the archive.
+    pub phase: LowerPhase,
+    /// Weight bytes. Components sharing a weight group should pass the same
+    /// blob to the first component and `None` to the rest.
+    pub weights: Option<Vec<u8>>,
+}
+
 // ── Model compiler ────────────────────────────────────────────────────────────
 
 /// Compiles a `ModelSource` through the full pipeline into a `HoloArchive`.
@@ -417,32 +440,13 @@ impl ModelCompiler {
         ai_graph: &AiGraph,
         mem_plan: &hologram_ai_common::MemoryPlan,
     ) -> anyhow::Result<Vec<u8>> {
-        let lower_out = lower(
+        let weights = collect_weight_bytes(ai_graph)?;
+        let archive = compile_one_component(
             ai_graph,
             &mem_plan.kv_cache_layout,
             &LoweringOptions::default(),
             &LowerPhase::Forward,
-        )
-        .context("lowering failed")?;
-
-        let compilation = hologram::compile(lower_out.graph).context("hologram::compile failed")?;
-        debug!(archive_bytes = compilation.archive.len(), "hologram::compile complete");
-
-        // Single unpack → modify → repack cycle.
-        let unpacked = unpack_archive(&compilation.archive)?;
-        let layer_header = build_tensor_port_header(&unpacked.plan, ai_graph);
-        let weights = collect_weight_bytes(ai_graph)?;
-        let bundle = if lower_out.context.is_empty() {
-            None
-        } else {
-            Some(&lower_out.context)
-        };
-
-        let archive = build_final_archive(
-            unpacked,
             if weights.is_empty() { None } else { Some(weights) },
-            Some(layer_header),
-            bundle,
         )?;
         info!(archive_bytes = archive.len(), "single-graph archive assembled");
         Ok(archive)
@@ -452,15 +456,15 @@ impl ModelCompiler {
     ///
     /// Prefill: compiled at the configured seq_len (full prompt).
     /// Decode: compiled at seq=1 (single token per step).
+    ///
+    /// Delegates to [`compile_components`](Self::compile_components) with two
+    /// `ComponentSpec` entries (prefill + decode).
     fn compile_llm_pipeline(
         &self,
         ai_graph: &AiGraph,
         mem_plan: &hologram_ai_common::MemoryPlan,
         pre_concretized: AiGraph,
     ) -> anyhow::Result<Vec<u8>> {
-        use hologram::hologram_archive::writer::pipeline_writer::PipelineWriter;
-
-        let opts = LoweringOptions::default();
         let weights = collect_weight_bytes(ai_graph)?;
         let extra_weights = if weights.is_empty() { None } else { Some(weights) };
         info!(
@@ -468,72 +472,74 @@ impl ModelCompiler {
             "compiling LLM pipeline (prefill + decode)"
         );
 
-        // Lower + compile + single-pass assemble for prefill graph.
-        let prefill_out = lower(
-            ai_graph,
-            &mem_plan.kv_cache_layout,
-            &opts,
-            &LowerPhase::Prefill,
-        )
-        .context("lowering prefill graph failed")?;
-        debug!(graph_nodes = prefill_out.graph.node_count(), "prefill lowered");
-        let prefill_compiled =
-            hologram::compile(prefill_out.graph).context("compiling prefill graph failed")?;
-        debug!(archive_bytes = prefill_compiled.archive.len(), "prefill compiled");
-        let prefill_unpacked = unpack_archive(&prefill_compiled.archive)?;
-        let prefill_lh = build_tensor_port_header(&prefill_unpacked.plan, ai_graph);
-        let prefill_bundle = if prefill_out.context.is_empty() {
-            None
-        } else {
-            Some(&prefill_out.context)
-        };
-        let prefill_archive = build_final_archive(
-            prefill_unpacked,
-            extra_weights.clone(),
-            Some(prefill_lh),
-            prefill_bundle,
-        )?;
-        info!(archive_bytes = prefill_archive.len(), "prefill archive assembled");
-
-        // ── Decode graph: seq=1 ──
-        // Re-concretize the pre-optimized graph with seq=1 instead of
-        // re-importing from disk. This skips ONNX/GGUF re-parse + 11 MVP
-        // optimization passes (~50% of total LLM compile time).
+        // Re-concretize the pre-optimized graph at seq=1 for decode,
+        // avoiding a full re-import + re-optimization from disk.
         info!("compiling decode graph (seq=1) from pre-optimized graph");
         let decode_graph = concretize_all_dims(pre_concretized, Some(1))
             .context("concretizing decode graph (seq=1) failed")?;
         let decode_graph = post_concretization_repair(decode_graph)?;
-        let decode_out = lower(
-            &decode_graph,
-            &mem_plan.kv_cache_layout,
-            &opts,
-            &LowerPhase::Decode,
-        )
-        .context("lowering decode graph failed")?;
-        let decode_compiled =
-            hologram::compile(decode_out.graph).context("compiling decode graph failed")?;
-        let decode_unpacked = unpack_archive(&decode_compiled.archive)?;
-        let decode_lh = build_tensor_port_header(&decode_unpacked.plan, &decode_graph);
-        let decode_bundle = if decode_out.context.is_empty() {
-            None
-        } else {
-            Some(&decode_out.context)
-        };
-        let decode_archive = build_final_archive(
-            decode_unpacked,
-            extra_weights.clone(),
-            Some(decode_lh),
-            decode_bundle,
-        )?;
-        info!(archive_bytes = decode_archive.len(), "decode archive assembled");
 
-        // Bundle into pipeline.
-        let pipeline = PipelineWriter::new()
-            .add_model("lm.prefill", prefill_archive)
-            .add_model("lm.decode", decode_archive)
+        self.compile_components(vec![
+            ComponentSpec {
+                name: "lm.prefill".into(),
+                opt_profile: hologram_ai_common::OptProfile::Llm,
+                graph: ai_graph,
+                mem_plan,
+                phase: LowerPhase::Prefill,
+                weights: extra_weights.clone(),
+            },
+            ComponentSpec {
+                name: "lm.decode".into(),
+                opt_profile: hologram_ai_common::OptProfile::Llm,
+                graph: &decode_graph,
+                mem_plan,
+                phase: LowerPhase::Decode,
+                weights: extra_weights,
+            },
+        ])
+    }
+
+    /// Compile N component specs into a single pipeline archive.
+    ///
+    /// Each component is independently lowered, compiled, and assembled into a
+    /// sub-archive. All sub-archives are bundled via `PipelineWriter` into a
+    /// single `.holo` pipeline archive.
+    pub fn compile_components(
+        &self,
+        specs: Vec<ComponentSpec<'_>>,
+    ) -> anyhow::Result<Vec<u8>> {
+        use hologram::hologram_archive::writer::pipeline_writer::PipelineWriter;
+
+        let n = specs.len();
+        info!(components = n, "compiling multi-component pipeline");
+
+        let mut writer = PipelineWriter::new();
+        for spec in specs {
+            let opts = LoweringOptions::default();
+            let archive = compile_one_component(
+                spec.graph,
+                &spec.mem_plan.kv_cache_layout,
+                &opts,
+                &spec.phase,
+                spec.weights,
+            )
+            .with_context(|| format!("compiling component '{}'", spec.name))?;
+            info!(
+                component = %spec.name,
+                archive_bytes = archive.len(),
+                "component compiled"
+            );
+            writer = writer.add_model(&spec.name, archive);
+        }
+
+        let pipeline = writer
             .build()
             .map_err(|e| anyhow::anyhow!("building pipeline archive: {e}"))?;
-        info!(archive_bytes = pipeline.len(), "pipeline archive built");
+        info!(
+            archive_bytes = pipeline.len(),
+            components = n,
+            "multi-component pipeline archive built"
+        );
         Ok(pipeline)
     }
 
@@ -668,6 +674,39 @@ fn build_final_archive(
     writer
         .build()
         .map_err(|e| anyhow::anyhow!("building final archive: {e}"))
+}
+
+/// Compile a single AiGraph into a sub-archive ready for PipelineWriter.
+///
+/// Encapsulates the lower → compile → unpack → assemble pipeline that was
+/// previously duplicated across `compile_single_graph` and
+/// `compile_llm_pipeline` (prefill/decode paths).
+fn compile_one_component(
+    ai_graph: &AiGraph,
+    kv_layout: &hologram_ai_common::mem::KvCacheLayout,
+    opts: &LoweringOptions,
+    phase: &LowerPhase,
+    extra_weights: Option<Vec<u8>>,
+) -> anyhow::Result<Vec<u8>> {
+    let phase_name = phase.layer_name();
+
+    let lower_out = lower(ai_graph, kv_layout, opts, phase)
+        .with_context(|| format!("lowering {phase_name} graph"))?;
+    debug!(graph_nodes = lower_out.graph.node_count(), phase = phase_name, "lowered");
+
+    let compiled = hologram::compile(lower_out.graph)
+        .with_context(|| format!("compiling {phase_name} graph"))?;
+    debug!(archive_bytes = compiled.archive.len(), phase = phase_name, "compiled");
+
+    let unpacked = unpack_archive(&compiled.archive)?;
+    let layer_header = build_tensor_port_header(&unpacked.plan, ai_graph);
+    let bundle = if lower_out.context.is_empty() {
+        None
+    } else {
+        Some(&lower_out.context)
+    };
+
+    build_final_archive(unpacked, extra_weights, Some(layer_header), bundle)
 }
 
 /// Build a corrected `LayerHeader` with proper TensorPorts from the AiGraph.
@@ -1304,16 +1343,17 @@ impl HoloRunner {
     /// actual runtime input dimensions (variable-length support). Otherwise
     /// falls back to the compiled static shapes.
     pub fn execute(&self, inputs: &hologram::GraphInputs) -> anyhow::Result<hologram::GraphOutputs> {
+        // Prefer the tape executor — it handles dynamic sizes via resolve_size()
+        // and uses the GPU backend when available. No shape hints needed.
+        if let Some(tape) = &self.tape {
+            if let Ok(result) = hologram::execute_tape(tape, &self.plan, inputs) {
+                return Ok(result);
+            }
+        }
+
+        // Fallback: legacy executor with shape hints from ShapeContextGraph.
         let shape_hints = self.project_shapes(inputs, &self.plan);
         if shape_hints.is_empty() {
-            // Try tape executor first (eliminates per-node op match + HashMap lookups).
-            // Falls back to execute_plan if the tape fails (e.g., ops with dynamic
-            // size params like Softmax that need resolve_dynamic_sizes at runtime).
-            if let Some(tape) = &self.tape {
-                if let Ok(result) = hologram::execute_tape(tape, &self.plan, inputs) {
-                    return Ok(result);
-                }
-            }
             hologram::execute_plan(&self.plan, inputs)
         } else {
             hologram::execute_plan_with_shape_hints(&self.plan, inputs, &shape_hints)

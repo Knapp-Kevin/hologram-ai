@@ -544,6 +544,9 @@ fn run_attention_test(
         scale: scale.to_bits(),
         causal,
         heads_first: false,
+        qk_norm: false,
+        rope: false,
+        rope_base: 0,
     };
     let tol = tolerance_for(&op);
 

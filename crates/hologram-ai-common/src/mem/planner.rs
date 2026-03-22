@@ -49,6 +49,17 @@ pub struct MemoryPlan {
     pub total_activation_bytes: u64,
 }
 
+impl MemoryPlan {
+    /// Empty plan for components that don't need KV-cache (e.g., autoencoders).
+    pub fn empty() -> Self {
+        Self {
+            kv_cache_layout: KvCacheLayout::none(),
+            total_weight_bytes: 0,
+            total_activation_bytes: 0,
+        }
+    }
+}
+
 /// Estimates memory requirements from `AiGraph` topology.
 pub struct MemoryPlanner;
 

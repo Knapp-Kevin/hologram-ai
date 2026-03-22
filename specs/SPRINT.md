@@ -128,6 +128,16 @@ zero runtime code. All kernels belong in hologram base crate.
   `WeightCache` and `psumbook` pre-computed partial sums (hologram base)
 - [ ] Goal: GGUF generation at >1 tok/s
 
+### Multi-component pipeline archives (Plan 021)
+- [ ] Phase 1: Generic N-component compilation — extract `compile_one_component()`,
+  add `LowerPhase::Named`, `OptProfile`, `MemoryPlan::empty()`, `compile_components()`
+- [ ] Phase 2: Rename `LlmMetaSection` → `MetaSection`, generalize for N components
+  with roles, weight groups, and connections
+- [ ] Phase 3: Weight deduplication — `WeightStore` primitive in hologram-base
+  (follows `hologram-compression` pattern), `SECTION_WEIGHT_DEDUP`
+- [ ] Phase 4: `ModelSource::MultiOnnx` — generic multi-ONNX compilation
+  (CALM, Whisper, Stable Diffusion, any multi-component model)
+
 ---
 
 ## Long Term: Production readiness

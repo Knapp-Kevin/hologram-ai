@@ -26,8 +26,8 @@ pub use ir::{
     ValidationError,
 };
 pub use lower::{
-    lower, walk_shape_context, LowerPhase, LoweringOptions, LoweringOutput, QuantStrategy,
-    ShapeProjection,
+    lower, walk_shape_context, LowerPhase, LoweringOptions, LoweringOutput, OptProfile,
+    QuantStrategy, ShapeProjection,
 };
 pub use mem::{KvCacheLayout, MemoryPlan, MemoryPlanner};
 pub use opt::{
