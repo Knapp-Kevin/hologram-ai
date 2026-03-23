@@ -41,9 +41,10 @@ fn compile_and_execute(
         graph_inputs.set_with_shape(i as u32, bytes, shape.clone());
     }
 
-    // Execute.
+    // Execute via tape executor (EnumTape — zero-overhead dispatch).
     let plan = hologram::load_from_bytes(&archive.bytes).expect("loading archive");
-    let outputs = hologram::execute_plan(&plan, &graph_inputs).expect("execution failed");
+    let tape = hologram::build_tape_from_plan(&plan).expect("building execution tape");
+    let outputs = hologram::execute_tape(&tape, &plan, &graph_inputs).expect("execution failed");
 
     // Extract first output as f32 (safe — no alignment requirement).
     let (_, out_bytes) = outputs.get(0).expect("no outputs");
@@ -2267,7 +2268,8 @@ fn compile_and_execute_aigraph(
     }
 
     let plan = hologram::load_from_bytes(&archive.bytes).expect("loading archive");
-    let outputs = hologram::execute_plan(&plan, &graph_inputs).expect("execution failed");
+    let tape = hologram::build_tape_from_plan(&plan).expect("building execution tape");
+    let outputs = hologram::execute_tape(&tape, &plan, &graph_inputs).expect("execution failed");
 
     let (_, out_bytes) = outputs.get(0).expect("no outputs");
     bytemuck::cast_slice::<u8, f32>(out_bytes).to_vec()

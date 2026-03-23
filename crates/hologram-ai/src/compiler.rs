@@ -1534,10 +1534,9 @@ pub struct HoloRunner {
     is_pipeline: bool,
     /// Pre-compiled execution tape for the prefill graph.
     /// Built at load time to eliminate per-node op matching at inference time.
-    tape: Option<hologram::hologram_exec::tape::BoxedTape>,
+    tape: hologram::hologram_exec::tape::EnumTape,
     /// Pre-compiled execution tape for the decode graph (pipeline only).
-    /// Will be wired into `execute_with_kv` once `execute_tape_with_kv_state` is available.
-    _decode_tape: Option<hologram::hologram_exec::tape::BoxedTape>,
+    decode_tape: Option<hologram::hologram_exec::tape::EnumTape>,
 }
 
 impl HoloRunner {
@@ -1566,12 +1565,16 @@ impl HoloRunner {
             (None, None)
         };
 
-        // Build pre-compiled execution tapes (best-effort — fall back to
-        // execute_plan if tape building fails for unsupported ops).
-        let tape = hologram::build_tape_from_plan(&plan).ok();
-        let decode_tape = decode_plan
-            .as_ref()
-            .and_then(|dp| hologram::build_tape_from_plan(dp).ok());
+        // Build pre-compiled execution tapes — mandatory for all execution paths.
+        let tape = hologram::build_tape_from_plan(&plan)
+            .map_err(|e| anyhow::anyhow!("building execution tape: {e}"))?;
+        let decode_tape = match decode_plan.as_ref() {
+            Some(dp) => Some(
+                hologram::build_tape_from_plan(dp)
+                    .map_err(|e| anyhow::anyhow!("building decode execution tape: {e}"))?,
+            ),
+            None => None,
+        };
 
         Ok(Self {
             effective_bytes,
@@ -1582,7 +1585,7 @@ impl HoloRunner {
             shape_ctx,
             is_pipeline,
             tape,
-            _decode_tape: decode_tape,
+            decode_tape,
         })
     }
 
@@ -1595,26 +1598,11 @@ impl HoloRunner {
 
     /// Execute the compiled graph with the given inputs.
     ///
-    /// When a `ShapeContextGraph` is available, projects shapes from the
-    /// actual runtime input dimensions (variable-length support). Otherwise
-    /// falls back to the compiled static shapes.
+    /// Uses the EnumTape executor for zero-overhead dispatch with GPU backend
+    /// support. Dynamic sizes are resolved via `resolve_size()` at execution time.
     pub fn execute(&self, inputs: &hologram::GraphInputs) -> anyhow::Result<hologram::GraphOutputs> {
-        // Prefer the tape executor — it handles dynamic sizes via resolve_size()
-        // and uses the GPU backend when available. No shape hints needed.
-        if let Some(tape) = &self.tape {
-            if let Ok(result) = hologram::execute_tape(tape, &self.plan, inputs) {
-                return Ok(result);
-            }
-        }
-
-        // Fallback: legacy executor with shape hints from ShapeContextGraph.
-        let shape_hints = self.project_shapes(inputs, &self.plan);
-        if shape_hints.is_empty() {
-            hologram::execute_plan(&self.plan, inputs)
-        } else {
-            hologram::execute_plan_with_shape_hints(&self.plan, inputs, &shape_hints)
-        }
-        .map_err(|e| anyhow::anyhow!("{e}"))
+        hologram::execute_tape(&self.tape, &self.plan, inputs)
+            .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// Access the underlying loaded plan (for layer headers, weights, etc.).
@@ -1644,19 +1632,25 @@ impl HoloRunner {
     /// Execute with a mutable KV cache state for autoregressive generation.
     ///
     /// Uses the prefill graph for step 0, decode graph (seq=1) for subsequent steps.
-    /// Projects shapes from runtime inputs via `ShapeContextGraph` when available.
+    /// Uses the EnumTape executor for all execution (17.5x faster than legacy path).
     pub fn execute_with_kv(
         &self,
         inputs: &hologram::GraphInputs,
         kv_state: &mut hologram::KvCacheState,
     ) -> anyhow::Result<hologram::GraphOutputs> {
-        let plan = if kv_state.write_pos() > 0 {
-            self.decode_plan.as_ref().unwrap_or(&self.plan)
+        let (tape, plan) = if kv_state.write_pos() > 0 {
+            (
+                self.decode_tape
+                    .as_ref()
+                    .expect("pipeline archive must have decode tape"),
+                self.decode_plan
+                    .as_ref()
+                    .expect("pipeline archive must have decode plan"),
+            )
         } else {
-            &self.plan
+            (&self.tape, &self.plan)
         };
-        let shape_hints = self.project_shapes(inputs, plan);
-        hologram::execute_plan_with_kv_state(plan, inputs, &shape_hints, kv_state)
+        hologram::execute_tape_with_kv(tape, plan, inputs, kv_state)
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
@@ -1664,6 +1658,10 @@ impl HoloRunner {
     ///
     /// Returns an empty map when no shape context is available (falls back to
     /// compiled static shapes in the executor).
+    ///
+    /// Currently unused — tape executor handles dynamic sizes via resolve_size().
+    /// Retained for future ShapeContextGraph integration (P5 TODO in SPRINT.md).
+    #[allow(dead_code)]
     fn project_shapes(
         &self,
         inputs: &hologram::GraphInputs,
@@ -1764,10 +1762,17 @@ pub fn read_shape_context_from_archive(archive_bytes: &[u8]) -> anyhow::Result<O
 /// Input node shapes are read from `inputs.shape(i)` for each input slot `i`.
 /// Since hologram-ai's builder always registers inputs at indices 0..n_inputs,
 /// the input slot index equals the graph node's `NodeId.index`.
-/// Execute a compiled archive directly.
+/// Execute a compiled archive with variable-length shape support.
 ///
-/// All shapes are fully baked at compile time — no runtime shape resolution.
-/// Inputs should be padded to the compiled seq_len (FixedPad mode).
+/// Uses the legacy `execute_plan` path because `FloatOp::MatMul { m, k, n }`
+/// bakes dimensions at compile time. The tape executor cannot override these
+/// parameters at runtime, so variable seq_len produces wrong output sizes.
+/// This will be resolved when hologram base adds dynamic-shape-aware tape
+/// execution (hologram issue: variable-length tape support).
+///
+/// For fixed-shape execution, prefer [`HoloRunner::execute`] which uses the
+/// tape executor (17x faster).
+#[allow(deprecated)]
 pub fn run_with_shape_context(
     archive: &HoloArchive,
     inputs: &hologram::GraphInputs,

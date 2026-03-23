@@ -79,8 +79,9 @@ fn resnet50_onnx_executes() {
     let mut inputs = hologram::GraphInputs::new();
     inputs.set_with_shape(0, input_bytes, vec![1, 3, 224, 224]);
 
-    // Execute
-    let outputs = hologram::execute_plan(&plan, &inputs).expect("execution failed");
+    // Execute via tape executor (EnumTape — zero-overhead dispatch).
+    let tape = hologram::build_tape_from_plan(&plan).expect("building execution tape");
+    let outputs = hologram::execute_tape(&tape, &plan, &inputs).expect("execution failed");
 
     // Check output: should be [1, 1000] = 1000 floats = 4000 bytes
     let (_name, out_bytes) = outputs.get(0).expect("no output at index 0");

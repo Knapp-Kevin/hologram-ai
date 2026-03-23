@@ -59,7 +59,8 @@ zero runtime code. All kernels belong in hologram base crate.
 
 #### P2c: Integration (DONE — hologram-ai)
 - [x] Wire tape executor from `HoloRunner` — build tape at load time, use
-  for inference with fallback to `execute_plan`
+  `execute_tape` / `execute_tape_with_kv` for all execution. No fallback
+  to legacy `execute_plan` (Plan 022)
 
 #### P2d: Remaining decode optimizations (DONE — Plan 020)
 - [x] Wire `dispatch_float_into` — buffer reuse, wired into tape executor
@@ -80,12 +81,12 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Add+RMSNorm residual fusion — `AddRmsNormFusion` pass in
   `add_rmsnorm_fusion.rs`, wired into MVP pipeline; lowering maps to
   `FloatOp::AddRmsNorm`; kernel implemented in hologram base.
-- [x] QK-Norm + RoPE pre-attention fusion — `PreAttentionFusion` pass in
-  `pre_attention_fusion.rs`, wired into MVP pipeline after AttentionFusion.
-  Peels single-consumer RoPE and RmsNorm off Q/K inputs and folds into
-  `GroupedQueryAttention` op with `qk_norm`, `rope`, `rope_base` fields.
-  Lowering propagates flags to `FloatOp::Attention`; tape executor dispatches
-  via GPU backend (Metal) or CPU inline path. 4 unit tests.
+- [ ] QK-Norm + RoPE pre-attention fusion — `PreAttentionFusion` pass in
+  `pre_attention_fusion.rs` implemented with 4 unit tests. **Gated**: hologram
+  base `dispatch_attention()` ignores `qk_norm`/`rope` flags (both dispatch
+  sites use `..` destructuring). Pass removed from `mvp()` pipeline until
+  hologram base adds kernel support. AiOp fields and lowering are
+  forward-compatible.
 
 ### P4: Compilation speed (DONE — Plans 017, 020)
 - [x] Release profile with LTO (`codegen-units = 1, lto = "thin"`)
@@ -210,7 +211,7 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] `--seq-len` CLI flag on compile command
 - [x] `seq_len_override` field on `ModelCompiler`
 - [x] `SeqMode::Variable` enabled (was FixedPad-only until P5 blocker resolved)
-- [x] `HoloRunner::execute` uses `execute_plan` (no shape walker)
+- [x] `HoloRunner::execute` uses `execute_tape` (EnumTape, Plan 022)
 - [x] Post-concretization cleanup uses `Concrete(1)` not `Concrete(0)`
 
 ### ResNet-50 / multi-model support

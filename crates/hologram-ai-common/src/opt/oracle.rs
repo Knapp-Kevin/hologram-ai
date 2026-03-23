@@ -77,7 +77,7 @@ mod tests {
     use super::*;
     use crate::ir::{
         shape::{shape_from_concrete, Shape},
-        AiGraph, AiNode, AiOp, DType, DimVarTable, ConstraintStore,
+        AiGraph, DType, DimVarTable, ConstraintStore,
     };
 
     fn make_graph(tids: &[(u32, Shape)]) -> AiGraph {
