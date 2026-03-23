@@ -569,14 +569,14 @@ impl ModelCompiler {
 
         // Track which weight groups have already been seen so we can
         // record weight_source for deduplication hints and skip duplicate
-        // weight embedding.
+        // weight embedding in sub-archives.
         let mut weight_group_owners: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
 
         let mut total_weight_bytes_before: u64 = 0;
 
         for spec in specs {
-            let is_duplicate = weight_group_owners.contains_key(&spec.weight_group);
+            let is_first_in_group = !weight_group_owners.contains_key(&spec.weight_group);
             let weight_source = if let Some(owner) = weight_group_owners.get(&spec.weight_group) {
                 Some(owner.clone())
             } else {
@@ -584,19 +584,19 @@ impl ModelCompiler {
                 None
             };
 
-            // Deduplicate: only pass weights to the first component in each
-            // weight group. Subsequent components in the same group get None
-            // (their weights are shared from the owner at load time).
-            let weights_for_component = if is_duplicate {
-                None
-            } else {
-                spec.weights.clone()
-            };
-
+            // Register weights in the content-addressable store for dedup.
+            // Only the first component in each weight group embeds weights
+            // in its sub-archive; subsequent components get None (resolved
+            // at load time via the WeightDedupIndex).
             if let Some(ref w) = spec.weights {
                 total_weight_bytes_before += w.len() as u64;
-                weight_store.insert(w.clone());
+                weight_store.insert(&spec.name, &spec.weight_group, w);
             }
+            let weights_for_component = if is_first_in_group {
+                spec.weights.clone()
+            } else {
+                None
+            };
 
             descriptors.push(ComponentDescriptor {
                 name: spec.name.clone(),
@@ -627,17 +627,22 @@ impl ModelCompiler {
         let meta_section = meta.to_bytes();
         writer = writer.add_section(meta.section_kind(), meta_section);
 
-        // Embed WeightDedupIndex if deduplication saved any bytes.
+        // Embed WeightDedupIndex so the loader can resolve shared weights.
         let dedup_bytes = weight_store.total_bytes();
-        if dedup_bytes > 0 && dedup_bytes < total_weight_bytes_before {
+        if dedup_bytes > 0 {
+            let savings = if total_weight_bytes_before > 0 && dedup_bytes < total_weight_bytes_before {
+                (1.0 - dedup_bytes as f64 / total_weight_bytes_before as f64) * 100.0
+            } else {
+                0.0
+            };
             let (_blob, dedup_index) = weight_store.build();
             let dedup_section = dedup_index.to_bytes();
             writer = writer.add_section(dedup_index.section_kind(), dedup_section);
             info!(
                 before_mb = format_args!("{:.1}", total_weight_bytes_before as f64 / 1_048_576.0),
                 after_mb = format_args!("{:.1}", dedup_bytes as f64 / 1_048_576.0),
-                savings_pct = format_args!("{:.0}", (1.0 - dedup_bytes as f64 / total_weight_bytes_before as f64) * 100.0),
-                "weight deduplication active"
+                savings_pct = format_args!("{:.0}", savings),
+                "weight deduplication index embedded"
             );
         }
 
