@@ -528,6 +528,13 @@ fn resolve_op(
             let (sh, sw) = get_hw(strides, 1);
             let (ph, pw) = get_pads_hw(pads);
             let (dh, dw) = get_hw(dilations, 1);
+            // Input is [N, C, H, W] — extract H (idx 2) and W (idx 3).
+            let ih = dim_at_expr(inputs.first(), tensor_info, 2)
+                .and_then(|e| e.evaluate())
+                .unwrap_or(0) as u32;
+            let iw = dim_at_expr(inputs.first(), tensor_info, 3)
+                .and_then(|e| e.evaluate())
+                .unwrap_or(0) as u32;
             (
                 FloatOp::Conv2d {
                     kernel_h: kh as u32, kernel_w: kw as u32,
@@ -535,6 +542,7 @@ fn resolve_op(
                     pad_h: ph as u32, pad_w: pw as u32,
                     dilation_h: dh as u32, dilation_w: dw as u32,
                     group: *group as u32,
+                    input_h: ih, input_w: iw,
                 },
                 vec![],
             )
@@ -553,6 +561,12 @@ fn resolve_op(
             let (ph, pw) = get_pads_hw(pads);
             let (dh, dw) = get_hw(dilations, 1);
             let (oph, opw) = get_hw(output_padding, 0);
+            let ih = dim_at_expr(inputs.first(), tensor_info, 2)
+                .and_then(|e| e.evaluate())
+                .unwrap_or(0) as u32;
+            let iw = dim_at_expr(inputs.first(), tensor_info, 3)
+                .and_then(|e| e.evaluate())
+                .unwrap_or(0) as u32;
             (
                 FloatOp::ConvTranspose {
                     kernel_h: kh as u32, kernel_w: kw as u32,
@@ -561,6 +575,7 @@ fn resolve_op(
                     dilation_h: dh as u32, dilation_w: dw as u32,
                     group: *group as u32,
                     output_pad_h: oph as u32, output_pad_w: opw as u32,
+                    input_h: ih, input_w: iw,
                 },
                 vec![],
             )
@@ -601,7 +616,18 @@ fn resolve_op(
                 vec![],
             )
         }
-        AiOp::GlobalAveragePool => (FloatOp::GlobalAvgPool, vec![]),
+        AiOp::GlobalAveragePool => {
+            let channels = dim_at_expr(inputs.first(), tensor_info, 1)
+                .and_then(|e| e.evaluate())
+                .unwrap_or(0) as u32;
+            let spatial_h = dim_at_expr(inputs.first(), tensor_info, 2)
+                .and_then(|e| e.evaluate())
+                .unwrap_or(0) as u32;
+            let spatial_w = dim_at_expr(inputs.first(), tensor_info, 3)
+                .and_then(|e| e.evaluate())
+                .unwrap_or(0) as u32;
+            (FloatOp::GlobalAvgPool { channels, spatial_h, spatial_w }, vec![])
+        }
         AiOp::Resize { mode, .. } => {
             let mode_u8 = match mode.as_str() {
                 "nearest" => 0,
@@ -745,6 +771,16 @@ fn normalize_axis(
 }
 
 // ── Dim expression helpers ──────────────────────────────────────────────────
+
+fn dim_at_expr(
+    tid: Option<&TensorId>,
+    tensor_info: &HashMap<TensorId, TensorInfo>,
+    idx: usize,
+) -> Option<DimExpr> {
+    tid.and_then(|t| tensor_info.get(t))
+        .and_then(|info| info.shape.get(idx))
+        .cloned()
+}
 
 fn last_dim_expr(
     tid: Option<&TensorId>,

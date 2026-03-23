@@ -168,7 +168,7 @@ impl ShapeProjection for FloatOp {
             | FloatOp::ConvTranspose { .. }
             | FloatOp::MaxPool2d { .. }
             | FloatOp::AvgPool2d { .. }
-            | FloatOp::GlobalAvgPool
+            | FloatOp::GlobalAvgPool { .. }
             | FloatOp::Resize { .. }
             | FloatOp::PadOp { .. } => (ShapeSpecRepr::Unknown, None),
 
