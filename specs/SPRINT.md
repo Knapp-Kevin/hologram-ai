@@ -129,14 +129,21 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] Goal: GGUF generation at >1 tok/s
 
 ### Multi-component pipeline archives (Plan 021)
-- [ ] Phase 1: Generic N-component compilation — extract `compile_one_component()`,
-  add `LowerPhase::Named`, `OptProfile`, `MemoryPlan::empty()`, `compile_components()`
-- [ ] Phase 2: Rename `LlmMetaSection` → `MetaSection`, generalize for N components
-  with roles, weight groups, and connections
+- [x] Phase 1: Generic N-component compilation — `compile_one_component()`,
+  `compile_components()`, `LowerPhase::Named`, `OptProfile`, `MemoryPlan::empty()`,
+  `ComponentSpec` with role + weight_group. LLM pipeline delegates to
+  `compile_components` with 2 specs.
+- [x] Phase 2: `MetaSection` with `ComponentDescriptor`, `ComponentRole`,
+  `ComponentConnection` — rkyv zero-copy serialization, `EmbeddableSection`,
+  `ExecContext` impl. Embedded in pipeline archive via `PipelineWriter::add_section()`.
+  LLM pipeline creates 2 descriptors (Prefill + Decode) + 1 KV-cache connection.
+  Roundtrip tests pass (LLM + 4-component CALM).
 - [ ] Phase 3: Weight deduplication — `WeightStore` primitive in hologram-base
   (follows `hologram-compression` pattern), `SECTION_WEIGHT_DEDUP`
-- [ ] Phase 4: `ModelSource::MultiOnnx` — generic multi-ONNX compilation
-  (CALM, Whisper, Stable Diffusion, any multi-component model)
+- [x] Phase 4: `ModelSource::MultiOnnx` + `OptPipeline::generic()` — generic
+  multi-ONNX compilation with per-component import, optimization (MVP for
+  transformers, generic for others), concretization, and weight group tracking.
+  Unlocks CALM, Whisper, Stable Diffusion, any multi-component ONNX model.
 
 ---
 
@@ -167,10 +174,13 @@ zero runtime code. All kernels belong in hologram base crate.
   in hologram base (Sprint 16 Phases 1-7)
 - [x] GPU backend: Metal elementwise (13 MSL kernels), tiled SGEMM matmul,
   softmax, RmsNorm, MTLBuffer-backed arena, zero-copy output path
-- [ ] GPU backend: Metal async command buffer batching (amortize launch overhead)
+- [x] GPU backend: Metal async command buffer batching — `Mutex<Option<CommandBuffer>>`
+  with `flush()` at level boundaries (hologram base Phase 8.2)
+- [x] GPU backend: WebGPU/wgpu compute shader path — cross-platform GPU,
+  browser + native (hologram base Phase 8.3)
 - [ ] GPU backend: Metal Attention kernel (fused QKV on GPU)
 - [ ] GPU backend: CUDA kernel implementations
-- [ ] GPU backend: WebGPU via wgpu crate
+- [ ] GPU backend: WebGPU command encoder batching + buffer reuse (Phase 8.3d)
 
 ### Architecture
 - [x] Simplify post-concretization pipeline — extracted shared
