@@ -73,9 +73,13 @@ fn bert_onnx_executes() {
         return;
     }
 
-    // Compile without seq_len override — BERT uses its own context length
-    // from model metadata (typically 512).
-    let archive = ModelCompiler::default()
+    // Compile with short seq_len for testing — BERT-base supports up to 512
+    // but we use 32 to keep execution fast and memory reasonable.
+    let compiler = ModelCompiler {
+        seq_len_override: Some(32),
+        ..ModelCompiler::default()
+    };
+    let archive = compiler
         .compile(ModelSource::OnnxPath(model))
         .expect("compilation failed");
 

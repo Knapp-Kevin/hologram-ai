@@ -155,8 +155,10 @@ zero runtime code. All kernels belong in hologram base crate.
   (507MB ONNX, bert-base-uncased). Non-causal attention detected correctly,
   KV cache skipped, single-graph path used. Shape→Gather→Concat chains folded
   at compile time via `ForceConcretize` + `ConstantEvaluation` Shape-node
-  evaluation. Execution hits hologram base `dispatch_inline_unary` panic
-  (non-unary kernel routed to unary path) — needs hologram base fix.
+  evaluation. hologram base `dispatch_inline_unary` fixed (9 missing inline
+  ops: Log, Sqrt, Cos, Sin, Sign, Floor, Ceil, Round, Erf). Execution now
+  hits MatMul shape mismatch in FFN layers — needs shape lowering investigation
+  for non-LLM MatMul patterns.
 - [ ] Test with Stable Diffusion UNet (vision + attention + cross-attention)
 - [ ] Test with Whisper (encoder-decoder, audio)
 - [ ] Fix any op dispatch failures discovered
