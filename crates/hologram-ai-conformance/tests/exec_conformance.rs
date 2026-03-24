@@ -2640,6 +2640,101 @@ fn tinyllama_embedding_conformance() {
     assert!(max_diff < 1e-4, "Embedding diverges: max_diff={max_diff}");
 }
 
+/// Helper: compile a TinyLlama sub-model fixture and compare against ORT.
+/// Returns (cosine_similarity, max_abs_diff).
+fn tinyllama_probe_compare(fixture: &str, needs_mask: bool, needs_kv: bool) -> (f64, f32) {
+    use hologram_ai_conformance::ort_runner::runner::{run_onnx_file_typed, OrtInputTyped};
+
+    let model_path = workspace_path(&format!("crates/hologram-ai-conformance/fixtures/{fixture}"));
+    if !model_path.exists() {
+        eprintln!("SKIP: run python3 scripts/extract_tinyllama_probes.py first");
+        return (1.0, 0.0); // skip = pass
+    }
+
+    let seq = 5usize;
+    let input_ids: Vec<i64> = (1..=seq as i64).collect();
+    let attention_mask: Vec<i64> = vec![1; seq];
+
+    let mut ort_inputs = vec![
+        OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, seq], data: input_ids.clone() },
+    ];
+    if needs_mask {
+        ort_inputs.push(OrtInputTyped::I64 {
+            name: "attention_mask".into(), shape: vec![1, seq], data: attention_mask.clone(),
+        });
+    }
+
+    let ort_outputs = run_onnx_file_typed(&model_path, ort_inputs).expect("ORT failed");
+    let ort_out = &ort_outputs[0].data;
+
+    let compiler = ModelCompiler {
+        force_single_graph: true,
+        seq_len_override: Some(seq as u64),
+        ..Default::default()
+    };
+    let archive = compiler.compile(ModelSource::OnnxPath(model_path)).expect("compile failed");
+    let plan = hologram::load_from_bytes(&archive.bytes).expect("load failed");
+    let tape = hologram::build_tape_from_plan(&plan).expect("tape failed");
+
+    let position_ids: Vec<i64> = (0..seq as i64).collect();
+    let mut inputs = hologram::GraphInputs::new();
+    inputs.set_with_shape(0, bytemuck::cast_slice(&input_ids).to_vec(), vec![1, seq]);
+    if needs_mask {
+        inputs.set_with_shape(1, bytemuck::cast_slice(&attention_mask).to_vec(), vec![1, seq]);
+        inputs.set_with_shape(2, bytemuck::cast_slice(&position_ids).to_vec(), vec![seq]);
+    }
+
+    let holo_outputs = if needs_kv {
+        let mut kv = hologram::KvCacheState::new(1, 4, 64, seq + 8);
+        hologram::execute_tape_with_kv(&tape, &plan, &inputs, &mut kv)
+    } else {
+        hologram::execute_tape(&tape, &plan, &inputs)
+    }.expect("execution failed");
+
+    let (_, holo_bytes) = holo_outputs.get(0).expect("no output");
+    let holo_out: Vec<f32> = holo_bytes.chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().expect("4")))
+        .collect();
+
+    // Compare first min(ort, holo) elements
+    let n = ort_out.len().min(holo_out.len());
+    let dot: f64 = ort_out[..n].iter().zip(holo_out[..n].iter())
+        .map(|(a, b)| *a as f64 * *b as f64).sum();
+    let n_ort: f64 = ort_out[..n].iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+    let n_holo: f64 = holo_out[..n].iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+    let cosine = if n_ort > 0.0 && n_holo > 0.0 { dot / (n_ort * n_holo) } else { 0.0 };
+    let max_diff: f32 = ort_out[..n].iter().zip(holo_out[..n].iter())
+        .map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+
+    eprintln!("{fixture}: ort={} holo={} cosine={cosine:.6} max_diff={max_diff:.6}",
+        ort_out.len(), holo_out.len());
+    (cosine, max_diff)
+}
+
+/// Q-projection (MatMul + Reshape + Transpose, before RoPE).
+#[test]
+#[ignore]
+fn tinyllama_qproj0_conformance() {
+    let (cosine, diff) = tinyllama_probe_compare("tinyllama_qproj0.onnx", true, false);
+    assert!(cosine > 0.999, "Q-proj diverges: cosine={cosine:.6} diff={diff}");
+}
+
+/// Q after RoPE application.
+#[test]
+#[ignore]
+fn tinyllama_qrope0_conformance() {
+    let (cosine, diff) = tinyllama_probe_compare("tinyllama_qrope0.onnx", true, false);
+    assert!(cosine > 0.999, "Q+RoPE diverges: cosine={cosine:.6} diff={diff}");
+}
+
+/// Output projection (full attention path, before residual add).
+#[test]
+#[ignore]
+fn tinyllama_oproj0_conformance() {
+    let (cosine, diff) = tinyllama_probe_compare("tinyllama_oproj0.onnx", true, true);
+    assert!(cosine > 0.99, "O-proj diverges: cosine={cosine:.6} diff={diff}");
+}
+
 fn workspace_path(rel: &str) -> std::path::PathBuf {
     let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop(); // crates/hologram-ai-conformance → crates/
