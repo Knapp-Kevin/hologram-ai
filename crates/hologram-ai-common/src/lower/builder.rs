@@ -228,7 +228,7 @@ pub fn lower(
     let topo = ai_graph.topo_order();
     let node_map: HashMap<u32, &_> = ai_graph.nodes.iter().map(|n| (n.id, n)).collect();
 
-    for nid in topo {
+    for &nid in topo.iter() {
         let node = node_map[&nid];
 
         let input_idxs: Vec<usize> = node

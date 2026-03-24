@@ -31,7 +31,7 @@ impl Pass for ConstantEvaluation {
 
         let mut materialized = 0u32;
 
-        for &nid in &order {
+        for &nid in order.iter() {
             let idx = match node_map.get(&nid) {
                 Some(&i) => i,
                 None => continue,

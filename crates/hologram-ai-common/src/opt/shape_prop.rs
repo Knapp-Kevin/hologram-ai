@@ -67,7 +67,7 @@ fn propagate_shapes(mut graph: AiGraph, protect_settled: bool) -> anyhow::Result
             .collect();
 
         // Shape propagation: single pass in topological order.
-        for &nid in &order {
+        for &nid in order.iter() {
             let idx = match node_idx.get(&nid) {
                 Some(&i) => i,
                 None => continue,
@@ -158,7 +158,7 @@ fn propagate_shapes(mut graph: AiGraph, protect_settled: bool) -> anyhow::Result
     // updated yet when their consumers are processed.
     loop {
         let mut changed = false;
-        for &nid in &order {
+        for &nid in order.iter() {
             let idx = match node_idx.get(&nid) {
                 Some(&i) => i,
                 None => continue,

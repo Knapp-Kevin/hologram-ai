@@ -8,6 +8,7 @@ use super::{
 use hologram_ai_quant::QuantDescriptor;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 
 /// Full type + quantization information for a tensor.
 #[derive(Debug, Clone)]
@@ -95,10 +96,10 @@ pub struct AiGraph {
     pub tensor_names: HashMap<TensorId, String>,
 
     /// Cached topological order. Invalidated by any structural graph mutation.
-    /// Uses `RefCell` for interior mutability so `topo_order(&self)` can populate the cache.
+    /// Uses `RefCell<Option<Rc<...>>>` so callers share the allocation (zero clones).
     /// **Do not read or write directly** — use `topo_order()` and `invalidate_topo_cache()`.
     #[doc(hidden)]
-    pub topo_cache: RefCell<Option<Vec<NodeId>>>,
+    pub topo_cache: RefCell<Option<Rc<Vec<NodeId>>>>,
 }
 
 impl AiGraph {
@@ -203,16 +204,16 @@ impl AiGraph {
     ///
     /// The result is cached internally. Call [`invalidate_topo_cache`] after
     /// any structural graph mutation (add/remove nodes, rewire edges).
-    pub fn topo_order(&self) -> Vec<NodeId> {
-        // Return cached order if available.
+    pub fn topo_order(&self) -> Rc<Vec<NodeId>> {
+        // Return cached order if available (Rc::clone is O(1), no data copy).
         if let Some(cached) = self.topo_cache.borrow().as_ref() {
-            return cached.clone();
+            return Rc::clone(cached);
         }
 
-        let order = self.compute_topo_order();
+        let order = Rc::new(self.compute_topo_order());
 
         // Cache the result.
-        *self.topo_cache.borrow_mut() = Some(order.clone());
+        *self.topo_cache.borrow_mut() = Some(Rc::clone(&order));
         order
     }
 
@@ -327,7 +328,7 @@ mod tests {
     #[test]
     fn topo_order_single_node() {
         let g = minimal_graph();
-        assert_eq!(g.topo_order(), vec![0u32]);
+        assert_eq!(*g.topo_order(), vec![0u32]);
     }
 
     #[test]

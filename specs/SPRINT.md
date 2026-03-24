@@ -61,6 +61,10 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Wire tape executor from `HoloRunner` — build tape at load time, use
   `execute_tape` / `execute_tape_with_kv` for all execution. No fallback
   to legacy `execute_plan` (Plan 022)
+- [x] Migrate `run_with_shape_context()` from `execute_plan` to tape API
+  (Plan 023 — hologram Sprint 17 removed all `execute_plan*` functions)
+- [x] Remove intermediate capture debug tests — API deleted in hologram
+  Sprint 17 (Plan 023)
 
 #### P2d: Remaining decode optimizations (DONE — Plan 020)
 - [x] Wire `dispatch_float_into` — buffer reuse, wired into tape executor
@@ -81,12 +85,10 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Add+RMSNorm residual fusion — `AddRmsNormFusion` pass in
   `add_rmsnorm_fusion.rs`, wired into MVP pipeline; lowering maps to
   `FloatOp::AddRmsNorm`; kernel implemented in hologram base.
-- [ ] QK-Norm + RoPE pre-attention fusion — `PreAttentionFusion` pass in
-  `pre_attention_fusion.rs` implemented with 4 unit tests. **Gated**: hologram
-  base `dispatch_attention()` ignores `qk_norm`/`rope` flags (both dispatch
-  sites use `..` destructuring). Pass removed from `mvp()` pipeline until
-  hologram base adds kernel support. AiOp fields and lowering are
-  forward-compatible.
+- [ ] QK-Norm + RoPE pre-attention fusion — **pass removed** (hologram base
+  `dispatch_attention()` still ignores `qk_norm`/`rope` flags). AiOp fields
+  and lowering stubs retained as forward-compatible placeholders. Re-add pass
+  when hologram base wires kernel support.
 
 ### P4: Compilation speed (DONE — Plans 017, 020)
 - [x] Release profile with LTO (`codegen-units = 1, lto = "thin"`)
@@ -109,6 +111,29 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] Wire `ShapeContextGraph` into `HoloRunner.execute()` — project shapes
   at runtime from actual input dimensions instead of compiled seq_len
 - [x] Any prompt length without recompilation (via runtime size resolution)
+
+### P6: Performance deep clean (Plan 024 — active)
+- [x] Remove `hologram-ai-ggml` stub crate (entire crate was unimplemented)
+- [x] Remove 3 unregistered fusion passes: `MatMulActivationFusion` (~233 lines),
+  `ConcatMatMulFusion` (~213 lines), `PreAttentionFusion` (~415 lines) — hologram
+  base has no corresponding kernels. AiOp variants + lowering stubs retained.
+- [x] Remove `project_shapes()` dead method from HoloRunner
+- [x] Remove unused dependencies: `async-stream`, `tokio-util` (zero usage)
+- [x] `collect_weight_bytes()` single pre-allocated buffer — eliminates N
+  intermediate `Vec<u8>` allocations (one per mmap'd param)
+- [x] Uncompressed archives by default — enables `load_from_bytes_zero_copy()`
+  (removed forced `compress_graph()` / `compress_weights()`)
+- [x] `topo_order()` returns `Rc<Vec<NodeId>>` — eliminates clone on every call
+  (was cloned 50+ times per compilation across all opt passes)
+- [ ] Zero-copy weight pipeline — `&[u8]` borrowing through pipeline,
+  `build_with_shared_weights()` for 50% archive size reduction
+- [ ] Clone elimination — remaining `.clone()` calls via move semantics, `Cow`,
+  shape reference folding
+- [ ] Algorithmic fixes — union-find remap chains, worklist dtype fixpoint
+- [ ] Parallelization — rayon for multi-component compilation, subgraph
+  optimization, weight I/O, constant dedup hashing
+- [ ] Convention cleanup — `SmallVec<[u8; 32]>` for shape constants,
+  `eprintln!` → `tracing`
 
 ---
 
@@ -202,7 +227,10 @@ zero runtime code. All kernels belong in hologram base crate.
 
 ### Node-by-node inspector tooling
 - [x] `execute_plan_with_intermediates_and_shape_hints` in hologram base
-- [x] `tinyllama_node_inspector` conformance test
+  (**removed** in hologram Sprint 17 — Plans 014+015)
+- [x] `tinyllama_node_inspector` conformance test (removed — depended on
+  intermediate capture API; node-level debugging now requires probe output nodes)
+- [x] `tinyllama_node_divergence_finder` conformance test (removed — same reason)
 - [x] `compare_node_by_node.py` Python comparator
 - [x] `ort_intermediates.py` ORT intermediate dumper
 

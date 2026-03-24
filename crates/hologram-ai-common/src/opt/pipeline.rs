@@ -57,11 +57,6 @@ impl OptPipeline {
             // absolute position from the generation loop.
             Box::new(PositionIdsInjection),
             Box::new(AttentionFusion),
-            // TODO(hologram-base): re-enable PreAttentionFusion when
-            // dispatch_attention handles qk_norm/rope flags (currently both
-            // dispatch sites in float_dispatch/mod.rs ignore them via `..`).
-            // The pass is correct but the runtime silently drops the fused ops.
-            // Box::new(super::pre_attention_fusion::PreAttentionFusion),
             Box::new(KvSlotInjection),
             // Decompose compound ops (ReduceL1/L2, DepthToSpace, SpaceToDepth)
             // into primitive ops before lowering.

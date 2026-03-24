@@ -34,7 +34,7 @@ impl Pass for ShapeHealing {
         for _round in 0..3 {
             let mut changed = false;
 
-            for &nid in &order {
+            for &nid in order.iter() {
                 let idx = match node_idx.get(&nid) {
                     Some(&i) => i,
                     None => continue,

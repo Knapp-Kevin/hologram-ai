@@ -19,7 +19,6 @@ hologram-ai-quant  = { path = "crates/hologram-ai-quant" }
 hologram-ai-common = { path = "crates/hologram-ai-common" }
 hologram-ai-onnx   = { path = "crates/hologram-ai-onnx" }
 hologram-ai-gguf   = { path = "crates/hologram-ai-gguf" }
-hologram-ai-ggml      = { path = "crates/hologram-ai-ggml" }
 hologram-ai-tokenizer = { path = "crates/hologram-ai-tokenizer" }
 
 # third-party
@@ -36,7 +35,6 @@ serde_json    = "1"
 toml          = "0.8"
 tracing       = "0.1"
 futures       = "0.3"
-async-stream  = "0.3"
 approx        = "0.5"
 clap          = { version = "4", features = ["derive"] }
 prost         = "0.13"
@@ -48,7 +46,6 @@ tempfile      = "3"
 sha2          = "0.10"
 dirs          = "5"
 which         = "7"
-tokio-util    = { version = "0.7", features = ["io"] }
 rkyv          = "0.8"
 
 # Keep debug symbols but optimize enough for usable LLM inference (~10-50x faster).

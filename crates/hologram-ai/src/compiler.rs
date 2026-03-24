@@ -6,7 +6,7 @@
 
 use anyhow::Context;
 use hologram_ai_common::{
-    exec_context::ShapeContextGraph, lower, walk_shape_context, AiGraph, AiParam, LowerPhase,
+    exec_context::ShapeContextGraph, lower, AiGraph, AiParam, LowerPhase,
     LoweringOptions, MemoryPlanner, OptPipeline, Pass,
 };
 use std::io::{Read, Seek, SeekFrom};
@@ -24,8 +24,6 @@ pub enum ModelSource {
     OnnxBytes(Vec<u8>),
     /// Path to a GGUF model file.
     GgufPath(PathBuf),
-    /// Path to a GGML model file (legacy pre-GGUF format).
-    GgmlPath(PathBuf),
     /// Pre-built `AiGraph` (bypass importer).
     AiGraph(AiGraph),
     /// Multiple ONNX files forming a multi-component model.
@@ -466,18 +464,22 @@ impl ModelCompiler {
     }
 
     /// Compile a non-LLM model into a single-graph archive.
+    ///
+    /// Collects weight bytes from mmap params and passes them as `extra_weights`
+    /// so that `ConstantData::Deferred` offsets resolve correctly at runtime.
     fn compile_single_graph(
         &self,
         ai_graph: &AiGraph,
         mem_plan: &hologram_ai_common::MemoryPlan,
     ) -> anyhow::Result<Vec<u8>> {
         let weights = collect_weight_bytes(ai_graph)?;
+        let extra_weights = if weights.is_empty() { None } else { Some(weights) };
         let archive = compile_one_component(
             ai_graph,
             &mem_plan.kv_cache_layout,
             &LoweringOptions::default(),
             &LowerPhase::Forward,
-            if weights.is_empty() { None } else { Some(weights) },
+            extra_weights,
         )?;
         info!(archive_bytes = archive.len(), "single-graph archive assembled");
         Ok(archive)
@@ -576,7 +578,7 @@ impl ModelCompiler {
         let mut total_weight_bytes_before: u64 = 0;
 
         for spec in specs {
-            let is_first_in_group = !weight_group_owners.contains_key(&spec.weight_group);
+            let _is_first_in_group = !weight_group_owners.contains_key(&spec.weight_group);
             let weight_source = if let Some(owner) = weight_group_owners.get(&spec.weight_group) {
                 Some(owner.clone())
             } else {
@@ -585,18 +587,16 @@ impl ModelCompiler {
             };
 
             // Register weights in the content-addressable store for dedup.
-            // Only the first component in each weight group embeds weights
-            // in its sub-archive; subsequent components get None (resolved
-            // at load time via the WeightDedupIndex).
+            // The shared blob is built later — sub-archives embed NO weights.
+            // At load time, the pipeline loader resolves each component's
+            // weights from the shared blob via WeightDedupIndex.
             if let Some(ref w) = spec.weights {
                 total_weight_bytes_before += w.len() as u64;
                 weight_store.insert(&spec.name, &spec.weight_group, w);
             }
-            let weights_for_component = if is_first_in_group {
-                spec.weights.clone()
-            } else {
-                None
-            };
+            // Sub-archives are graph-only (no embedded weights). Weights are
+            // stored once in the shared blob via build_with_shared_weights.
+            let weights_for_component: Option<Vec<u8>> = None;
 
             descriptors.push(ComponentDescriptor {
                 name: spec.name.clone(),
@@ -627,28 +627,30 @@ impl ModelCompiler {
         let meta_section = meta.to_bytes();
         writer = writer.add_section(meta.section_kind(), meta_section);
 
-        // Embed WeightDedupIndex so the loader can resolve shared weights.
+        // Build shared weight blob + dedup index. Sub-archives have no
+        // embedded weights — the loader resolves them from the shared blob.
         let dedup_bytes = weight_store.total_bytes();
-        if dedup_bytes > 0 {
+        let pipeline = if dedup_bytes > 0 {
             let savings = if total_weight_bytes_before > 0 && dedup_bytes < total_weight_bytes_before {
                 (1.0 - dedup_bytes as f64 / total_weight_bytes_before as f64) * 100.0
             } else {
                 0.0
             };
-            let (_blob, dedup_index) = weight_store.build();
-            let dedup_section = dedup_index.to_bytes();
-            writer = writer.add_section(dedup_index.section_kind(), dedup_section);
+            let (shared_blob, dedup_index) = weight_store.build();
             info!(
                 before_mb = format_args!("{:.1}", total_weight_bytes_before as f64 / 1_048_576.0),
                 after_mb = format_args!("{:.1}", dedup_bytes as f64 / 1_048_576.0),
                 savings_pct = format_args!("{:.0}", savings),
-                "weight deduplication index embedded"
+                "shared weight blob built (deduplicated)"
             );
-        }
-
-        let pipeline = writer
-            .build()
-            .map_err(|e| anyhow::anyhow!("building pipeline archive: {e}"))?;
+            writer
+                .build_with_shared_weights(shared_blob, &dedup_index)
+                .map_err(|e| anyhow::anyhow!("building pipeline archive: {e}"))?
+        } else {
+            writer
+                .build()
+                .map_err(|e| anyhow::anyhow!("building pipeline archive: {e}"))?
+        };
         info!(
             archive_bytes = pipeline.len(),
             components = n,
@@ -814,12 +816,6 @@ impl ModelCompiler {
                 },
             )
             .with_context(|| format!("importing GGUF from {path:?}")),
-            ModelSource::GgmlPath(path) => {
-                let bytes =
-                    std::fs::read(&path).with_context(|| format!("reading GGML file {path:?}"))?;
-                hologram_ai_ggml::import_ggml(&bytes)
-                    .with_context(|| format!("importing GGML from {path:?}"))
-            }
             ModelSource::AiGraph(g) => Ok(g),
             ModelSource::MultiOnnx { .. } => {
                 unreachable!("MultiOnnx is handled before import()")
@@ -833,7 +829,7 @@ impl ModelCompiler {
 /// Raw components extracted from a compiled archive via a single
 /// `load_from_bytes` call. Avoids repeated deserialization/decompression.
 struct UnpackedArchive {
-    /// Compressed graph bytes (passed through as-is to `set_graph_bytes`).
+    /// Raw graph bytes (uncompressed rkyv, passed to `set_graph_bytes_uncompressed`).
     graph_bytes: Vec<u8>,
     /// Existing weight bytes from the archive.
     weight_bytes: Vec<u8>,
@@ -844,20 +840,33 @@ struct UnpackedArchive {
 }
 
 /// Unpack a compiled archive into its raw components with a single
-/// `load_from_bytes` call.
+/// `load_from_bytes` call.  Transparently decompresses if the archive
+/// was written with `compress_graph()` / `compress_weights()`.
 fn unpack_archive(archive: &[u8]) -> anyhow::Result<UnpackedArchive> {
-    let plan = hologram::load_from_bytes(archive).context("unpacking archive")?;
+    use hologram::hologram_archive::{decompress_archive, is_compressed};
+
+    let effective: std::borrow::Cow<'_, [u8]> = if is_compressed(archive) {
+        std::borrow::Cow::Owned(
+            decompress_archive(archive).context("decompressing archive for unpack")?
+                .context("decompress returned None")?,
+        )
+    } else {
+        std::borrow::Cow::Borrowed(archive)
+    };
+
+    let plan =
+        hologram::load_from_bytes(&effective).context("unpacking archive")?;
     let h = plan.header();
     let graph_bytes =
-        archive[h.graph_offset as usize..(h.graph_offset + h.graph_size) as usize].to_vec();
+        effective[h.graph_offset as usize..(h.graph_offset + h.graph_size) as usize].to_vec();
     let weight_bytes = plan.weights().to_vec();
 
     let mut sections = Vec::new();
     for entry in &plan.sections().entries {
         let offset = entry.offset as usize;
         let size = entry.size as usize;
-        if offset + size <= archive.len() {
-            sections.push((entry.kind, archive[offset..offset + size].to_vec()));
+        if offset + size <= effective.len() {
+            sections.push((entry.kind, effective[offset..offset + size].to_vec()));
         }
     }
 
@@ -892,8 +901,11 @@ fn build_final_archive(
     use hologram::hologram_archive::section::{EmbeddableSection, SECTION_LAYER_HEADER};
 
     let weights = extra_weights.unwrap_or(unpacked.weight_bytes);
+    // Uncompressed by default — enables zero-copy mmap via
+    // `load_from_bytes_zero_copy()` at runtime. Compression can be
+    // opted in via HologramConfig for distribution builds.
     let mut writer = hologram::HoloWriter::new()
-        .set_graph_bytes(unpacked.graph_bytes)
+        .set_graph_bytes_uncompressed(unpacked.graph_bytes)
         .set_weights(weights);
 
     // Determine which section kinds will be replaced.
@@ -1484,20 +1496,23 @@ fn collect_weight_bytes(ai_graph: &AiGraph) -> anyhow::Result<Vec<u8>> {
             _ => 0,
         })
         .sum();
-    let mut blob = Vec::with_capacity(total_size as usize);
+    // Single pre-allocated buffer — read directly into the blob without
+    // intermediate per-weight Vec allocations.
+    let mut blob = vec![0u8; total_size as usize];
+    let mut write_offset = 0usize;
 
     for (_, param) in &sorted {
         if let AiParam::Mmap {
             path, offset, len, ..
         } = param
         {
+            let n = *len as usize;
             let mut f = std::fs::File::open(path)
                 .with_context(|| format!("opening weight file {path:?}"))?;
             f.seek(SeekFrom::Start(*offset))?;
-            let mut buf = vec![0u8; *len as usize];
-            f.read_exact(&mut buf)
-                .with_context(|| format!("reading {} bytes from {path:?}", len))?;
-            blob.extend_from_slice(&buf);
+            f.read_exact(&mut blob[write_offset..write_offset + n])
+                .with_context(|| format!("reading {n} bytes from {path:?}"))?;
+            write_offset += n;
         }
     }
 
@@ -1518,11 +1533,28 @@ fn collect_weight_bytes(ai_graph: &AiGraph) -> anyhow::Result<Vec<u8>> {
 ///
 /// Load once with [`HoloRunner::from_bytes`], then call [`HoloRunner::execute`]
 /// many times with different inputs.
+/// Owned archive storage — either heap-allocated Vec or memory-mapped file.
+enum ArchiveStorage {
+    Owned(Vec<u8>),
+    Mmap(memmap2::Mmap),
+}
+
+impl AsRef<[u8]> for ArchiveStorage {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            ArchiveStorage::Owned(v) => v,
+            ArchiveStorage::Mmap(m) => m,
+        }
+    }
+}
+
 pub struct HoloRunner {
-    /// For single-graph: the archive bytes. For pipeline: the prefill sub-archive bytes.
-    effective_bytes: Vec<u8>,
-    /// The raw top-level archive bytes (pipeline wrapper or single-graph).
-    _raw_bytes: Vec<u8>,
+    /// Backing storage: mmap or heap. MUST be listed first so it's dropped last
+    /// (LoadedPlan borrows from it).
+    _storage: ArchiveStorage,
+    /// For pipeline: the prefill sub-archive bytes (copied from storage).
+    /// For single-graph: empty (plan borrows directly from _storage).
+    _sub_archive_bytes: Vec<u8>,
     /// Single-graph plan (non-pipeline) or the prefill sub-model.
     plan: hologram::LoadedPlan,
     /// Decode sub-model plan (pipeline only, compiled at seq=1).
@@ -1533,67 +1565,213 @@ pub struct HoloRunner {
     /// True if the archive is a pipeline (prefill + decode).
     is_pipeline: bool,
     /// Pre-compiled execution tape for the prefill graph.
-    /// Built at load time to eliminate per-node op matching at inference time.
     tape: hologram::hologram_exec::tape::EnumTape,
     /// Pre-compiled execution tape for the decode graph (pipeline only).
     decode_tape: Option<hologram::hologram_exec::tape::EnumTape>,
 }
 
 impl HoloRunner {
-    /// Load a runner from raw archive bytes.
+    /// Load a runner from raw archive bytes (heap-allocated).
     pub fn from_bytes(bytes: Vec<u8>) -> anyhow::Result<Self> {
-        // Try loading as pipeline first; fall back to single-graph.
-        let is_pipeline = hologram::hologram_archive::loader::pipeline::LoadedPipeline::from_bytes(&bytes).is_ok();
-
-        let effective_bytes = if is_pipeline {
-            extract_sub_archive_bytes(&bytes, "lm.prefill")?
-        } else {
-            bytes.clone()
-        };
-
-        let plan = hologram::load_from_bytes(&effective_bytes)
-            .map_err(|e| anyhow::anyhow!("loading plan: {e}"))?;
-        let shape_ctx = read_shape_context_from_archive(&effective_bytes)?;
-
-        // Load decode sub-archive if pipeline.
-        let (decode_plan, decode_bytes) = if is_pipeline {
-            let db = extract_sub_archive_bytes(&bytes, "lm.decode")?;
-            let dp = hologram::load_from_bytes(&db)
-                .map_err(|e| anyhow::anyhow!("loading decode plan: {e}"))?;
-            (Some(dp), Some(db))
-        } else {
-            (None, None)
-        };
-
-        // Build pre-compiled execution tapes — mandatory for all execution paths.
-        let tape = hologram::build_tape_from_plan(&plan)
-            .map_err(|e| anyhow::anyhow!("building execution tape: {e}"))?;
-        let decode_tape = match decode_plan.as_ref() {
-            Some(dp) => Some(
-                hologram::build_tape_from_plan(dp)
-                    .map_err(|e| anyhow::anyhow!("building decode execution tape: {e}"))?,
-            ),
-            None => None,
-        };
-
-        Ok(Self {
-            effective_bytes,
-            _raw_bytes: bytes,
-            plan,
-            decode_plan,
-            _decode_bytes: decode_bytes,
-            shape_ctx,
-            is_pipeline,
-            tape,
-            decode_tape,
-        })
+        Self::from_storage(ArchiveStorage::Owned(bytes))
     }
 
-    /// Load a runner from a `.holo` file on disk.
-    pub fn from_path(path: &std::path::Path) -> anyhow::Result<Self> {
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("reading archive {}", path.display()))?;
-        Self::from_bytes(bytes)
+    /// Load a runner from a `.holo` file on disk using memory-mapping.
+    ///
+    /// This avoids reading the entire archive (often multi-GB) into heap.
+    /// Weights are accessed on-demand via page faults, so RSS stays low.
+    ///
+    /// If the archive is compressed, decompresses to a cache file for instant
+    /// loading on subsequent runs. Cache location is controlled by `cache_dir`:
+    /// - `None` — falls back to `HologramConfig` then caches next to the archive
+    /// - `Some(dir)` — cache in the given directory (e.g., `~/.hologram/cache/`)
+    pub fn from_path(
+        path: &std::path::Path,
+        cache_dir: Option<&std::path::Path>,
+        config_path: Option<&std::path::Path>,
+    ) -> anyhow::Result<Self> {
+        // Load config: explicit path > standard search.
+        let config = match config_path {
+            Some(p) => hologram::config::HologramConfig::load_file(p)
+                .unwrap_or_default(),
+            None => hologram::config::HologramConfig::load(),
+        };
+        // CLI cache_dir > config cache.dir > default (next to archive).
+        let config_cache = config.cache_dir();
+        let cache_dir = cache_dir.or(config_cache.as_deref());
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("opening archive {}", path.display()))?;
+        let mmap = unsafe { memmap2::Mmap::map(&file) }
+            .with_context(|| format!("memory-mapping archive {}", path.display()))?;
+
+        // If compressed, decompress to a cache file for instant loading.
+        if hologram::hologram_archive::is_compressed(&mmap) {
+            let cache_path = match cache_dir {
+                Some(dir) => {
+                    std::fs::create_dir_all(dir)
+                        .with_context(|| format!("creating cache dir {}", dir.display()))?;
+                    let stem = path.file_name().unwrap_or_default();
+                    dir.join(format!("{}.cache", stem.to_string_lossy()))
+                }
+                None => path.with_extension("holo.cache"),
+            };
+
+            if cache_path.exists() {
+                let cache_file = std::fs::File::open(&cache_path)
+                    .with_context(|| format!("opening cache {}", cache_path.display()))?;
+                let cache_mmap = unsafe { memmap2::Mmap::map(&cache_file) }
+                    .with_context(|| format!("mmap cache {}", cache_path.display()))?;
+                return Self::from_storage(ArchiveStorage::Mmap(cache_mmap));
+            }
+
+            eprintln!("decompressing to {} (one-time)...", cache_path.display());
+            if let Some(uncompressed) = hologram::hologram_archive::decompress_archive(&mmap)
+                .with_context(|| "decompressing archive")?
+            {
+                std::fs::write(&cache_path, &uncompressed)
+                    .with_context(|| format!("writing cache {}", cache_path.display()))?;
+                let cache_file = std::fs::File::open(&cache_path)?;
+                let cache_mmap = unsafe { memmap2::Mmap::map(&cache_file) }?;
+                return Self::from_storage(ArchiveStorage::Mmap(cache_mmap));
+            }
+        }
+
+        Self::from_storage(ArchiveStorage::Mmap(mmap))
+    }
+
+    fn from_storage(storage: ArchiveStorage) -> anyhow::Result<Self> {
+        let bytes: &[u8] = storage.as_ref();
+
+        // Zero-copy probe: detect pipeline by checking section table.
+        // SAFETY: storage outlives all plans created here.
+        let probe = unsafe { hologram::load_from_bytes_zero_copy(bytes) }
+            .map_err(|e| anyhow::anyhow!("loading archive: {e}"))?;
+        let is_pipeline = probe.sections().entries.iter().any(|e| {
+            e.kind == hologram::hologram_archive::section::SECTION_PIPELINE
+        });
+
+        if is_pipeline {
+            // Pipeline: sub-archives are embedded in wrapper weights region.
+            // Parse pipeline header from the section bytes, then use its
+            // model offsets to slice directly from mmap — no copy.
+            let weights_start = probe.header().weights_offset as usize;
+
+            let pipeline_entry = probe.sections()
+                .find(hologram::hologram_archive::section::SECTION_PIPELINE)
+                .ok_or_else(|| anyhow::anyhow!("pipeline section missing"))?;
+            let ps = pipeline_entry.offset as usize;
+            let pe = ps + pipeline_entry.size as usize;
+            let ph: hologram::hologram_archive::writer::pipeline_writer::PipelineHeader =
+                rkyv::from_bytes::<hologram::hologram_archive::writer::pipeline_writer::PipelineHeader, rkyv::rancor::Error>(&bytes[ps..pe])
+                    .map_err(|e| anyhow::anyhow!("parsing pipeline header: {e}"))?;
+
+            tracing::debug!(
+                weights_start,
+                file_len = bytes.len(),
+                n_models = ph.models.len(),
+                "pipeline header parsed"
+            );
+            for entry in &ph.models {
+                tracing::debug!(
+                    name = %entry.name,
+                    offset = entry.offset,
+                    size = entry.size,
+                    "pipeline model entry"
+                );
+            }
+
+            let find_model = |name: &str| -> anyhow::Result<&[u8]> {
+                let entry = ph.models.iter()
+                    .find(|m| m.name == name)
+                    .ok_or_else(|| anyhow::anyhow!("pipeline has no model '{name}'"))?;
+                let start = weights_start + entry.offset as usize;
+                let end = start + entry.size as usize;
+                if end > bytes.len() {
+                    anyhow::bail!("sub-archive '{name}' out of bounds: {start}..{end} > {}", bytes.len());
+                }
+                Ok(&bytes[start..end])
+            };
+
+            let prefill_slice = find_model("lm.prefill")?;
+            let decode_slice = find_model("lm.decode")?;
+
+            // Parse optional weight dedup index for shared-weight pipelines.
+            let dedup_index = probe.sections()
+                .find(hologram::hologram_archive::section::SECTION_WEIGHT_DEDUP)
+                .and_then(|entry| {
+                    let s = entry.offset as usize;
+                    let e = s + entry.size as usize;
+                    if e <= bytes.len() {
+                        hologram::hologram_archive::WeightDedupIndex::from_bytes(&bytes[s..e]).ok()
+                    } else {
+                        None
+                    }
+                });
+
+            // Zero-copy load both sub-archives.
+            // SAFETY: storage (mmap) outlives these plans.
+            let mut plan = unsafe { hologram::load_from_bytes_zero_copy(prefill_slice) }
+                .map_err(|e| anyhow::anyhow!("loading prefill plan: {e}"))?;
+            let mut decode_plan = unsafe { hologram::load_from_bytes_zero_copy(decode_slice) }
+                .map_err(|e| anyhow::anyhow!("loading decode plan: {e}"))?;
+
+            // Resolve shared weights: if sub-archives have no embedded weights,
+            // graft from the wrapper's weight region via the dedup index.
+            let wrapper_weights = probe.weights();
+            if let Some(ref idx) = dedup_index {
+                for (name, model_plan) in [("lm.prefill", &mut plan), ("lm.decode", &mut decode_plan)] {
+                    if model_plan.weights().is_empty() {
+                        if let Some(entry) = idx.find_component(name) {
+                            let w_start = entry.offset as usize;
+                            let w_end = w_start + entry.size as usize;
+                            if w_end <= wrapper_weights.len() {
+                                // SAFETY: wrapper_weights borrows from storage (mmap),
+                                // which outlives these plans.
+                                unsafe { model_plan.set_weights_borrowed(&wrapper_weights[w_start..w_end]); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let shape_ctx = read_shape_context_from_plan(&plan, prefill_slice)?;
+
+            let tape = hologram::build_tape_from_plan(&plan)
+                .map_err(|e| anyhow::anyhow!("building prefill tape: {e}"))?;
+            let decode_tape = hologram::build_tape_from_plan(&decode_plan)
+                .map_err(|e| anyhow::anyhow!("building decode tape: {e}"))?;
+
+            Ok(Self {
+                _storage: storage,
+                _sub_archive_bytes: Vec::new(),
+                plan,
+                decode_plan: Some(decode_plan),
+                _decode_bytes: None,
+                shape_ctx,
+                is_pipeline: true,
+                tape,
+                decode_tape: Some(decode_tape),
+            })
+        } else {
+            // Single-graph: the entire archive IS the model.
+            // Reuse the probe as the plan (already loaded zero-copy).
+            let shape_ctx = read_shape_context_from_plan(&probe, bytes)?;
+
+            let tape = hologram::build_tape_from_plan(&probe)
+                .map_err(|e| anyhow::anyhow!("building execution tape: {e}"))?;
+
+            Ok(Self {
+                _storage: storage,
+                _sub_archive_bytes: Vec::new(),
+                plan: probe,
+                decode_plan: None,
+                _decode_bytes: None,
+                shape_ctx,
+                is_pipeline: false,
+                tape,
+                decode_tape: None,
+            })
+        }
     }
 
     /// Execute the compiled graph with the given inputs.
@@ -1611,10 +1789,21 @@ impl HoloRunner {
         &self.plan
     }
 
-    /// Raw archive bytes (for section lookups).
+    /// Effective archive bytes (prefill sub-archive for pipeline, or full archive).
     #[must_use]
     pub fn archive_bytes(&self) -> &[u8] {
-        &self.effective_bytes
+        if self.is_pipeline {
+            &self._sub_archive_bytes
+        } else {
+            self._storage.as_ref()
+        }
+    }
+
+    /// Raw top-level archive bytes (for section lookups on pipeline wrapper).
+    /// For single-graph archives, returns the effective bytes.
+    #[must_use]
+    pub fn raw_bytes(&self) -> &[u8] {
+        self._storage.as_ref()
     }
 
     /// Whether this archive has a `ShapeContextGraph` for variable seq_len support.
@@ -1654,86 +1843,20 @@ impl HoloRunner {
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
-    /// Project shapes from runtime inputs using the embedded ShapeContextGraph.
-    ///
-    /// Returns an empty map when no shape context is available (falls back to
-    /// compiled static shapes in the executor).
-    ///
-    /// Currently unused — tape executor handles dynamic sizes via resolve_size().
-    /// Retained for future ShapeContextGraph integration (P5 TODO in SPRINT.md).
-    #[allow(dead_code)]
-    fn project_shapes(
-        &self,
-        inputs: &hologram::GraphInputs,
-        plan: &hologram::LoadedPlan,
-    ) -> std::collections::HashMap<u32, Vec<usize>> {
-        let ctx = match &self.shape_ctx {
-            Some(c) => c,
-            None => return std::collections::HashMap::new(),
-        };
-
-        // Build runtime input shapes from GraphInputs.
-        // hologram-ai's builder registers inputs at sequential node IDs,
-        // so input slot i maps to node ID i in the ShapeContextGraph seeds.
-        let sg = plan.graph();
-        let mut runtime_inputs = std::collections::HashMap::new();
-        for (i, _name) in sg.input_names.iter().enumerate() {
-            if let Some(shape) = inputs.shape(i as u32) {
-                runtime_inputs.insert(i as u32, shape.to_vec());
-            }
-        }
-
-        let mut shape_map = std::collections::HashMap::new();
-        walk_shape_context(ctx, &runtime_inputs, &std::collections::HashMap::new(), &mut shape_map);
-        // Filter out shapes with 0-sentinels — let the executor resolve those
-        // from buffer sizes instead. This prevents stale/incorrect projections
-        // from overriding the executor's more robust inference.
-        shape_map.retain(|_, shape| !shape.contains(&0) && !shape.is_empty());
-        shape_map
-    }
 }
 
 /// Extract a named sub-archive's raw bytes from a pipeline archive.
 ///
 /// Uses `LoadedPipeline` to parse the pipeline header, then extracts the
-/// sub-archive bytes from the wrapper's weights region.
-fn extract_sub_archive_bytes(pipeline_bytes: &[u8], name: &str) -> anyhow::Result<Vec<u8>> {
-    use hologram::hologram_archive::loader::pipeline::LoadedPipeline;
-
-    let pipeline = LoadedPipeline::from_bytes(pipeline_bytes)
-        .map_err(|e| anyhow::anyhow!("loading pipeline: {e}"))?;
-
-    // Find the named model and get its raw sub-archive bytes.
-    // LoadedPipeline already parsed the sub-archives; we need to find the
-    // model entry's offset/size in the wrapper weights to extract raw bytes.
-    //
-    // The pipeline header's `models` entries have (offset, size) into the
-    // wrapper weights. We can access this via the header.
-    let header = pipeline.header();
-    let entry = header.models.iter()
-        .find(|m| m.name == name)
-        .ok_or_else(|| anyhow::anyhow!("pipeline has no model named '{name}'"))?;
-
-    // Get the wrapper's weights region.
-    let wrapper = hologram::load_from_bytes(pipeline_bytes)
-        .map_err(|e| anyhow::anyhow!("loading pipeline wrapper: {e}"))?;
-    let weights = wrapper.weights();
-    let start = entry.offset as usize;
-    let end = start + entry.size as usize;
-    if end > weights.len() {
-        anyhow::bail!("sub-archive '{name}' out of bounds: {start}..{end} > {}", weights.len());
-    }
-
-    Ok(weights[start..end].to_vec())
-}
-
-/// Read the [`ShapeContextGraph`] embedded in a compiled `.holo` archive.
+/// Read the [`ShapeContextGraph`] from an already-loaded plan + raw archive bytes.
 ///
-/// Returns `None` if the archive was compiled without a shape context section
-/// (older archives or models compiled with shape context disabled).
-pub fn read_shape_context_from_archive(archive_bytes: &[u8]) -> anyhow::Result<Option<ShapeContextGraph>> {
+/// Avoids re-deserializing the archive — uses the plan's section table to
+/// find the shape context section, then reads it from the raw bytes.
+fn read_shape_context_from_plan(
+    plan: &hologram::LoadedPlan,
+    archive_bytes: &[u8],
+) -> anyhow::Result<Option<ShapeContextGraph>> {
     use hologram_ai_common::exec_context::{ExecContext, SECTION_SHAPE_CONTEXT};
-    let plan = hologram::load_from_bytes(archive_bytes)?;
     let entry = match plan.sections().find(SECTION_SHAPE_CONTEXT) {
         Some(e) => e,
         None => return Ok(None),
@@ -1752,33 +1875,31 @@ pub fn read_shape_context_from_archive(archive_bytes: &[u8]) -> anyhow::Result<O
     Ok(Some(ctx))
 }
 
-/// Execute a compiled archive with shape hints projected from its embedded `ShapeContextGraph`.
+/// Read the [`ShapeContextGraph`] embedded in a compiled `.holo` archive.
 ///
-/// This is the correct way to run archives produced by hologram-ai when the
-/// input sequence length or batch size differs from the compile-time value.
-/// The embedded `ShapeContextGraph` projects shapes for all nodes from the
-/// actual runtime input shapes, eliminating shape mismatch errors at seq>1.
-///
-/// Input node shapes are read from `inputs.shape(i)` for each input slot `i`.
-/// Since hologram-ai's builder always registers inputs at indices 0..n_inputs,
-/// the input slot index equals the graph node's `NodeId.index`.
+/// Returns `None` if the archive was compiled without a shape context section
+/// (older archives or models compiled with shape context disabled).
+pub fn read_shape_context_from_archive(archive_bytes: &[u8]) -> anyhow::Result<Option<ShapeContextGraph>> {
+    // SAFETY: plan is dropped at the end of this function; archive_bytes outlives it.
+    let plan = unsafe { hologram::load_from_bytes_zero_copy(archive_bytes) }?;
+    read_shape_context_from_plan(&plan, archive_bytes)
+}
+
 /// Execute a compiled archive with variable-length shape support.
 ///
-/// Uses the legacy `execute_plan` path because `FloatOp::MatMul { m, k, n }`
-/// bakes dimensions at compile time. The tape executor cannot override these
-/// parameters at runtime, so variable seq_len produces wrong output sizes.
-/// This will be resolved when hologram base adds dynamic-shape-aware tape
-/// execution (hologram issue: variable-length tape support).
+/// Builds a one-shot tape and executes via the EnumTape path.
+/// Dynamic sizes are resolved at execution time via `resolve_size()`
+/// and `infer_matmul_k()` in the tape executor.
 ///
-/// For fixed-shape execution, prefer [`HoloRunner::execute`] which uses the
-/// tape executor (17x faster).
-#[allow(deprecated)]
+/// For repeated execution, prefer [`HoloRunner`] which builds the tape once.
 pub fn run_with_shape_context(
     archive: &HoloArchive,
     inputs: &hologram::GraphInputs,
 ) -> anyhow::Result<hologram::GraphOutputs> {
     let plan = hologram::load_from_bytes(&archive.bytes)?;
-    hologram::execute_plan(&plan, inputs)
+    let tape = hologram::build_tape_from_plan(&plan)
+        .map_err(|e| anyhow::anyhow!("building execution tape: {e}"))?;
+    hologram::execute_tape(&tape, &plan, inputs)
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
@@ -1791,7 +1912,7 @@ pub fn rebuild_archive_with_section(
     // Filter out the section kind we're replacing.
     let new_kind = section.section_kind();
     let mut writer = hologram::HoloWriter::new()
-        .set_graph_bytes(unpacked.graph_bytes)
+        .set_graph_bytes_uncompressed(unpacked.graph_bytes)
         .set_weights(unpacked.weight_bytes);
 
     for (kind, bytes) in unpacked.sections {

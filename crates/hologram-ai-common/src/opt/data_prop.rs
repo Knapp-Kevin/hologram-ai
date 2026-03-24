@@ -56,7 +56,7 @@ impl Pass for DataPropagation {
         let mut computed_tids: std::collections::HashSet<TensorId> = std::collections::HashSet::new();
 
         // Forward pass in topological order.
-        for &nid in &order {
+        for &nid in order.iter() {
             let idx = match node_idx.get(&nid) {
                 Some(&i) => i,
                 None => continue,
@@ -113,7 +113,7 @@ impl Pass for DataPropagation {
         // the data tensor (Q=32, K/V=4 for head count). We must resolve per-consumer
         // and store the result in each Reshape's OUTPUT tensor, not mutate the shared
         // shape tensor.
-        for &nid in &order {
+        for &nid in order.iter() {
             let idx = match node_idx.get(&nid) {
                 Some(&i) => i,
                 None => continue,

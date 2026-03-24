@@ -17,7 +17,6 @@ hologram-ai-common.workspace = true
 hologram-ai-quant.workspace  = true
 hologram-ai-onnx.workspace   = true
 hologram-ai-gguf.workspace   = true
-hologram-ai-ggml.workspace      = true
 hologram-ai-tokenizer.workspace = true
 # hologram with compiler feature — needed for hologram::compile()
 # default features already include compiler; workspace dep points to local path
@@ -27,7 +26,6 @@ bytemuck.workspace     = true
 anyhow.workspace       = true
 thiserror.workspace    = true
 futures.workspace      = true
-async-stream.workspace = true
 clap.workspace         = true
 tracing.workspace      = true
 serde.workspace        = true
@@ -41,7 +39,8 @@ tempfile.workspace   = true
 sha2.workspace       = true
 dirs.workspace       = true
 which.workspace      = true
-tokio-util.workspace = true
+memmap2.workspace    = true
+rkyv.workspace       = true
 
 [dev-dependencies]
 # Provides onnx_builder (pure Rust, no ORT) for mini fixture tests.
