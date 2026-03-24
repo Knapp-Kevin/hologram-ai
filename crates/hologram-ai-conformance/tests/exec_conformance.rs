@@ -2438,6 +2438,154 @@ fn tinyllama_logit_conformance() {
     );
 }
 
+/// Layer 0 sub-model conformance: compare hologram vs ORT for just the
+/// first transformer layer. Helps binary-search the divergent layer.
+///
+/// Run:
+///   ORT_STRATEGY=system cargo test -p hologram-ai-conformance --features conformance \
+///     -- tinyllama_layer0_conformance --nocapture --ignored
+#[test]
+#[ignore]
+fn tinyllama_layer0_conformance() {
+    use hologram_ai_conformance::ort_runner::runner::{run_onnx_file_typed, OrtInputTyped};
+
+    let model_path = std::path::PathBuf::from("/tmp/tinyllama_layer0.onnx");
+    if !model_path.exists() {
+        eprintln!("SKIP: run `python3 scripts/ort_intermediates.py 5` first, then extract layer 0");
+        return;
+    }
+
+    let seq = 5usize;
+    let input_ids: Vec<i64> = (1..=seq as i64).collect();
+    let attention_mask: Vec<i64> = vec![1; seq];
+
+    // ORT reference
+    let ort_outputs = run_onnx_file_typed(
+        &model_path,
+        vec![
+            OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, seq], data: input_ids.clone() },
+            OrtInputTyped::I64 { name: "attention_mask".into(), shape: vec![1, seq], data: attention_mask.clone() },
+        ],
+    ).expect("ORT failed");
+    let ort_out = &ort_outputs[0].data;
+    eprintln!("ORT layer 0: {} floats, range=[{:.6}, {:.6}]",
+        ort_out.len(),
+        ort_out.iter().cloned().fold(f32::INFINITY, f32::min),
+        ort_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+
+    // Hologram
+    let compiler = ModelCompiler {
+        force_single_graph: true,
+        ..Default::default()
+    };
+    let archive = compiler
+        .compile(ModelSource::OnnxPath(model_path))
+        .expect("compilation failed");
+
+    let plan = hologram::load_from_bytes(&archive.bytes).expect("load");
+    let tape = hologram::build_tape_from_plan(&plan).expect("tape");
+
+    let position_ids: Vec<i64> = (0..seq as i64).collect();
+    let mut inputs = hologram::GraphInputs::new();
+    inputs.set_with_shape(0, bytemuck::cast_slice(&input_ids).to_vec(), vec![1, seq]);
+    inputs.set_with_shape(1, bytemuck::cast_slice(&attention_mask).to_vec(), vec![1, seq]);
+    inputs.set_with_shape(2, bytemuck::cast_slice(&position_ids).to_vec(), vec![seq]);
+
+    // Use KV state (model has KvWrite ops from attention fusion)
+    let mut kv = hologram::KvCacheState::new(1, 4, 64, seq + 8);
+    let holo_outputs = hologram::execute_tape_with_kv(&tape, &plan, &inputs, &mut kv)
+        .expect("hologram execution failed");
+    let (_, holo_bytes) = holo_outputs.get(0).expect("no output");
+    let holo_out: Vec<f32> = holo_bytes.chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().expect("4")))
+        .collect();
+
+    eprintln!("Holo layer 0: {} floats, range=[{:.6}, {:.6}]",
+        holo_out.len(),
+        holo_out.iter().cloned().fold(f32::INFINITY, f32::min),
+        holo_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+
+    // Compare at position seq-1
+    let hidden = 2048;
+    let target = seq - 1;
+    let ort_slice = &ort_out[target * hidden..(target + 1) * hidden];
+    let holo_slice = if holo_out.len() >= (target + 1) * hidden {
+        &holo_out[target * hidden..(target + 1) * hidden]
+    } else {
+        eprintln!("Hologram output too small: {} < {}", holo_out.len(), (target + 1) * hidden);
+        &holo_out[..hidden.min(holo_out.len())]
+    };
+
+    // Cosine similarity
+    let dot: f64 = ort_slice.iter().zip(holo_slice.iter())
+        .map(|(a, b)| *a as f64 * *b as f64).sum();
+    let n_ort: f64 = ort_slice.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+    let n_holo: f64 = holo_slice.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+    let cosine = if n_ort > 0.0 && n_holo > 0.0 { dot / (n_ort * n_holo) } else { 0.0 };
+    eprintln!("Layer 0 cosine similarity: {cosine:.6}");
+
+    // Max abs diff
+    let max_diff: f32 = ort_slice.iter().zip(holo_slice.iter())
+        .map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    eprintln!("Layer 0 max abs diff: {max_diff:.6}");
+
+    assert!(cosine > 0.99, "Layer 0 diverges: cosine={cosine:.6}");
+}
+
+/// Embedding conformance: verify Gather/Embed produces identical output to ORT.
+#[test]
+#[ignore]
+fn tinyllama_embedding_conformance() {
+    use hologram_ai_conformance::ort_runner::runner::{run_onnx_file_typed, OrtInputTyped};
+
+    let model_path = std::path::PathBuf::from("/tmp/tinyllama_embed_only.onnx");
+    if !model_path.exists() {
+        eprintln!("SKIP: extract embedding model first");
+        return;
+    }
+
+    let seq = 5usize;
+    let input_ids: Vec<i64> = (1..=seq as i64).collect();
+
+    let ort_outputs = run_onnx_file_typed(
+        &model_path,
+        vec![OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, seq], data: input_ids.clone() }],
+    ).expect("ORT failed");
+    let ort_out = &ort_outputs[0].data;
+
+    let compiler = ModelCompiler::default();
+    let archive = compiler
+        .compile(ModelSource::OnnxPath(model_path))
+        .expect("compilation failed");
+
+    let plan = hologram::load_from_bytes(&archive.bytes).expect("load");
+    let tape = hologram::build_tape_from_plan(&plan).expect("tape");
+
+    let mut inputs = hologram::GraphInputs::new();
+    inputs.set_with_shape(0, bytemuck::cast_slice(&input_ids).to_vec(), vec![1, seq]);
+
+    let holo_outputs = hologram::execute_tape(&tape, &plan, &inputs)
+        .expect("execution failed");
+    let (_, holo_bytes) = holo_outputs.get(0).expect("no output");
+    let holo_out: Vec<f32> = holo_bytes.chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().expect("4")))
+        .collect();
+
+    eprintln!("ORT  embed: {} floats, range=[{:.6}, {:.6}]", ort_out.len(),
+        ort_out.iter().cloned().fold(f32::INFINITY, f32::min),
+        ort_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+    eprintln!("Holo embed: {} floats, range=[{:.6}, {:.6}]", holo_out.len(),
+        holo_out.iter().cloned().fold(f32::INFINITY, f32::min),
+        holo_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+
+    let min_len = ort_out.len().min(holo_out.len());
+    let max_diff: f32 = ort_out[..min_len].iter().zip(holo_out[..min_len].iter())
+        .map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    eprintln!("Max abs diff: {max_diff:.8}");
+
+    assert!(max_diff < 1e-4, "Embedding diverges: max_diff={max_diff}");
+}
+
 fn workspace_path(rel: &str) -> std::path::PathBuf {
     let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop(); // crates/hologram-ai-conformance → crates/
