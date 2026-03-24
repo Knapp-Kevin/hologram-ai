@@ -151,8 +151,10 @@ zero runtime code. All kernels belong in hologram base crate.
      Not caused by hologram-ai compiler changes (verified by reverting all
      changes). Root cause is in hologram base's float dispatch — likely
      introduced in Sprint 21 norm/attention refactoring.
-     **Next step**: add intermediate tensor capture to tape executor and
-     run node-by-node comparison against ORT to find first divergent op.
+     **Root cause narrowed**: embedding and RmsNorm match ORT exactly.
+     Layer 0 diverges (cosine=0.943). Bug is in the fused attention kernel
+     (`dispatch_attention` in hologram base) — QKV projection + RoPE + SDPA
+     + output projection. Conformance tests in exec_conformance.rs.
 
 ---
 

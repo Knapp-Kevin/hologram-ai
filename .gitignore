@@ -12,3 +12,5 @@ output/
 specs/scratch.md
 .lexicon/
 !crates/hologram-ai-conformance/fixtures/*
+# Generated TinyLlama probe fixtures (250MB+ each)
+crates/hologram-ai-conformance/fixtures/tinyllama_*.onnx

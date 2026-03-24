@@ -2449,9 +2449,9 @@ fn tinyllama_logit_conformance() {
 fn tinyllama_layer0_conformance() {
     use hologram_ai_conformance::ort_runner::runner::{run_onnx_file_typed, OrtInputTyped};
 
-    let model_path = std::path::PathBuf::from("/tmp/tinyllama_layer0.onnx");
+    let model_path = workspace_path("crates/hologram-ai-conformance/fixtures/tinyllama_layer0.onnx");
     if !model_path.exists() {
-        eprintln!("SKIP: run `python3 scripts/ort_intermediates.py 5` first, then extract layer 0");
+        eprintln!("SKIP: run python3 scripts/extract_tinyllama_probes.py first");
         return;
     }
 
@@ -2532,15 +2532,69 @@ fn tinyllama_layer0_conformance() {
     assert!(cosine > 0.99, "Layer 0 diverges: cosine={cosine:.6}");
 }
 
+/// Post-RmsNorm conformance: verify first input_layernorm matches ORT.
+/// If this passes, the divergence is in attention/RoPE/FFN.
+#[test]
+#[ignore]
+fn tinyllama_rmsnorm0_conformance() {
+    use hologram_ai_conformance::ort_runner::runner::{run_onnx_file_typed, OrtInputTyped};
+
+    let model_path = workspace_path("crates/hologram-ai-conformance/fixtures/tinyllama_norm0.onnx");
+    if !model_path.exists() {
+        eprintln!("SKIP: run python3 scripts/extract_tinyllama_probes.py first");
+        return;
+    }
+
+    let seq = 5usize;
+    let input_ids: Vec<i64> = (1..=seq as i64).collect();
+
+    let ort_outputs = run_onnx_file_typed(
+        &model_path,
+        vec![OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, seq], data: input_ids.clone() }],
+    ).expect("ORT failed");
+    let ort_out = &ort_outputs[0].data;
+
+    let compiler = ModelCompiler::default();
+    let archive = compiler
+        .compile(ModelSource::OnnxPath(model_path))
+        .expect("compilation failed");
+    let plan = hologram::load_from_bytes(&archive.bytes).expect("load");
+    let tape = hologram::build_tape_from_plan(&plan).expect("tape");
+
+    let mut inputs = hologram::GraphInputs::new();
+    inputs.set_with_shape(0, bytemuck::cast_slice(&input_ids).to_vec(), vec![1, seq]);
+
+    let holo_outputs = hologram::execute_tape(&tape, &plan, &inputs)
+        .expect("execution failed");
+    let (_, holo_bytes) = holo_outputs.get(0).expect("no output");
+    let holo_out: Vec<f32> = holo_bytes.chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().expect("4")))
+        .collect();
+
+    eprintln!("ORT  norm0: {} floats, range=[{:.6}, {:.6}]", ort_out.len(),
+        ort_out.iter().cloned().fold(f32::INFINITY, f32::min),
+        ort_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+    eprintln!("Holo norm0: {} floats, range=[{:.6}, {:.6}]", holo_out.len(),
+        holo_out.iter().cloned().fold(f32::INFINITY, f32::min),
+        holo_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+
+    let min_len = ort_out.len().min(holo_out.len());
+    let max_diff: f32 = ort_out[..min_len].iter().zip(holo_out[..min_len].iter())
+        .map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    eprintln!("RmsNorm0 max abs diff: {max_diff:.8}");
+
+    assert!(max_diff < 1e-3, "RmsNorm0 diverges: max_diff={max_diff}");
+}
+
 /// Embedding conformance: verify Gather/Embed produces identical output to ORT.
 #[test]
 #[ignore]
 fn tinyllama_embedding_conformance() {
     use hologram_ai_conformance::ort_runner::runner::{run_onnx_file_typed, OrtInputTyped};
 
-    let model_path = std::path::PathBuf::from("/tmp/tinyllama_embed_only.onnx");
+    let model_path = workspace_path("crates/hologram-ai-conformance/fixtures/tinyllama_embed.onnx");
     if !model_path.exists() {
-        eprintln!("SKIP: extract embedding model first");
+        eprintln!("SKIP: run python3 scripts/extract_tinyllama_probes.py first");
         return;
     }
 
