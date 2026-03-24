@@ -148,9 +148,9 @@ zero runtime code. All kernels belong in hologram base crate.
 ## Medium Term: Multi-model support
 
 ### Any ONNX model
-- [x] Test with ResNet-50 (vision, no attention) — **compilation works** (225 nodes
-  after BatchNorm decomposition + constant folding). Conv2d conformance tests pass
-  (single Conv2d, stride variants, Conv+Relu+GAP+Flatten+Gemm mini classifier).
+- [x] Test with ResNet-50 (vision, no attention) — **compiles and executes**
+  (225 nodes after BatchNorm decomposition + constant folding, [1, 1000] output,
+  all finite values). Conv2d conformance tests pass.
 - [x] Test with BERT (encoder-only, bidirectional attention) — **compiles and executes**
   (507MB ONNX, bert-base-uncased, seq=32). Non-causal attention detected correctly,
   KV cache skipped, single-graph path used. Shape→Gather→Concat chains folded
