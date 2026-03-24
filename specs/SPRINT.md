@@ -125,8 +125,10 @@ zero runtime code. All kernels belong in hologram base crate.
   (removed forced `compress_graph()` / `compress_weights()`)
 - [x] `topo_order()` returns `Rc<Vec<NodeId>>` — eliminates clone on every call
   (was cloned 50+ times per compilation across all opt passes)
-- [ ] Zero-copy weight pipeline — `&[u8]` borrowing through pipeline,
-  `build_with_shared_weights()` for 50% archive size reduction
+- [x] Eliminate weight clone in LLM pipeline — decode component passes `None`
+  weights, registered under shared group via `WeightStore` group-reuse path.
+  Same for multi-ONNX: removed `weight_cache` HashMap, non-first-in-group
+  components pass `None`.
 - [ ] Clone elimination — remaining `.clone()` calls via move semantics, `Cow`,
   shape reference folding
 - [x] Path compression in `constant_fold.rs` remap chains — O(α(n)) amortized

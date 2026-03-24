@@ -514,6 +514,10 @@ impl ModelCompiler {
 
         use hologram_ai_common::sections::meta::{ComponentConnection, ComponentRole};
 
+        // Both components share weight_group="lm". Prefill carries the weight
+        // blob; decode passes None — compile_components registers the decode
+        // component under the same group so the dedup index maps both to the
+        // shared blob. This avoids cloning the multi-GB weight data.
         self.compile_components(
             vec![
                 ComponentSpec {
@@ -524,7 +528,7 @@ impl ModelCompiler {
                     graph: ai_graph,
                     mem_plan,
                     phase: LowerPhase::Prefill,
-                    weights: extra_weights.clone(),
+                    weights: extra_weights,
                 },
                 ComponentSpec {
                     name: "lm.decode".into(),
@@ -534,7 +538,7 @@ impl ModelCompiler {
                     graph: &decode_graph,
                     mem_plan,
                     phase: LowerPhase::Decode,
-                    weights: extra_weights,
+                    weights: None,
                 },
             ],
             vec![ComponentConnection {
@@ -593,6 +597,14 @@ impl ModelCompiler {
             if let Some(ref w) = spec.weights {
                 total_weight_bytes_before += w.len() as u64;
                 weight_store.insert(&spec.name, &spec.weight_group, w);
+            } else if weight_store.contains_group(&spec.weight_group) {
+                // Component shares a weight group already registered by a
+                // sibling. Register this component name under the same group
+                // so the dedup index maps it to the shared blob at load time.
+                // WeightStore's group-reuse fast path handles this: the 1-byte
+                // sentinel data is ignored — the group lookup returns the
+                // existing blob immediately.
+                weight_store.insert(&spec.name, &spec.weight_group, &[0]);
             }
             // Sub-archives are graph-only (no embedded weights). Weights are
             // stored once in the shared blob via build_with_shared_weights.
@@ -741,24 +753,19 @@ impl ModelCompiler {
 
         // Collect weights and build ComponentSpecs.
         let mut specs: Vec<ComponentSpec<'_>> = Vec::with_capacity(graphs.len());
-        let mut weight_cache: std::collections::HashMap<String, Vec<u8>> =
-            std::collections::HashMap::new();
 
         for (i, (name, role, weight_group, idx)) in spec_data.iter().enumerate() {
             let graph = &graphs[i];
             let is_first_in_group = weight_group_first.get(weight_group) == Some(idx);
 
+            // Only the first component in a weight group collects weights.
+            // Subsequent components pass None — compile_components registers
+            // them under the same group via WeightStore's group-reuse path.
             let weights = if is_first_in_group {
                 let w = collect_weight_bytes(graph)?;
-                if !w.is_empty() {
-                    weight_cache.insert(weight_group.clone(), w.clone());
-                    Some(w)
-                } else {
-                    None
-                }
+                if !w.is_empty() { Some(w) } else { None }
             } else {
-                // Reuse weights from the first component in this group.
-                weight_cache.get(weight_group).cloned()
+                None
             };
 
             specs.push(ComponentSpec {
@@ -773,7 +780,7 @@ impl ModelCompiler {
             });
         }
 
-        let total_weight_bytes: u64 = weight_cache.values().map(|w| w.len() as u64).sum();
+        let total_weight_bytes: u64 = specs.iter().filter_map(|s| s.weights.as_ref()).map(|w| w.len() as u64).sum();
         let total_nodes: usize = graphs.iter().map(|g| g.nodes.len()).sum();
 
         let archive_bytes = self.compile_components(specs, connections)?;
