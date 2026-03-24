@@ -7,6 +7,7 @@
 
 use anyhow::Context as _;
 use clap::Args;
+use tracing::{info, warn};
 use hologram::hologram_archive::section::model_meta::{ModelMetaSection, SECTION_MODEL_META};
 use hologram::hologram_archive::section::tokenizer::{
     MiniBpeEncoder, TokenizerSection, SECTION_TOKENIZER,
@@ -46,16 +47,22 @@ pub struct RunArgs {
     /// Print per-step logit diagnostics.
     #[arg(long)]
     pub verbose: bool,
+    /// Directory for decompressed archive cache. Compressed archives are
+    /// decompressed once and cached here for instant mmap loading.
+    /// Default: from config file, or next to the archive file.
+    #[arg(long, value_name = "DIR")]
+    pub cache_dir: Option<PathBuf>,
+    /// Path to a hologram config file (TOML). Overrides the default
+    /// config search (~/.hologram/config.toml, .hologram/config.toml).
+    #[arg(long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────
 
 /// Execute the run command using shape-aware inference.
 pub fn execute(args: RunArgs) -> anyhow::Result<()> {
-    let archive_bytes = std::fs::read(&args.file)
-        .with_context(|| format!("reading archive {}", args.file.display()))?;
-
-    let runner = HoloRunner::from_bytes(archive_bytes.clone())
+    let runner = HoloRunner::from_path(&args.file, args.cache_dir.as_deref(), args.config.as_deref())
         .with_context(|| format!("loading archive {}", args.file.display()))?;
 
     // Load optional metadata sections.
@@ -63,9 +70,9 @@ pub fn execute(args: RunArgs) -> anyhow::Result<()> {
     // then the raw archive bytes (pipeline wrapper where CLI embeds sections).
     let effective = runner.archive_bytes();
     let tokenizer = load_section::<TokenizerSection>(effective, runner.plan(), SECTION_TOKENIZER)
-        .or_else(|| load_section_from_raw::<TokenizerSection>(&archive_bytes, SECTION_TOKENIZER));
+        .or_else(|| load_section_from_raw::<TokenizerSection>(runner.raw_bytes(), SECTION_TOKENIZER));
     let model_meta = load_section::<ModelMetaSection>(effective, runner.plan(), SECTION_MODEL_META)
-        .or_else(|| load_section_from_raw::<ModelMetaSection>(&archive_bytes, SECTION_MODEL_META));
+        .or_else(|| load_section_from_raw::<ModelMetaSection>(runner.raw_bytes(), SECTION_MODEL_META));
 
     print_model_info(runner.plan(), &model_meta);
 
@@ -109,7 +116,7 @@ pub fn execute(args: RunArgs) -> anyhow::Result<()> {
         } else {
             print_typed_outputs(&outputs, runner.plan());
         }
-        eprintln!(
+        info!(
             "executed in {:.3}ms (weights {})",
             elapsed.as_secs_f64() * 1000.0,
             format_bytes(runner.plan().weights().len() as u64),
@@ -146,7 +153,7 @@ enum SeqMode {
 fn resolve_seq_mode(runner: &HoloRunner) -> SeqMode {
     let max_seq = load_meta_seq_len(runner).unwrap_or(2048);
 
-    // Variable mode: the hologram executor now resolves baked FloatOp params
+    // Variable mode: the hologram executor resolves baked FloatOp params
     // (size in Softmax/RmsNorm/etc.) from runtime buffer sizes via resolve_size(),
     // and MatMul re-derives k via infer_matmul_k(). No padding needed.
     SeqMode::Variable { max_seq }
@@ -181,17 +188,17 @@ fn run_generation(
     let prompt_len = token_ids.len();
 
     // Startup diagnostics.
-    eprintln!(
+    info!(
         "prompt: {} tokens (vocab_size={}, input_dtype={})",
         prompt_len,
         encoder.vocab_size(),
         input_dtype.name(),
     );
     match &seq_mode {
-        SeqMode::FixedPad(n) => eprintln!("seq_mode: fixed pad to {n}"),
-        SeqMode::Variable { max_seq } => eprintln!("seq_mode: variable (max {max_seq})"),
+        SeqMode::FixedPad(n) => info!("seq_mode: fixed pad to {n}"),
+        SeqMode::Variable { max_seq } => info!("seq_mode: variable (max {max_seq})"),
     }
-    eprintln!(
+    info!(
         "sampling: temperature={:.2}, top_k={}, rep_penalty=1.3 (generated tokens only)",
         config.temperature,
         config.top_k,
@@ -229,15 +236,13 @@ fn run_generation(
     let mut kv_state: Option<hologram::KvCacheState> = None;
     let use_kv_cache = runner.is_pipeline();
     if use_kv_cache {
-        eprintln!("kv_cache: enabled (pipeline archive)");
+        info!("kv_cache: enabled (pipeline archive)");
     }
 
+    let mut decode_start: Option<std::time::Instant> = None;
+
     for step in 0..config.max_tokens {
-        // Build the effective token sequence for this step.
         // With KV cache: step 0 = full prompt (prefill), step 1+ = single token (decode).
-        // The executor handles RoPE position offset and KV expansion internally.
-        // With KV cache: step 0 = full prompt (prefill), step 1+ = single token (decode).
-        // The executor handles RoPE position offset and KV expansion internally.
         let (effective_tokens, actual_len) = if use_kv_cache && step > 0 {
             let last = *token_ids.last().expect("no tokens");
             (vec![last], 1)
@@ -297,7 +302,7 @@ fn run_generation(
                 let n_layers = meta.n_layers;
                 let n_kv_heads = meta.n_kv_heads;
                 let head_dim = meta.head_dim;
-                eprintln!(
+                info!(
                     "kv_cache: n_layers={n_layers} n_kv_heads={n_kv_heads} head_dim={head_dim} max_seq={max_seq}"
                 );
                 kv_state = Some(hologram::KvCacheState::new(
@@ -340,7 +345,7 @@ fn run_generation(
         let next_token = match next_token {
             Some(id) => id,
             None => {
-                eprintln!("\n[no logits in output]");
+                warn!("no logits in output");
                 break;
             }
         };
@@ -359,21 +364,24 @@ fn run_generation(
         std::io::stdout().flush().ok();
 
         if step == 0 {
-            let prefill_ms = start.elapsed().as_secs_f64() * 1000.0;
-            eprintln!("\n[prefill {prefill_ms:.0}ms]");
+            let ttft_ms = start.elapsed().as_secs_f64() * 1000.0;
+            info!("\n[TTFT {ttft_ms:.0}ms]");
+            decode_start = Some(std::time::Instant::now());
         }
     }
 
-    let elapsed = start.elapsed();
+    let _elapsed = start.elapsed();
     let generated = token_ids.len() - prompt_len;
-    let tok_per_sec = if elapsed.as_secs_f64() > 0.0 {
-        generated as f64 / elapsed.as_secs_f64()
+    let decode_elapsed = decode_start.map(|d| d.elapsed().as_secs_f64()).unwrap_or(0.0);
+    let decode_tokens = generated.saturating_sub(1); // first token is from prefill
+    let decode_tok_s = if decode_elapsed > 0.0 && decode_tokens > 0 {
+        decode_tokens as f64 / decode_elapsed
     } else {
         0.0
     };
-    eprintln!(
-        "\n[{generated} tokens in {:.1}s ({tok_per_sec:.1} tok/s), weights {}]",
-        elapsed.as_secs_f64(),
+    info!(
+        "\n[{generated} tokens | TTFT {:.0}ms | decode {decode_tokens} tok in {decode_elapsed:.2}s ({decode_tok_s:.1} tok/s) | weights {}]",
+        start.elapsed().as_secs_f64() * 1000.0 - decode_elapsed * 1000.0,
         format_bytes(runner.plan().weights().len() as u64),
     );
     Ok(())
@@ -567,7 +575,7 @@ fn print_logit_diagnostics(
     let max = floats.iter().copied().reduce(f32::max).unwrap_or(0.0);
     let mean = floats.iter().sum::<f32>() / floats.len() as f32;
 
-    eprintln!(
+    info!(
         "[logit-debug] step={step} pos={target_pos} vocab={vocab_size} \
          total_bytes={} nan={nan_count} inf={inf_count} zero={zero_count} \
          min={min:.4} max={max:.4} mean={mean:.6}",
@@ -578,7 +586,7 @@ fn print_logit_diagnostics(
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     for (i, (tok_id, val)) in indexed.iter().take(5).enumerate() {
         let tok_str = tok_section.id_to_token(*tok_id as u32).unwrap_or("<unk>");
-        eprintln!(
+        info!(
             "[logit-debug] top-{}: id={tok_id} val={val:.6} \"{tok_str}\"",
             i + 1
         );
@@ -662,7 +670,7 @@ fn load_file_inputs(raw: &[String], inputs: &mut GraphInputs) -> anyhow::Result<
             .map_err(|_| anyhow::anyhow!("invalid slot {idx_str:?} in {s:?}"))?;
         let bytes = std::fs::read(path_str)
             .with_context(|| format!("reading input file {path_str:?}"))?;
-        eprintln!("loaded slot {idx} from {path_str:?} ({} bytes)", bytes.len());
+        info!("loaded slot {idx} from {path_str:?} ({} bytes)", bytes.len());
         inputs.set(idx, bytes);
     }
     Ok(())
@@ -688,19 +696,19 @@ fn print_model_info(
     model_meta: &Option<ModelMetaSection>,
 ) {
     if let Some(meta) = model_meta {
-        eprintln!(
+        info!(
             "model: {:?} arch={} seq_len={} prompt={}",
             meta.kind, meta.arch, meta.max_seq_len, meta.supports_prompt,
         );
         if !meta.description.is_empty() {
-            eprintln!("  {}", meta.description);
+            info!("  {}", meta.description);
         }
     }
 
     let lh = match plan.layer_header() {
         Some(lh) => lh,
         None => {
-            eprintln!("no layer header; using direct graph execution");
+            warn!("no layer header; using direct graph execution");
             return;
         }
     };
@@ -715,7 +723,7 @@ fn print_model_info(
             .iter()
             .map(|p| format!("{}:{:?}:{}", p.name, p.shape, p.dtype.name()))
             .collect();
-        eprintln!(
+        info!(
             "layer {:?}: {:?} [{}] -> [{}]",
             layer.name,
             layer.entrypoint,
@@ -729,14 +737,14 @@ fn print_input_help(plan: &hologram::LoadedPlan) {
     let lh = match plan.layer_header() {
         Some(lh) => lh,
         None => {
-            eprintln!("inputs (by graph name):");
+            info!("inputs (by graph name):");
             for (i, name) in plan.graph().input_names.iter().enumerate() {
-                eprintln!("  slot {i}: \"{name}\"");
+                info!("  slot {i}: \"{name}\"");
             }
             return;
         }
     };
-    eprintln!("expected inputs:");
+    info!("expected inputs:");
     for layer in &lh.layers {
         for (i, port) in layer.inputs.iter().enumerate() {
             let elem_bytes = port.dtype.byte_size();
@@ -746,7 +754,7 @@ fn print_input_help(plan: &hologram::LoadedPlan) {
             } else {
                 "dynamic".into()
             };
-            eprintln!(
+            info!(
                 "  slot {i} '{}': shape {:?} dtype {} ({})",
                 port.name,
                 port.shape,

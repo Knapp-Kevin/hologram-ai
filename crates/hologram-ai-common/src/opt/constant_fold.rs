@@ -30,14 +30,15 @@ impl Pass for ConstantFolding {
                     if let (Some(&in_tid), Some(&out_tid)) =
                         (node.inputs.first(), node.outputs.first())
                     {
-                        remap.insert(out_tid, resolve(&remap, in_tid));
+                        let target = resolve(&mut remap, in_tid);
+                        remap.insert(out_tid, target);
                         removed_node_ids.insert(node.id);
                     }
                 }
                 // Reshape of a constant: output → input (shape is metadata-only).
                 AiOp::Reshape { .. } => {
                     if let Some(&in_tid) = node.inputs.first() {
-                        let resolved = resolve(&remap, in_tid);
+                        let resolved = resolve(&mut remap, in_tid);
                         if param_tids.contains(&resolved) {
                             if let Some(&out_tid) = node.outputs.first() {
                                 remap.insert(out_tid, resolved);
@@ -72,19 +73,19 @@ impl Pass for ConstantFolding {
         // Apply remaps to remaining node inputs/outputs.
         for node in &mut graph.nodes {
             for tid in &mut node.inputs {
-                *tid = resolve(&remap, *tid);
+                *tid = resolve(&mut remap, *tid);
             }
             for tid in &mut node.outputs {
-                *tid = resolve(&remap, *tid);
+                *tid = resolve(&mut remap, *tid);
             }
         }
 
         // Apply remaps to graph-level inputs/outputs.
         for tid in &mut graph.inputs {
-            *tid = resolve(&remap, *tid);
+            *tid = resolve(&mut remap, *tid);
         }
         for tid in &mut graph.outputs {
-            *tid = resolve(&remap, *tid);
+            *tid = resolve(&mut remap, *tid);
         }
 
         // Remove dead constants (params not referenced by any remaining node).
@@ -102,15 +103,31 @@ impl Pass for ConstantFolding {
     }
 }
 
-/// Resolve a tensor ID through the remap chain.
-fn resolve(remap: &HashMap<TensorId, TensorId>, mut tid: TensorId) -> TensorId {
-    while let Some(&target) = remap.get(&tid) {
-        if target == tid {
+/// Resolve a tensor ID through the remap chain with path compression.
+///
+/// After resolution, all intermediate entries in the chain are flattened
+/// to point directly to the root — subsequent lookups for any element
+/// in the same chain are O(1).
+fn resolve(remap: &mut HashMap<TensorId, TensorId>, tid: TensorId) -> TensorId {
+    // Find the root.
+    let mut root = tid;
+    while let Some(&target) = remap.get(&root) {
+        if target == root {
             break;
         }
-        tid = target;
+        root = target;
     }
-    tid
+    // Path compression: flatten all intermediate entries to point to root.
+    let mut current = tid;
+    while current != root {
+        if let Some(&next) = remap.get(&current) {
+            remap.insert(current, root);
+            current = next;
+        } else {
+            break;
+        }
+    }
+    root
 }
 
 #[cfg(test)]

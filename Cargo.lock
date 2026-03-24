@@ -749,6 +749,7 @@ dependencies = [
  "hologram",
  "hologram-ai-quant",
  "indexmap",
+ "rayon",
  "rkyv",
  "serde",
  "smallvec",

@@ -17,4 +17,5 @@ serde.workspace     = true
 thiserror.workspace = true
 anyhow.workspace    = true
 tracing.workspace   = true
+rayon.workspace     = true
 rkyv.workspace      = true

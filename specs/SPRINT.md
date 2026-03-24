@@ -129,11 +129,16 @@ zero runtime code. All kernels belong in hologram base crate.
   `build_with_shared_weights()` for 50% archive size reduction
 - [ ] Clone elimination — remaining `.clone()` calls via move semantics, `Cow`,
   shape reference folding
-- [ ] Algorithmic fixes — union-find remap chains, worklist dtype fixpoint
-- [ ] Parallelization — rayon for multi-component compilation, subgraph
-  optimization, weight I/O, constant dedup hashing
-- [ ] Convention cleanup — `SmallVec<[u8; 32]>` for shape constants,
-  `eprintln!` → `tracing`
+- [x] Path compression in `constant_fold.rs` remap chains — O(α(n)) amortized
+  instead of O(chain_length) per resolution
+- [x] Rayon parallelization — subgraph optimization via `into_par_iter()`,
+  `Arc<Vec<NodeId>>` topo cache for Send compatibility
+- [x] `eprintln!` → `tracing::info!/warn!` in `run_cmd.rs` (20+ calls migrated)
+- [ ] Parallelization — rayon for multi-component compilation, weight I/O,
+  constant dedup hashing
+- [ ] Clone elimination — remaining `.clone()` calls via move semantics, `Cow`,
+  shape reference folding
+- [ ] Worklist dtype fixpoint in shape_prop.rs
 
 ---
 

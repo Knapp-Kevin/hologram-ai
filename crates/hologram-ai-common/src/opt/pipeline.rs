@@ -1,4 +1,5 @@
 use crate::ir::AiGraph;
+use rayon::prelude::*;
 
 /// A single optimization pass over `AiGraph`.
 pub trait Pass: Send + Sync {
@@ -106,15 +107,21 @@ impl OptPipeline {
             graph = pass.run(graph)?;
         }
 
-        // Recurse into subgraphs (If/Loop/Scan bodies).
+        // Recurse into subgraphs (If/Loop/Scan bodies) in parallel.
+        // Each subgraph is independent — no cross-subgraph data flow.
         if !graph.subgraphs.is_empty() {
-            let keys: Vec<String> = graph.subgraphs.keys().cloned().collect();
-            for key in keys {
-                if let Some(sub) = graph.subgraphs.remove(&key) {
+            let subgraphs: Vec<(String, AiGraph)> =
+                std::mem::take(&mut graph.subgraphs).into_iter().collect();
+            let optimized: Vec<(String, anyhow::Result<AiGraph>)> = subgraphs
+                .into_par_iter()
+                .map(|(key, sub)| {
                     tracing::debug!(subgraph = %key, "optimizing subgraph");
-                    let optimized = self.run(sub)?;
-                    graph.subgraphs.insert(key, optimized);
-                }
+                    let result = self.run(sub);
+                    (key, result)
+                })
+                .collect();
+            for (key, result) in optimized {
+                graph.subgraphs.insert(key, result?);
             }
         }
 

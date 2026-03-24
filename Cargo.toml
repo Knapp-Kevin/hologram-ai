@@ -46,6 +46,7 @@ tempfile      = "3"
 sha2          = "0.10"
 dirs          = "5"
 which         = "7"
+rayon         = "1"
 rkyv          = "0.8"
 
 # Keep debug symbols but optimize enough for usable LLM inference (~10-50x faster).
