@@ -708,22 +708,24 @@ fn resolve_op(
         }
 
         // ── KV cache ops ─────────────────────────────────────────────────
-        AiOp::KvSlotWrite { layer, is_key, n_kv_heads, head_dim } => {
+        AiOp::KvSlotWrite { layer, is_key, n_kv_heads, head_dim, layout } => {
             (
                 FloatOp::KvWrite {
                     layer: *layer as u32,
                     n_kv_heads: *n_kv_heads,
                     head_dim: *head_dim,
                     is_key: *is_key,
+                    heads_first: matches!(layout, crate::ir::KvLayout::HeadsFirst),
                 },
                 vec![],
             )
         }
-        AiOp::KvSlotRead { layer, n_kv_heads, head_dim } => (
+        AiOp::KvSlotRead { layer, n_kv_heads, head_dim, layout } => (
             FloatOp::KvRead {
                 layer: *layer as u32,
                 n_kv_heads: *n_kv_heads,
                 head_dim: *head_dim,
+                heads_first: matches!(layout, crate::ir::KvLayout::HeadsFirst),
             },
             vec![],
         ),

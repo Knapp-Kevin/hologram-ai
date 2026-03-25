@@ -21,8 +21,8 @@ pub use exec_context::{
 pub use hologram_ai_quant::{QuantDescriptor, QuantScheme, ScaleDtype};
 pub use ir::{
     canonical_vars, shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, ConstraintStore, DType,
-    Dim, DimExpr, DimVarEntry, DimVarId, DimVarSource, DimVarTable, ImportWarning, MetaValue,
-    NodeId, ScatterReduce, Shape, ShapeConstraint, ShapeError, TensorId, TensorInfo,
+    Dim, DimExpr, DimVarEntry, DimVarId, DimVarSource, DimVarTable, ImportWarning, KvLayout,
+    MetaValue, NodeId, ScatterReduce, Shape, ShapeConstraint, ShapeError, TensorId, TensorInfo,
     ValidationError,
 };
 pub use lower::{

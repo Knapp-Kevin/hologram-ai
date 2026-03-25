@@ -2508,7 +2508,7 @@ fn tinyllama_decode_conformance() {
     prefill_inputs.set_with_shape(1, bytemuck::cast_slice(&vec![1i64; prefill_seq]).to_vec(), vec![1, prefill_seq]);
     prefill_inputs.set_with_shape(2, bytemuck::cast_slice(&position_ids).to_vec(), vec![prefill_seq]);
 
-    let mut kv = hologram::KvCacheState::new(22, 4, 64, 64);
+    let mut kv = hologram::KvCacheState::new(22, 4, 64, 2048 + 16);
     let prefill_out = runner.execute_with_kv(&prefill_inputs, &mut kv)
         .expect("hologram prefill failed");
 

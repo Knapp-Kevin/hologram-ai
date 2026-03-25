@@ -1,6 +1,21 @@
 use super::{dtype::DType, param::AiParam};
 use hologram_ai_quant::QuantScheme;
 
+/// Data layout for K/V tensors in the KV cache pipeline.
+///
+/// Determines how KvWrite transposes data before storing and how KvRead
+/// transposes after reading. The layout must match the attention kernel's
+/// `heads_first` flag to ensure correct attention computation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvLayout {
+    /// `[kv_heads, seq, head_dim]` — heads are the outermost dimension.
+    /// Used by ONNX models after the head-reshaping Transpose.
+    HeadsFirst,
+    /// `[seq, kv_heads, head_dim]` — sequence positions are outermost.
+    /// Used by GGUF models where weights are stored seq-first.
+    SeqFirst,
+}
+
 /// Behavioral category for shape/dtype/value inference.
 ///
 /// Most `AiOp` variants fall into a standard category with uniform inference
@@ -382,12 +397,16 @@ pub enum AiOp {
         is_key: bool,
         n_kv_heads: u32,
         head_dim: u32,
+        /// Data layout of the K/V tensor entering KvWrite.
+        layout: KvLayout,
     },
     /// Read cached K/V tensors from the KV-cache for a given layer.
     KvSlotRead {
         layer: usize,
         n_kv_heads: u32,
         head_dim: u32,
+        /// Data layout expected by the downstream attention kernel.
+        layout: KvLayout,
     },
 
     // ── Fused ops (produced by optimization passes) ────────────────────────
