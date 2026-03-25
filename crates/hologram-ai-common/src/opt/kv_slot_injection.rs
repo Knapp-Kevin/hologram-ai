@@ -94,16 +94,20 @@ impl Pass for KvSlotInjection {
                 continue;
             }
 
-            // Extract architecture params from the GQA node.
-            // KV layout is always SeqFirst for ONNX: the attention fusion
-            // traces K/V back past the head-reshaping Transpose, so the data
-            // arriving at KvWrite is the flat projection output [seq, kv_heads*head_dim]
-            // which is seq-first. No transpose needed for cache storage.
+            // Extract architecture params and layout from the GQA node.
+            // The attention fusion traces K/V back to add_228 (post-RoPE),
+            // which is [batch, kv_heads, seq, head_dim] — heads-first.
+            // KvWrite must transpose to seq-first for cache storage.
             let (nkv, hd, layout) = match &node.op {
-                AiOp::GroupedQueryAttention { num_kv_heads, head_dim, .. } => {
-                    (*num_kv_heads, *head_dim, crate::ir::KvLayout::SeqFirst)
+                AiOp::GroupedQueryAttention { num_kv_heads, head_dim, heads_first, .. } => {
+                    let kv_layout = if *heads_first {
+                        crate::ir::KvLayout::HeadsFirst
+                    } else {
+                        crate::ir::KvLayout::SeqFirst
+                    };
+                    (*num_kv_heads, *head_dim, kv_layout)
                 }
-                _ => (0, 0, crate::ir::KvLayout::SeqFirst),
+                _ => (0, 0, crate::ir::KvLayout::HeadsFirst),
             };
 
             let k_tid = node.inputs[1];
