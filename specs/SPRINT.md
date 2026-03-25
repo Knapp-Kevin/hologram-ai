@@ -144,14 +144,13 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] Worklist dtype fixpoint in shape_prop.rs
 - [x] **Prefill fixed**: Transpose no-op and batched MatMul bugs fixed in
   hologram base. Prefill logits match ORT exactly (conformance tests pass).
-- [ ] **BLOCKER: Decode produces gibberish** — TensorMeta infrastructure
-  complete (Plan 025 Phases 1-5), KvLayout enum added, KV cache stores
-  flat seq-first data correctly. Decode attention transpose wired.
-  Remaining issue: the flat K data `[seq, kv_heads*head_dim]` from the
-  attention fusion's trace-back is processed correctly during prefill
-  (by coincidence of stride math) but the KV cache stores this flat data
-  and the decode attention can't index it correctly after transpose.
-  Need to understand exactly WHY prefill works with flat K to fix decode.
+- [ ] **BLOCKER: Decode produces gibberish** → **Solution: Plan 026 —
+  Single-Model Rearchitecture.** Remove the prefill/decode dual-model
+  split entirely. Compile ONE model, use it for both prefill and decode.
+  The runtime KV cache (`write_pos == 0` check, `resolve_size()`,
+  `TensorMeta`) already handles both modes. Pipeline format becomes
+  universal (1 or N components). Removes ~400+ lines of dual-model code
+  and eliminates the entire class of layout mismatch bugs.
 
 ---
 
