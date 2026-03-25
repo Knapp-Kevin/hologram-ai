@@ -80,13 +80,13 @@ fn main() -> anyhow::Result<()> {
             tokenizer,
             seq_len,
         } => {
-            let (source, model_path) = if let Some(manifest_path) = &manifest {
-                let source = parse_manifest(manifest_path)?;
-                (source, manifest_path.clone())
+            let (source, model_path, manifest_kind) = if let Some(manifest_path) = &manifest {
+                let (source, kind) = parse_manifest(manifest_path)?;
+                (source, manifest_path.clone(), kind)
             } else {
                 let model_path = model.as_ref().expect("--model or --manifest required");
                 let source = model_source_from_path(model_path)?;
-                (source, model_path.clone())
+                (source, model_path.clone(), None)
             };
 
             let compiler = ModelCompiler {
@@ -115,16 +115,22 @@ fn main() -> anyhow::Result<()> {
             });
 
             // Embed model metadata section.
-            // Detect LLM: either the metadata says so (GGUF sets arch/n_layers)
-            // or we have a tokenizer (strong signal for text models).
-            let is_llm = (compiled.metadata.arch != "unknown" && compiled.metadata.n_layers > 0)
-                || tok_path.is_some();
-            let model_meta = hologram::hologram_archive::section::model_meta::ModelMetaSection {
-                kind: if is_llm {
+            // Use manifest kind if provided, otherwise auto-detect.
+            let kind = if let Some(k) = manifest_kind {
+                k
+            } else {
+                // Detect LLM: either the metadata says so (GGUF sets arch/n_layers)
+                // or we have a tokenizer (strong signal for text models).
+                let is_llm = (compiled.metadata.arch != "unknown" && compiled.metadata.n_layers > 0)
+                    || tok_path.is_some();
+                if is_llm {
                     hologram::hologram_archive::section::model_meta::ModelKind::TextLlm
                 } else {
                     hologram::hologram_archive::section::model_meta::ModelKind::Generic
-                },
+                }
+            };
+            let model_meta = hologram::hologram_archive::section::model_meta::ModelMetaSection {
+                kind,
                 arch: compiled.metadata.arch.clone(),
                 description: format!("{} ({})", compiled.metadata.arch, model_path.display()),
                 max_seq_len: compiled.metadata.context_len,
@@ -274,6 +280,9 @@ fn model_source_from_path(path: &std::path::Path) -> anyhow::Result<ModelSource>
 /// ```
 #[derive(serde::Deserialize)]
 struct Manifest {
+    /// Optional model kind override (e.g. "image-gen", "text-llm", "vision").
+    /// When set, overrides the auto-detection heuristic.
+    kind: Option<String>,
     component: Vec<ManifestComponent>,
     #[serde(default)]
     connection: Vec<ManifestConnection>,
@@ -293,7 +302,23 @@ struct ManifestConnection {
     to: String,
 }
 
-fn parse_manifest(path: &std::path::Path) -> anyhow::Result<ModelSource> {
+/// Parse a model kind string from a manifest into the hologram ModelKind enum.
+fn parse_model_kind(s: &str) -> hologram::hologram_archive::section::model_meta::ModelKind {
+    use hologram::hologram_archive::section::model_meta::ModelKind;
+    match s {
+        "text-llm" | "llm" => ModelKind::TextLlm,
+        "text-encoder" | "encoder" => ModelKind::TextEncoder,
+        "vision" => ModelKind::Vision,
+        "audio" => ModelKind::Audio,
+        "image-gen" | "diffusion" => ModelKind::ImageGen,
+        "audio-gen" | "tts" => ModelKind::AudioGen,
+        "video-gen" => ModelKind::VideoGen,
+        "multi-modal" => ModelKind::MultiModal,
+        _ => ModelKind::Generic,
+    }
+}
+
+fn parse_manifest(path: &std::path::Path) -> anyhow::Result<(ModelSource, Option<hologram::hologram_archive::section::model_meta::ModelKind>)> {
     use anyhow::Context as _;
     use hologram_ai::compiler::ComponentInput;
     use hologram_ai_common::sections::meta::{ComponentConnection, ComponentRole};
@@ -302,6 +327,7 @@ fn parse_manifest(path: &std::path::Path) -> anyhow::Result<ModelSource> {
         .with_context(|| format!("reading manifest {}", path.display()))?;
     let manifest: Manifest = toml::from_str(&text)
         .with_context(|| format!("parsing manifest {}", path.display()))?;
+    let manifest_kind = manifest.kind.as_deref().map(parse_model_kind);
 
     let manifest_dir = path.parent().unwrap_or(std::path::Path::new("."));
 
@@ -345,7 +371,7 @@ fn parse_manifest(path: &std::path::Path) -> anyhow::Result<ModelSource> {
         })
         .collect();
 
-    Ok(ModelSource::MultiOnnx { components, connections })
+    Ok((ModelSource::MultiOnnx { components, connections }, manifest_kind))
 }
 
 fn tracing_subscriber_init() {

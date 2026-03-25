@@ -702,3 +702,109 @@ fn conformance_rms_norm_multi_row() {
 
     assert_close(&actual, &expected, tol, "RmsNorm-multi-row");
 }
+
+// ── GroupNorm ─────────────────────────────────────────────────────────────
+
+/// Reference GroupNorm implementation for conformance testing.
+/// data: [N, C, spatial...] flattened, scale/bias: [C]
+fn reference_group_norm(
+    data: &[f32],
+    scale: &[f32],
+    bias: &[f32],
+    num_groups: usize,
+    epsilon: f32,
+) -> Vec<f32> {
+    let n_channels = scale.len();
+    let channels_per_group = n_channels / num_groups;
+    let spatial = data.len() / n_channels;
+    let mut out = data.to_vec();
+
+    for g in 0..num_groups {
+        let group_size = channels_per_group * spatial;
+        let mut sum: f64 = 0.0;
+        let mut sum_sq: f64 = 0.0;
+        for c_local in 0..channels_per_group {
+            let c = g * channels_per_group + c_local;
+            let start = c * spatial;
+            let end = (start + spatial).min(out.len());
+            for &v in &out[start..end] {
+                let v64 = v as f64;
+                sum += v64;
+                sum_sq += v64 * v64;
+            }
+        }
+        let mean = (sum / group_size as f64) as f32;
+        let var = (sum_sq / group_size as f64 - (mean as f64 * mean as f64)) as f32;
+        let inv_std = 1.0 / (var + epsilon).sqrt();
+
+        for c_local in 0..channels_per_group {
+            let c = g * channels_per_group + c_local;
+            let s = scale[c];
+            let b = bias[c];
+            let start = c * spatial;
+            let end = (start + spatial).min(out.len());
+            for v in out[start..end].iter_mut() {
+                *v = (*v - mean) * inv_std * s + b;
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn conformance_group_norm() {
+    // 4 channels, 2 groups, spatial=8 (like a [1, 4, 2, 4] NCHW tensor)
+    let num_groups = 2u32;
+    let n_channels = 4;
+    let spatial = 8;
+    let epsilon = 1e-5_f32;
+
+    let data: Vec<f32> = (0..n_channels * spatial)
+        .map(|i| (i as f32 - 16.0) * 0.1)
+        .collect();
+    let scale: Vec<f32> = (0..n_channels).map(|i| 1.0 + i as f32 * 0.1).collect();
+    let bias: Vec<f32> = (0..n_channels).map(|i| i as f32 * 0.05).collect();
+
+    let op = FloatOp::GroupNorm {
+        num_groups,
+        epsilon: epsilon.to_bits(),
+    };
+    let tol = Tolerance { atol: 1e-5, rtol: 1e-4 };
+
+    let actual = run_dispatch(
+        &op,
+        &[&f32_bytes(&data), &f32_bytes(&scale), &f32_bytes(&bias)],
+    );
+    let expected = reference_group_norm(&data, &scale, &bias, num_groups as usize, epsilon);
+
+    assert_close(&actual, &expected, tol, "GroupNorm");
+}
+
+#[test]
+fn conformance_group_norm_single_group() {
+    // Single group = LayerNorm-like behavior across all channels
+    let num_groups = 1u32;
+    let n_channels = 4;
+    let spatial = 4;
+    let epsilon = 1e-5_f32;
+
+    let data: Vec<f32> = (0..n_channels * spatial)
+        .map(|i| ((i as f32) * 0.3).sin())
+        .collect();
+    let scale: Vec<f32> = vec![1.0; n_channels];
+    let bias: Vec<f32> = vec![0.0; n_channels];
+
+    let op = FloatOp::GroupNorm {
+        num_groups,
+        epsilon: epsilon.to_bits(),
+    };
+    let tol = Tolerance { atol: 1e-5, rtol: 1e-4 };
+
+    let actual = run_dispatch(
+        &op,
+        &[&f32_bytes(&data), &f32_bytes(&scale), &f32_bytes(&bias)],
+    );
+    let expected = reference_group_norm(&data, &scale, &bias, num_groups as usize, epsilon);
+
+    assert_close(&actual, &expected, tol, "GroupNorm-single-group");
+}

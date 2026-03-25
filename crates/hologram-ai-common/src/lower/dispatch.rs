@@ -20,6 +20,9 @@ pub enum DispatchTarget {
     FloatNeedsShape,
     /// Pass-through (identity: one input, same output).
     Identity,
+    /// Multi-output op (e.g., Split). Handled specially in builder.rs
+    /// by emitting multiple nodes for each output.
+    MultiOutput,
     /// Control flow op with subgraph(s). Handled specially in builder.rs
     /// via compile-time flattening.
     Subgraph,
@@ -122,7 +125,7 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
         Unsqueeze { .. } => D::Identity,
         Expand => D::GraphOp(GraphOp::Float(FloatOp::Reshape)),
         Slice { .. } => D::FloatNeedsShape,
-        Split { .. } => D::Identity,
+        Split { .. } => D::MultiOutput,
         Tile { .. } => D::Identity,
         Identity => D::Identity,
 

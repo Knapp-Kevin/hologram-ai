@@ -145,6 +145,122 @@ pub fn convert_to_onnx(
     Ok(result)
 }
 
+// ── Diffusion ONNX conversion ────────────────────────────────────────────────
+
+/// Python script that exports each diffusion pipeline component
+/// (text_encoder, unet, vae_decoder) to ONNX via torch.onnx.export.
+/// Embedded at compile time from scripts/export_diffusion_onnx.py.
+const DIFFUSION_EXPORT_SCRIPT: &str =
+    include_str!("../../../../scripts/export_diffusion_onnx.py");
+
+pub fn convert_diffusion_to_onnx(
+    model_id: &str,
+    output_dir: &Path,
+    keep_venv: bool,
+) -> anyhow::Result<ConversionResult> {
+    let python = find_python()?;
+
+    let tmp_dir = tempfile::tempdir()?;
+    let script_path = tmp_dir.path().join("export_diffusion_onnx.py");
+    std::fs::write(&script_path, DIFFUSION_EXPORT_SCRIPT)?;
+    let venv_path = tmp_dir.path().join("hologram-ai-conv");
+
+    eprintln!("Creating Python virtualenv for diffusion ONNX export...");
+    run_cmd(
+        Command::new(&python).args(["-m", "venv"]).arg(&venv_path),
+        "Failed to create Python virtualenv",
+    )?;
+
+    let pip = venv_bin(&venv_path, "pip");
+    eprintln!("Installing diffusion export dependencies (this may take a few minutes)...");
+    run_cmd(
+        Command::new(&pip).args([
+            "install",
+            "diffusers",
+            "transformers",
+            "torch",
+            "onnx",
+            "onnxscript",
+            "accelerate",
+            "protobuf",
+            "safetensors",
+        ]),
+        "Failed to install Python dependencies",
+    )?;
+
+    std::fs::create_dir_all(output_dir)?;
+    let venv_python = venv_bin(&venv_path, "python");
+    eprintln!("Converting {model_id} to ONNX (diffusion pipeline)...");
+    run_cmd(
+        Command::new(&venv_python)
+            .arg(&script_path)
+            .arg(model_id)
+            .arg(output_dir),
+        "Diffusion ONNX export failed. Check model compatibility.",
+    )?;
+
+    // Diffusion pipelines export multiple components as subdirectories.
+    // The primary model is unet/model.onnx.
+    let mut result = ConversionResult {
+        model_path: PathBuf::new(),
+        companion_files: Vec::new(),
+    };
+
+    // Look for unet/model.onnx as primary, collect other .onnx files as companions.
+    let unet_path = output_dir.join("unet").join("model.onnx");
+    if unet_path.exists() {
+        result.model_path = unet_path;
+    }
+
+    // Collect all component ONNX files.
+    for component in &["text_encoder", "vae_decoder", "vae_encoder"] {
+        let p = output_dir.join(component).join("model.onnx");
+        if p.exists() {
+            result.companion_files.push(p);
+        }
+    }
+
+    // Also collect root-level companion files.
+    for entry in std::fs::read_dir(output_dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if COMPANION_NAMES.contains(&name.as_str()) {
+            result.companion_files.push(entry.path());
+        }
+    }
+
+    if result.model_path.as_os_str().is_empty() {
+        // Fall back to any .onnx found.
+        for entry in walkdir(output_dir) {
+            if entry.ends_with(".onnx") && result.model_path.as_os_str().is_empty() {
+                result.model_path = entry;
+            }
+        }
+    }
+    if result.model_path.as_os_str().is_empty() {
+        anyhow::bail!("Diffusion export produced no .onnx files");
+    }
+
+    finish_venv(tmp_dir, &venv_path, keep_venv);
+    Ok(result)
+}
+
+/// Recursively collect all file paths under a directory.
+fn walkdir(dir: &Path) -> Vec<PathBuf> {
+    let mut results = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                results.extend(walkdir(&path));
+            } else {
+                results.push(path);
+            }
+        }
+    }
+    results
+}
+
 // ── GGUF conversion via llama.cpp convert script ─────────────────────────────
 
 pub fn convert_to_gguf(

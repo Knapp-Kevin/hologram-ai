@@ -78,6 +78,7 @@ impl ShapeProjection for FloatOp {
             | FloatOp::AddRmsNorm { .. }
             | FloatOp::LayerNorm { .. }
             | FloatOp::InstanceNorm { .. }
+            | FloatOp::GroupNorm { .. }
             | FloatOp::LRN { .. }
             | FloatOp::RotaryEmbedding { .. }
             | FloatOp::FusedSwiGLU => (ShapeSpecRepr::SameAs(0), None),

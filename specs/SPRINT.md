@@ -167,7 +167,17 @@ zero runtime code. All kernels belong in hologram base crate.
   hologram base inline dispatch fixed (9 missing ops). Shape propagation hardened:
   never downgrade Concrete dims to Dynamic (prevents post-concretization shape
   regression in intermediate attention tensors). Output: [1, 32, 768] all finite.
-- [ ] Test with Stable Diffusion UNet (vision + attention + cross-attention)
+- [ ] **Stable Diffusion support (Plan 027)**
+  - [ ] Phase 1: GroupNorm lowering — `FloatOp::GroupNorm` in hologram base + lowering
+    in `strategy.rs`. Critical blocker: SD UNet uses GroupNorm in every residual block.
+  - [ ] Phase 2: Single-component UNet compilation — compile SD v1.5 UNet ONNX,
+    fix any op dispatch failures (cross-attention, Resize, SiLU). Conformance test.
+  - [ ] Phase 3: Output type system — add `kind` field to manifest TOML, map to
+    `ModelKind::ImageGen` (already exists in hologram base). Extend detection heuristic.
+  - [ ] Phase 4: Full 3-component pipeline — text encoder + UNet + VAE decoder via
+    `--manifest`. Uses existing `compile_multi_onnx()` infrastructure (Plan 021).
+  - [ ] Phase 5: Runtime image output — multi-component `HoloRunner`, denoising loop
+    (Euler-a scheduler), `--output` flag for PNG. CLI demo code (compiler-only respected).
 - [ ] Test with Whisper (encoder-decoder, audio)
 - [ ] Fix any op dispatch failures discovered
 - [ ] Goal: `hologram-ai compile -m model.onnx` works for top-20 HuggingFace models
@@ -212,7 +222,8 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Memory-mapped weight loading — mmap zero-copy execution with
   `MADV_RANDOM`/`MADV_SEQUENTIAL` page discipline
 - [ ] KV cache with variable-length sequences (P5 blocker resolved)
-- [ ] Multi-modal output trait (text, images, audio, etc.)
+- [ ] Multi-modal output trait (text, images, audio, etc.) — Plan 027 Phase 5
+  adds image output via `--output` flag and `ModelKind::ImageGen` detection
 - [x] MatMul + Activation fusion — `MatMulActivationFusion` pass in
   hologram-ai fuses MatMul+Relu/Gelu/Silu into `MatMulRelu`/`MatMulGelu`/
   `MatMulSilu`. AiOp variants + lowering added. Awaiting fused FloatOp

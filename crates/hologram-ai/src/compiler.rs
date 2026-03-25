@@ -184,7 +184,21 @@ impl ModelCompiler {
         info!(nodes = ai_graph.nodes.len(), params = ai_graph.params.len(), "import complete");
 
         // Step 2 — optimize.
-        let mut ai_graph = OptPipeline::mvp()
+        // Choose pipeline based on input signature: models with `input_ids`
+        // are text models that benefit from attention fusion + KV injection.
+        // Vision/diffusion models (sample, pixel_values, etc.) use the
+        // generic pipeline to avoid incorrectly injecting KV cache ops.
+        let looks_like_text_model = ai_graph
+            .input_names
+            .iter()
+            .any(|n| n == "input_ids");
+        let pipeline = if looks_like_text_model {
+            OptPipeline::mvp()
+        } else {
+            info!("using generic optimization pipeline (no input_ids detected)");
+            OptPipeline::generic()
+        };
+        let mut ai_graph = pipeline
             .run(ai_graph)
             .context("optimization pass failed")?;
         info!(nodes = ai_graph.nodes.len(), "optimization complete");
@@ -193,7 +207,9 @@ impl ModelCompiler {
         // ONNX models don't carry arch/n_layers/n_kv_heads metadata natively.
         // After AttentionFusion, we can extract these from GroupedQueryAttention
         // nodes so the MemoryPlanner and LLM pipeline detection work correctly.
-        infer_llm_metadata_from_graph(&mut ai_graph);
+        if looks_like_text_model {
+            infer_llm_metadata_from_graph(&mut ai_graph);
+        }
 
         // No need to save pre-concretized graph — single-model architecture
         // uses one graph for both prefill and decode.

@@ -238,7 +238,15 @@ pub fn lower(
                 tid_to_idx
                     .get(tid)
                     .copied()
-                    .with_context(|| format!("missing builder index for tensor {tid}"))
+                    .with_context(|| {
+                        let tensor_name = ai_graph.tensor_names.get(tid)
+                            .map(|s| s.as_str())
+                            .unwrap_or("?");
+                        format!(
+                            "missing builder index for tensor {} '{}' (referenced by node id={})",
+                            tid, tensor_name, node.id,
+                        )
+                    })
             })
             .collect::<anyhow::Result<_>>()?;
 
@@ -443,6 +451,72 @@ pub fn lower(
                             tid_to_idx.insert(out_tid, in_idx);
                             let dtype = input_float_dtype(Some(&out_tid), &ai_graph.tensor_info);
                             builder = builder.set_node_dtype(in_idx, dtype);
+                        }
+                    }
+                }
+            }
+            DispatchTarget::MultiOutput => {
+                // Split → N Slice nodes, one per output tensor.
+                if let AiOp::Split { axis, sizes } = &node.op {
+                    tracing::info!(
+                        node_id = node.id,
+                        axis,
+                        sizes = ?sizes,
+                        n_outputs = node.outputs.len(),
+                        "lowering Split as multi-output Slice"
+                    );
+                    let in_idx = input_idxs[0];
+                    // Normalize axis: get input ndim from tensor_info.
+                    let ndim = node.inputs.first()
+                        .and_then(|tid| ai_graph.tensor_info.get(tid))
+                        .map(|info| info.shape.len())
+                        .unwrap_or(4);
+                    let norm_axis = if *axis < 0 { (ndim as i64 + *axis) as usize } else { *axis as usize };
+                    // Get the axis size from tensor_info for axis_size param.
+                    let full_axis_size = node.inputs.first()
+                        .and_then(|tid| ai_graph.tensor_info.get(tid))
+                        .and_then(|info| info.shape.get(norm_axis))
+                        .and_then(|d| d.evaluate())
+                        .unwrap_or(0) as u32;
+
+                    // If sizes is empty, Split equally into N outputs.
+                    let effective_sizes: Vec<u64> = if sizes.is_empty() {
+                        let n = node.outputs.len() as u64;
+                        if n > 0 && full_axis_size > 0 {
+                            let chunk = full_axis_size as u64 / n;
+                            vec![chunk; n as usize]
+                        } else {
+                            vec![]
+                        }
+                    } else {
+                        sizes.clone()
+                    };
+
+                    let mut offset: u32 = 0;
+                    for (i, &size) in effective_sizes.iter().enumerate() {
+                        let start = offset;
+                        let end = offset + size as u32;
+                        offset = end;
+
+                        let slice_op = FloatOp::Slice {
+                            axis_from_end: (ndim - 1 - norm_axis) as u8,
+                            start,
+                            end,
+                            axis_size: full_axis_size,
+                        };
+                        builder = builder.node_with_inputs(
+                            GraphOp::Float(slice_op),
+                            &[in_idx],
+                        );
+                        let idx = builder.len() - 1;
+                        if let Some(&out_tid) = node.outputs.get(i) {
+                            let out_shape = output_shape(Some(&out_tid), &ai_graph.tensor_info);
+                            if let Some(ref s) = out_shape {
+                                builder = builder.set_node_shape(idx, s.clone());
+                            }
+                            let dtype = input_float_dtype(Some(&out_tid), &ai_graph.tensor_info);
+                            builder = builder.set_node_dtype(idx, dtype);
+                            tid_to_idx.insert(out_tid, idx);
                         }
                     }
                 }

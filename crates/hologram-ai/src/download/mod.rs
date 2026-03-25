@@ -59,6 +59,7 @@ enum ResolvedDownload {
     Onnx { filenames: Vec<String> },
     ConvertToOnnx,
     ConvertToGguf,
+    ConvertDiffusionToOnnx,
 }
 
 fn resolve_format(
@@ -77,6 +78,8 @@ fn resolve_format(
         DownloadFormat::Onnx => {
             if let Some(r) = try_resolve_onnx(info) {
                 r
+            } else if is_diffusion_pipeline(info) {
+                ResolvedDownload::ConvertDiffusionToOnnx
             } else {
                 ResolvedDownload::ConvertToOnnx
             }
@@ -88,9 +91,18 @@ fn resolve_format(
             if let Some(r) = try_resolve_onnx(info) {
                 return r;
             }
+            if is_diffusion_pipeline(info) {
+                return ResolvedDownload::ConvertDiffusionToOnnx;
+            }
             ResolvedDownload::ConvertToOnnx
         }
     }
+}
+
+/// Detect diffusion pipelines by looking for `model_index.json` — the marker
+/// file that `diffusers` uses to describe a multi-component pipeline.
+fn is_diffusion_pipeline(info: &ModelInfo) -> bool {
+    info.siblings.iter().any(|f| f.filename == "model_index.json")
 }
 
 fn try_resolve_gguf(info: &ModelInfo, quantization: Option<&str>) -> Option<ResolvedDownload> {
@@ -191,6 +203,14 @@ async fn run_async(args: DownloadArgs) -> anyhow::Result<()> {
             eprintln!("No pre-built ONNX found. Converting via Python...");
             let result = convert::convert_to_onnx(&args.model_id, &output_dir, args.keep_venv)?;
             eprintln!("Converted: {}", result.model_path.display());
+        }
+        ResolvedDownload::ConvertDiffusionToOnnx => {
+            eprintln!("Diffusion pipeline detected. Exporting components to ONNX via optimum...");
+            let result = convert::convert_diffusion_to_onnx(&args.model_id, &output_dir, args.keep_venv)?;
+            eprintln!("Exported: {}", result.model_path.display());
+            for f in &result.companion_files {
+                eprintln!("  component: {}", f.display());
+            }
         }
         ResolvedDownload::ConvertToGguf => {
             eprintln!("No pre-built GGUF found. Converting via Python...");

@@ -656,6 +656,9 @@ fn resolve_op(
                 }
             })
         }
+        AiOp::GroupNorm { num_groups, epsilon } => {
+            (FloatOp::GroupNorm { num_groups: *num_groups, epsilon: f32_to_bits(*epsilon) }, vec![])
+        }
         AiOp::LRN { alpha, beta, bias, size } => (
             FloatOp::LRN {
                 size: *size as u32,
