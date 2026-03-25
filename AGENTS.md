@@ -41,6 +41,7 @@ models/         — test models for development (TinyLlama ONNX, etc.)
 12. **Never use `.unwrap()` in production code.** Use `.expect("descriptive message")` instead so that failures produce actionable context. This applies to all code — library and binary crates alike. The only exception is throwaway scratch files in `/tmp`.
 13. **Keep site docs up to date.** When making structural changes, adding new features, changing APIs, or modifying the compilation pipeline, update the relevant documentation in `specs/docs/` (e.g., `architecture.md`, `lowering.md`, `data-model.md`, `cli.md`). Docs must reflect the current state of the code — stale documentation is worse than no documentation.
 14. **Never suppress `clippy::too_many_arguments`.** If a function triggers this lint, refactor it to accept a params/config struct using the builder pattern. Do not add `#[allow(clippy::too_many_arguments)]`.
+15. **Think LONG-TERM, not "solve it now."** Every decision must be evaluated from a project-wide, production-ready, holistic perspective — not from the pressure of making something work immediately. Before writing code, ask: "Will this still be the right design in 6 months? Does this make the codebase better or just less broken?" If a proper solution requires more upfront work — rethinking an abstraction, changing an API, or adding a new pipeline pass — do that. Never introduce a short-term fix that creates long-term debt. The cost of doing it right now is always less than the cost of unwinding a shortcut later.
 
 ---
 
@@ -62,6 +63,10 @@ models/         — test models for development (TinyLlama ONNX, etc.)
 
 ### Anti-patterns (never do these)
 
+- **"Just make it work" mentality.** Prioritizing immediate results over long-term
+  correctness. If you feel urgency to "just get this passing" or "deal with it
+  properly later" — stop. That instinct is the root cause of tech debt. The right
+  solution now is always cheaper than a shortcut you have to unwind later.
 - **Band-aid fixes.** Patching the symptom where it surfaces without understanding
   why it happens. If you find yourself adding a special case, a hardcoded fallback,
   or a "just check for this" guard — stop. You are treating symptoms, not causes.

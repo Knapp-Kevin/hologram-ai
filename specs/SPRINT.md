@@ -144,13 +144,14 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] Worklist dtype fixpoint in shape_prop.rs
 - [x] **Prefill fixed**: Transpose no-op and batched MatMul bugs fixed in
   hologram base. Prefill logits match ORT exactly (conformance tests pass).
-- [ ] **BLOCKER: Decode produces gibberish** — KV cache data layout mismatch.
-  Root cause: tensor buffers carry no shape/layout metadata. Kernels infer
-  shapes from buffer sizes via stride division, which fails when the data
-  layout doesn't match assumptions. **Solution: Plan 025 — TensorMeta
-  headers** (self-describing tensors, like TCP headers). Also: remove
-  `force_single_graph` (dead path, decode at compiled seq=2048 is ~2000x
-  slower).
+- [ ] **BLOCKER: Decode produces gibberish** — TensorMeta infrastructure
+  complete (Plan 025 Phases 1-5), KvLayout enum added, KV cache stores
+  flat seq-first data correctly. Decode attention transpose wired.
+  Remaining issue: the flat K data `[seq, kv_heads*head_dim]` from the
+  attention fusion's trace-back is processed correctly during prefill
+  (by coincidence of stride math) but the KV cache stores this flat data
+  and the decode attention can't index it correctly after transpose.
+  Need to understand exactly WHY prefill works with flat K to fix decode.
 
 ---
 
