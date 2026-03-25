@@ -44,11 +44,6 @@ enum Command {
         /// All shapes are baked to this value. Inputs are padded at runtime.
         #[arg(long, value_name = "N")]
         seq_len: Option<u64>,
-        /// Force single-graph compilation (no pipeline prefill/decode split).
-        /// Produces a smaller archive and faster loading. KV cache still works
-        /// but without a specialized decode graph.
-        #[arg(long)]
-        single_graph: bool,
     },
     /// Run a compiled `.holo` archive with shape-aware inference.
     Run(hologram_ai::commands::run_cmd::RunArgs),
@@ -84,7 +79,6 @@ fn main() -> anyhow::Result<()> {
             output,
             tokenizer,
             seq_len,
-            single_graph,
         } => {
             let (source, model_path) = if let Some(manifest_path) = &manifest {
                 let source = parse_manifest(manifest_path)?;
@@ -97,7 +91,6 @@ fn main() -> anyhow::Result<()> {
 
             let compiler = ModelCompiler {
                 seq_len_override: seq_len,
-                force_single_graph: single_graph,
                 ..Default::default()
             };
             let compiled = compiler.compile(source)?;

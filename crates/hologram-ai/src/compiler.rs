@@ -156,9 +156,6 @@ pub struct ModelCompiler {
     /// When `Some(n)`, all seq-like dims are set to `n` instead of the
     /// model's `context_length`. Use `None` to auto-detect from metadata.
     pub seq_len_override: Option<u64>,
-    /// Force single-graph compilation (skip LLM pipeline detection).
-    /// Used internally for the decode sub-graph in LLM pipelines.
-    pub force_single_graph: bool,
 }
 
 impl Default for ModelCompiler {
@@ -166,7 +163,6 @@ impl Default for ModelCompiler {
         Self {
             mmap: true,
             seq_len_override: None,
-            force_single_graph: false,
         }
     }
 }
@@ -199,10 +195,8 @@ impl ModelCompiler {
         // nodes so the MemoryPlanner and LLM pipeline detection work correctly.
         infer_llm_metadata_from_graph(&mut ai_graph);
 
-        // Save the MVP-optimized graph before concretization so the LLM
-        // pipeline can re-concretize it at seq=1 for the decode graph,
-        // avoiding a full re-import + re-optimization from disk.
-        let pre_concretized = ai_graph.clone();
+        // No need to save pre-concretized graph — single-model architecture
+        // uses one graph for both prefill and decode.
 
         // Step 2b — concretize all symbolic/dynamic dims for compilation.
         // The runtime doesn't yet support deferred shape resolution, so we
@@ -259,11 +253,30 @@ impl ModelCompiler {
             "starting compilation"
         );
 
-        let archive_bytes = if is_llm && !self.force_single_graph {
-            self.compile_llm_pipeline(&ai_graph, &mem_plan, pre_concretized)?
-        } else {
-            self.compile_single_graph(&ai_graph, &mem_plan)?
-        };
+        // Single-model architecture: compile ONE model through compile_components.
+        // Pipeline format is universal — even single-component models use it.
+        use hologram_ai_common::sections::meta::ComponentRole;
+
+        let weights = collect_weight_bytes(&ai_graph)?;
+        let extra_weights = if weights.is_empty() { None } else { Some(weights) };
+
+        let archive_bytes = self.compile_components(
+            vec![ComponentSpec {
+                name: "model".into(),
+                role: ComponentRole::Backbone,
+                weight_group: "model".into(),
+                opt_profile: if is_llm {
+                    hologram_ai_common::OptProfile::Llm
+                } else {
+                    hologram_ai_common::OptProfile::Generic
+                },
+                graph: &ai_graph,
+                mem_plan: &mem_plan,
+                phase: LowerPhase::Forward,
+                weights: extra_weights,
+            }],
+            vec![], // no inter-component connections for single model
+        )?;
 
         // Collect total weight bytes for stats.
         let weight_blob = collect_weight_bytes(&ai_graph)?;
@@ -468,87 +481,6 @@ impl ModelCompiler {
     ///
     /// Collects weight bytes from mmap params and passes them as `extra_weights`
     /// so that `ConstantData::Deferred` offsets resolve correctly at runtime.
-    fn compile_single_graph(
-        &self,
-        ai_graph: &AiGraph,
-        mem_plan: &hologram_ai_common::MemoryPlan,
-    ) -> anyhow::Result<Vec<u8>> {
-        let weights = collect_weight_bytes(ai_graph)?;
-        let extra_weights = if weights.is_empty() { None } else { Some(weights) };
-        let archive = compile_one_component(
-            ai_graph,
-            &mem_plan.kv_cache_layout,
-            &LoweringOptions::default(),
-            &LowerPhase::Forward,
-            extra_weights,
-        )?;
-        info!(archive_bytes = archive.len(), "single-graph archive assembled");
-        Ok(archive)
-    }
-
-    /// Compile an LLM into a pipeline archive with prefill + decode sub-archives.
-    ///
-    /// Prefill: compiled at the configured seq_len (full prompt).
-    /// Decode: compiled at seq=1 (single token per step).
-    ///
-    /// Delegates to [`compile_components`](Self::compile_components) with two
-    /// `ComponentSpec` entries (prefill + decode).
-    fn compile_llm_pipeline(
-        &self,
-        ai_graph: &AiGraph,
-        mem_plan: &hologram_ai_common::MemoryPlan,
-        pre_concretized: AiGraph,
-    ) -> anyhow::Result<Vec<u8>> {
-        let weights = collect_weight_bytes(ai_graph)?;
-        let extra_weights = if weights.is_empty() { None } else { Some(weights) };
-        info!(
-            weight_mb = format_args!("{:.1}", extra_weights.as_ref().map_or(0, |w| w.len()) as f64 / 1_048_576.0),
-            "compiling LLM pipeline (prefill + decode)"
-        );
-
-        // Re-concretize the pre-optimized graph at seq=1 for decode,
-        // avoiding a full re-import + re-optimization from disk.
-        info!("compiling decode graph (seq=1) from pre-optimized graph");
-        let decode_graph = concretize_all_dims(pre_concretized, Some(1))
-            .context("concretizing decode graph (seq=1) failed")?;
-        let decode_graph = post_concretization_repair(decode_graph)?;
-
-        use hologram_ai_common::sections::meta::{ComponentConnection, ComponentRole};
-
-        // Both components share weight_group="lm" — WeightStore deduplicates
-        // by group, so only one copy is stored in the shared blob.
-        self.compile_components(
-            vec![
-                ComponentSpec {
-                    name: "lm.prefill".into(),
-                    role: ComponentRole::Prefill,
-                    weight_group: "lm".into(),
-                    opt_profile: hologram_ai_common::OptProfile::Llm,
-                    graph: ai_graph,
-                    mem_plan,
-                    phase: LowerPhase::Prefill,
-                    weights: extra_weights.clone(),
-                },
-                ComponentSpec {
-                    name: "lm.decode".into(),
-                    role: ComponentRole::Decode,
-                    weight_group: "lm".into(),
-                    opt_profile: hologram_ai_common::OptProfile::Llm,
-                    graph: &decode_graph,
-                    mem_plan,
-                    phase: LowerPhase::Decode,
-                    weights: extra_weights,
-                },
-            ],
-            vec![ComponentConnection {
-                from_component: "lm.prefill".into(),
-                from_output: "kv_cache".into(),
-                to_component: "lm.decode".into(),
-                to_input: "kv_cache".into(),
-            }],
-        )
-    }
-
     /// Compile N component specs into a single pipeline archive.
     ///
     /// Each component is independently lowered, compiled, and assembled into a
@@ -1586,22 +1518,11 @@ pub struct HoloRunner {
     /// Backing storage: mmap or heap. MUST be listed first so it's dropped last
     /// (LoadedPlan borrows from it).
     _storage: ArchiveStorage,
-    /// For pipeline: the prefill sub-archive bytes (copied from storage).
-    /// For single-graph: empty (plan borrows directly from _storage).
-    _sub_archive_bytes: Vec<u8>,
-    /// Single-graph plan (non-pipeline) or the prefill sub-model.
+    /// The model plan (loaded from the first component in the pipeline archive).
     plan: hologram::LoadedPlan,
-    /// Decode sub-model plan (pipeline only, compiled at seq=1).
-    decode_plan: Option<hologram::LoadedPlan>,
-    /// Decode sub-archive bytes (for section lookups).
-    _decode_bytes: Option<Vec<u8>>,
     shape_ctx: Option<ShapeContextGraph>,
-    /// True if the archive is a pipeline (prefill + decode).
-    is_pipeline: bool,
-    /// Pre-compiled execution tape for the prefill graph.
+    /// Pre-compiled execution tape.
     tape: hologram::hologram_exec::tape::EnumTape,
-    /// Pre-compiled execution tape for the decode graph (pipeline only).
-    decode_tape: Option<hologram::hologram_exec::tape::EnumTape>,
 }
 
 impl HoloRunner {
@@ -1676,18 +1597,17 @@ impl HoloRunner {
     fn from_storage(storage: ArchiveStorage) -> anyhow::Result<Self> {
         let bytes: &[u8] = storage.as_ref();
 
-        // Zero-copy probe: detect pipeline by checking section table.
         // SAFETY: storage outlives all plans created here.
         let probe = unsafe { hologram::load_from_bytes_zero_copy(bytes) }
             .map_err(|e| anyhow::anyhow!("loading archive: {e}"))?;
+
+        // Check if this is a pipeline archive (has SECTION_PIPELINE header).
         let is_pipeline = probe.sections().entries.iter().any(|e| {
             e.kind == hologram::hologram_archive::section::SECTION_PIPELINE
         });
 
         if is_pipeline {
-            // Pipeline: sub-archives are embedded in wrapper weights region.
-            // Parse pipeline header from the section bytes, then use its
-            // model offsets to slice directly from mmap — no copy.
+            // Pipeline archive: load the first (or only) model component.
             let weights_start = probe.header().weights_offset as usize;
 
             let pipeline_entry = probe.sections()
@@ -1699,37 +1619,20 @@ impl HoloRunner {
                 rkyv::from_bytes::<hologram::hologram_archive::writer::pipeline_writer::PipelineHeader, rkyv::rancor::Error>(&bytes[ps..pe])
                     .map_err(|e| anyhow::anyhow!("parsing pipeline header: {e}"))?;
 
-            tracing::debug!(
-                weights_start,
-                file_len = bytes.len(),
-                n_models = ph.models.len(),
-                "pipeline header parsed"
-            );
-            for entry in &ph.models {
-                tracing::debug!(
-                    name = %entry.name,
-                    offset = entry.offset,
-                    size = entry.size,
-                    "pipeline model entry"
-                );
+            // Load the first model component.
+            let first = ph.models.first()
+                .ok_or_else(|| anyhow::anyhow!("pipeline has no models"))?;
+            let model_start = weights_start + first.offset as usize;
+            let model_end = model_start + first.size as usize;
+            if model_end > bytes.len() {
+                anyhow::bail!("sub-archive out of bounds");
             }
+            let model_slice = &bytes[model_start..model_end];
 
-            let find_model = |name: &str| -> anyhow::Result<&[u8]> {
-                let entry = ph.models.iter()
-                    .find(|m| m.name == name)
-                    .ok_or_else(|| anyhow::anyhow!("pipeline has no model '{name}'"))?;
-                let start = weights_start + entry.offset as usize;
-                let end = start + entry.size as usize;
-                if end > bytes.len() {
-                    anyhow::bail!("sub-archive '{name}' out of bounds: {start}..{end} > {}", bytes.len());
-                }
-                Ok(&bytes[start..end])
-            };
+            let mut plan = unsafe { hologram::load_from_bytes_zero_copy(model_slice) }
+                .map_err(|e| anyhow::anyhow!("loading model plan: {e}"))?;
 
-            let prefill_slice = find_model("lm.prefill")?;
-            let decode_slice = find_model("lm.decode")?;
-
-            // Parse optional weight dedup index for shared-weight pipelines.
+            // Resolve shared weights via dedup index if available.
             let dedup_index = probe.sections()
                 .find(hologram::hologram_archive::section::SECTION_WEIGHT_DEDUP)
                 .and_then(|entry| {
@@ -1742,68 +1645,35 @@ impl HoloRunner {
                     }
                 });
 
-            // Zero-copy load both sub-archives.
-            // SAFETY: storage (mmap) outlives these plans.
-            let mut plan = unsafe { hologram::load_from_bytes_zero_copy(prefill_slice) }
-                .map_err(|e| anyhow::anyhow!("loading prefill plan: {e}"))?;
-            let mut decode_plan = unsafe { hologram::load_from_bytes_zero_copy(decode_slice) }
-                .map_err(|e| anyhow::anyhow!("loading decode plan: {e}"))?;
-
-            // Resolve shared weights: if sub-archives have no embedded weights,
-            // graft from the wrapper's weight region via the dedup index.
-            let wrapper_weights = probe.weights();
             if let Some(ref idx) = dedup_index {
-                for (name, model_plan) in [("lm.prefill", &mut plan), ("lm.decode", &mut decode_plan)] {
-                    if model_plan.weights().is_empty() {
-                        if let Some(entry) = idx.find_component(name) {
-                            let w_start = entry.offset as usize;
-                            let w_end = w_start + entry.size as usize;
-                            if w_end <= wrapper_weights.len() {
-                                // SAFETY: wrapper_weights borrows from storage (mmap),
-                                // which outlives these plans.
-                                unsafe { model_plan.set_weights_borrowed(&wrapper_weights[w_start..w_end]); }
-                            }
+                if plan.weights().is_empty() {
+                    let wrapper_weights = probe.weights();
+                    if let Some(entry) = idx.find_component(&first.name) {
+                        let w_start = entry.offset as usize;
+                        let w_end = w_start + entry.size as usize;
+                        if w_end <= wrapper_weights.len() {
+                            unsafe { plan.set_weights_borrowed(&wrapper_weights[w_start..w_end]); }
                         }
                     }
                 }
             }
 
-            let shape_ctx = read_shape_context_from_plan(&plan, prefill_slice)?;
-
+            let shape_ctx = read_shape_context_from_plan(&plan, model_slice)?;
             let tape = hologram::build_tape_from_plan(&plan)
-                .map_err(|e| anyhow::anyhow!("building prefill tape: {e}"))?;
-            let decode_tape = hologram::build_tape_from_plan(&decode_plan)
-                .map_err(|e| anyhow::anyhow!("building decode tape: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("building tape: {e}"))?;
 
-            Ok(Self {
-                _storage: storage,
-                _sub_archive_bytes: Vec::new(),
-                plan,
-                decode_plan: Some(decode_plan),
-                _decode_bytes: None,
-                shape_ctx,
-                is_pipeline: true,
-                tape,
-                decode_tape: Some(decode_tape),
-            })
+            Ok(Self { _storage: storage, plan, shape_ctx, tape })
         } else {
-            // Single-graph: the entire archive IS the model.
-            // Reuse the probe as the plan (already loaded zero-copy).
+            // Legacy single-graph archive (backward compat).
             let shape_ctx = read_shape_context_from_plan(&probe, bytes)?;
-
             let tape = hologram::build_tape_from_plan(&probe)
-                .map_err(|e| anyhow::anyhow!("building execution tape: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("building tape: {e}"))?;
 
             Ok(Self {
                 _storage: storage,
-                _sub_archive_bytes: Vec::new(),
                 plan: probe,
-                decode_plan: None,
-                _decode_bytes: None,
                 shape_ctx,
-                is_pipeline: false,
                 tape,
-                decode_tape: None,
             })
         }
     }
@@ -1823,17 +1693,13 @@ impl HoloRunner {
         &self.plan
     }
 
-    /// Effective archive bytes (prefill sub-archive for pipeline, or full archive).
+    /// Archive bytes (the full pipeline archive).
     #[must_use]
     pub fn archive_bytes(&self) -> &[u8] {
-        if self.is_pipeline {
-            &self._sub_archive_bytes
-        } else {
-            self._storage.as_ref()
-        }
+        self._storage.as_ref()
     }
 
-    /// Raw top-level archive bytes (for section lookups on pipeline wrapper).
+    /// Raw top-level archive bytes (same as archive_bytes for unified format).
     /// For single-graph archives, returns the effective bytes.
     #[must_use]
     pub fn raw_bytes(&self) -> &[u8] {
@@ -1846,32 +1712,16 @@ impl HoloRunner {
         self.shape_ctx.is_some()
     }
 
-    /// Whether this is a pipeline archive (prefill + decode sub-models).
-    #[must_use]
-    pub fn is_pipeline(&self) -> bool {
-        self.is_pipeline
-    }
-
     /// Execute with a mutable KV cache state for autoregressive generation.
     ///
-    /// Uses the prefill graph for step 0, decode graph (seq=1) for subsequent steps.
-    /// Uses the EnumTape executor for all execution (17.5x faster than legacy path).
+    /// Uses the SAME model for both prefill and decode. The KV cache
+    /// distinguishes the two modes at runtime via `write_pos`.
     pub fn execute_with_kv(
         &self,
         inputs: &hologram::GraphInputs,
         kv_state: &mut hologram::KvCacheState,
     ) -> anyhow::Result<hologram::GraphOutputs> {
-        let (tape, plan) = match (&self.decode_tape, &self.decode_plan) {
-            (Some(dt), Some(dp)) if kv_state.write_pos() > 0 => {
-                // Pipeline archive: use specialized decode model for steps 1+.
-                (dt, dp)
-            }
-            _ => {
-                // Single-graph or prefill step: use the main model.
-                (&self.tape, &self.plan)
-            }
-        };
-        hologram::execute_tape_with_kv(tape, plan, inputs, kv_state)
+        hologram::execute_tape_with_kv(&self.tape, &self.plan, inputs, kv_state)
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
@@ -1928,11 +1778,8 @@ pub fn run_with_shape_context(
     archive: &HoloArchive,
     inputs: &hologram::GraphInputs,
 ) -> anyhow::Result<hologram::GraphOutputs> {
-    let plan = hologram::load_from_bytes(&archive.bytes)?;
-    let tape = hologram::build_tape_from_plan(&plan)
-        .map_err(|e| anyhow::anyhow!("building execution tape: {e}"))?;
-    hologram::execute_tape(&tape, &plan, inputs)
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    let runner = HoloRunner::from_bytes(archive.bytes.clone())?;
+    runner.execute(inputs)
 }
 
 pub fn rebuild_archive_with_section(

@@ -41,10 +41,10 @@ fn compile_and_execute(
         graph_inputs.set_with_shape(i as u32, bytes, shape.clone());
     }
 
-    // Execute via tape executor (EnumTape — zero-overhead dispatch).
-    let plan = hologram::load_from_bytes(&archive.bytes).expect("loading archive");
-    let tape = hologram::build_tape_from_plan(&plan).expect("building execution tape");
-    let outputs = hologram::execute_tape(&tape, &plan, &graph_inputs).expect("execution failed");
+    // Execute via HoloRunner (handles pipeline archives).
+    let runner = hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes)
+        .expect("loading runner");
+    let outputs = runner.execute(&graph_inputs).expect("execution failed");
 
     // Extract first output as f32 (safe — no alignment requirement).
     let (_, out_bytes) = outputs.get(0).expect("no outputs");
@@ -1924,9 +1924,9 @@ fn compile_and_execute_aigraph(
         graph_inputs.set_with_shape(i as u32, bytes, shape.clone());
     }
 
-    let plan = hologram::load_from_bytes(&archive.bytes).expect("loading archive");
-    let tape = hologram::build_tape_from_plan(&plan).expect("building execution tape");
-    let outputs = hologram::execute_tape(&tape, &plan, &graph_inputs).expect("execution failed");
+    let runner = hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes)
+        .expect("loading runner");
+    let outputs = runner.execute(&graph_inputs).expect("execution failed");
 
     let (_, out_bytes) = outputs.get(0).expect("no outputs");
     bytemuck::cast_slice::<u8, f32>(out_bytes).to_vec()
@@ -2286,7 +2286,6 @@ fn mini_vision_classifier_matches_ort() {
 /// Compare TinyLlama causal logits: hologram vs ORT.
 ///
 /// Uses a short 5-token input (BOS + 4 tokens), compiles as single-graph
-/// with force_single_graph to avoid KV-cache complications, and compares
 /// the final logit output at the last position.
 ///
 /// Run:
@@ -2334,18 +2333,14 @@ fn tinyllama_logit_conformance() {
         ort_logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
     );
 
-    // Step 2: Hologram compilation + execution.
-    eprintln!("Compiling hologram (force_single_graph)...");
-    let compiler = ModelCompiler {
-        force_single_graph: true,
-        ..Default::default()
-    };
+    // Step 2: Hologram compilation + execution via HoloRunner.
+    let compiler = ModelCompiler::default();
     let archive = compiler
         .compile(ModelSource::OnnxPath(model_path))
         .expect("hologram compilation failed");
 
-    let plan = hologram::load_from_bytes(&archive.bytes).expect("loading plan");
-    let tape = hologram::build_tape_from_plan(&plan).expect("building tape");
+    let runner = hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes)
+        .expect("loading runner");
 
     let position_ids: Vec<i64> = (0..seq as i64).collect();
 
@@ -2354,15 +2349,8 @@ fn tinyllama_logit_conformance() {
     inputs.set_with_shape(1, bytemuck::cast_slice(&attention_mask).to_vec(), vec![1, seq]);
     inputs.set_with_shape(2, bytemuck::cast_slice(&position_ids).to_vec(), vec![seq]);
 
-    // LLM models have KvWrite/KvRead ops — need KV state even for
-    // single-graph execution.
-    let mut kv_state = hologram::KvCacheState::new(
-        22,  // n_layers (TinyLlama)
-        4,   // n_kv_heads
-        64,  // head_dim
-        seq + 16,  // max_seq (just enough for the test)
-    );
-    let holo_outputs = hologram::execute_tape_with_kv(&tape, &plan, &inputs, &mut kv_state)
+    let mut kv_state = hologram::KvCacheState::new(22, 4, 64, 2048 + 16);
+    let holo_outputs = runner.execute_with_kv(&inputs, &mut kv_state)
         .expect("hologram execution failed");
     let (_, holo_bytes) = holo_outputs.get(0).expect("no hologram output");
     let holo_logits: Vec<f32> = holo_bytes
@@ -2596,15 +2584,14 @@ fn tinyllama_layer0_conformance() {
 
     // Hologram
     let compiler = ModelCompiler {
-        force_single_graph: true,
+        
         ..Default::default()
     };
     let archive = compiler
         .compile(ModelSource::OnnxPath(model_path))
         .expect("compilation failed");
 
-    let plan = hologram::load_from_bytes(&archive.bytes).expect("load");
-    let tape = hologram::build_tape_from_plan(&plan).expect("tape");
+    let runner = hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes).expect("runner");
 
     let position_ids: Vec<i64> = (0..seq as i64).collect();
     let mut inputs = hologram::GraphInputs::new();
@@ -2614,7 +2601,7 @@ fn tinyllama_layer0_conformance() {
 
     // Use KV state (model has KvWrite ops from attention fusion)
     let mut kv = hologram::KvCacheState::new(1, 4, 64, seq + 8);
-    let holo_outputs = hologram::execute_tape_with_kv(&tape, &plan, &inputs, &mut kv)
+    let holo_outputs = runner.execute_with_kv(&inputs, &mut kv)
         .expect("hologram execution failed");
     let (_, holo_bytes) = holo_outputs.get(0).expect("no output");
     let holo_out: Vec<f32> = holo_bytes.chunks_exact(4)
@@ -2679,13 +2666,12 @@ fn tinyllama_rmsnorm0_conformance() {
     let archive = compiler
         .compile(ModelSource::OnnxPath(model_path))
         .expect("compilation failed");
-    let plan = hologram::load_from_bytes(&archive.bytes).expect("load");
-    let tape = hologram::build_tape_from_plan(&plan).expect("tape");
+    let runner = hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes).expect("runner");
 
     let mut inputs = hologram::GraphInputs::new();
     inputs.set_with_shape(0, bytemuck::cast_slice(&input_ids).to_vec(), vec![1, seq]);
 
-    let holo_outputs = hologram::execute_tape(&tape, &plan, &inputs)
+    let holo_outputs = runner.execute(&inputs)
         .expect("execution failed");
     let (_, holo_bytes) = holo_outputs.get(0).expect("no output");
     let holo_out: Vec<f32> = holo_bytes.chunks_exact(4)
@@ -2733,13 +2719,12 @@ fn tinyllama_embedding_conformance() {
         .compile(ModelSource::OnnxPath(model_path))
         .expect("compilation failed");
 
-    let plan = hologram::load_from_bytes(&archive.bytes).expect("load");
-    let tape = hologram::build_tape_from_plan(&plan).expect("tape");
+    let runner = hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes).expect("runner");
 
     let mut inputs = hologram::GraphInputs::new();
     inputs.set_with_shape(0, bytemuck::cast_slice(&input_ids).to_vec(), vec![1, seq]);
 
-    let holo_outputs = hologram::execute_tape(&tape, &plan, &inputs)
+    let holo_outputs = runner.execute(&inputs)
         .expect("execution failed");
     let (_, holo_bytes) = holo_outputs.get(0).expect("no output");
     let holo_out: Vec<f32> = holo_bytes.chunks_exact(4)
@@ -2789,13 +2774,12 @@ fn tinyllama_probe_compare(fixture: &str, needs_mask: bool, needs_kv: bool) -> (
     let ort_out = &ort_outputs[0].data;
 
     let compiler = ModelCompiler {
-        force_single_graph: true,
+        
         seq_len_override: Some(seq as u64),
         ..Default::default()
     };
     let archive = compiler.compile(ModelSource::OnnxPath(model_path)).expect("compile failed");
-    let plan = hologram::load_from_bytes(&archive.bytes).expect("load failed");
-    let tape = hologram::build_tape_from_plan(&plan).expect("tape failed");
+    let runner = hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes).expect("runner");
 
     let position_ids: Vec<i64> = (0..seq as i64).collect();
     let mut inputs = hologram::GraphInputs::new();
@@ -2807,9 +2791,9 @@ fn tinyllama_probe_compare(fixture: &str, needs_mask: bool, needs_kv: bool) -> (
 
     let holo_outputs = if needs_kv {
         let mut kv = hologram::KvCacheState::new(1, 4, 64, seq + 8);
-        hologram::execute_tape_with_kv(&tape, &plan, &inputs, &mut kv)
+        runner.execute_with_kv(&inputs, &mut kv)
     } else {
-        hologram::execute_tape(&tape, &plan, &inputs)
+        runner.execute(&inputs)
     }.expect("execution failed");
 
     let (_, holo_bytes) = holo_outputs.get(0).expect("no output");

@@ -237,7 +237,7 @@ fn run_generation(
     let mut kv_state: Option<hologram::KvCacheState> = None;
     let use_kv_cache = model_meta.as_ref().is_some_and(|m| m.n_layers > 0);
     if use_kv_cache {
-        info!("kv_cache: enabled ({})", if runner.is_pipeline() { "pipeline archive" } else { "single-graph" });
+        info!("kv_cache: enabled");
     }
 
     let mut decode_start: Option<std::time::Instant> = None;
