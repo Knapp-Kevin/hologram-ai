@@ -529,9 +529,14 @@ impl ModelCompiler {
                 total_weight_bytes_before += w.len() as u64;
                 weight_store.insert(&spec.name, &spec.weight_group, w);
             }
-            // Embed weights directly in each sub-archive until shared weight
-            // offset alignment is fixed.
-            let weights_for_component = spec.weights.clone();
+            // For single-component models: embed weights in the sub-archive
+            // directly (no shared weight blob overhead).
+            // For multi-component: weights resolve from shared blob via WeightDedupIndex.
+            let weights_for_component = if n == 1 {
+                spec.weights.clone()
+            } else {
+                None
+            };
 
             descriptors.push(ComponentDescriptor {
                 name: spec.name.clone(),
@@ -562,10 +567,10 @@ impl ModelCompiler {
         let meta_section = meta.to_bytes();
         writer = writer.add_section(meta.section_kind(), meta_section);
 
-        // Build shared weight blob + dedup index. Sub-archives have no
-        // embedded weights — the loader resolves them from the shared blob.
+        // Build shared weight blob + dedup index for multi-component models.
+        // Single-component models embed weights in the sub-archive directly.
         let dedup_bytes = weight_store.total_bytes();
-        let pipeline = if dedup_bytes > 0 {
+        let pipeline = if dedup_bytes > 0 && n > 1 {
             let savings = if total_weight_bytes_before > 0 && dedup_bytes < total_weight_bytes_before {
                 (1.0 - dedup_bytes as f64 / total_weight_bytes_before as f64) * 100.0
             } else {
