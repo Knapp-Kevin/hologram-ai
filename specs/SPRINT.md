@@ -151,10 +151,12 @@ zero runtime code. All kernels belong in hologram base crate.
      Not caused by hologram-ai compiler changes (verified by reverting all
      changes). Root cause is in hologram base's float dispatch — likely
      introduced in Sprint 21 norm/attention refactoring.
-     **Root cause narrowed**: embedding and RmsNorm match ORT exactly.
-     Layer 0 diverges (cosine=0.943). Bug is in the fused attention kernel
-     (`dispatch_attention` in hologram base) — QKV projection + RoPE + SDPA
-     + output projection. Conformance tests in exec_conformance.rs.
+     **Root cause FIXED** in hologram base: two bugs —
+     (a) `FloatOp::Transpose` was a no-op passthrough (data never physically
+     reordered). Added `InlineTranspose` TapeKernel with baked shapes.
+     (b) Batched MatMul flattened all dims into single 2D multiply. Added
+     per-batch loop. TinyLlama logits now match ORT exactly (single-graph
+     conformance test passes). Pipeline path still needs shared-weight fix.
 
 ---
 
