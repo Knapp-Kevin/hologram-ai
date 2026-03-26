@@ -1343,9 +1343,14 @@ fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGraph> 
         Box::new(AggressiveShapePropagation),
         Box::new(DataPropagation),
         Box::new(AggressiveShapePropagation),
+        Box::new(DataPropagation),
         Box::new(ForceConcretize),
         Box::new(ConstantEvaluation),
         Box::new(ConstantFolding),
+        // Extra shape pass after ConstEval: newly-folded constants may
+        // enable shape inference that was blocked by unresolved shape
+        // subgraphs (common in cross-attention Reshape chains).
+        Box::new(AggressiveShapePropagation),
         Box::new(ConstantDeduplication),
         Box::new(DeadNodeElimination),
     ]);

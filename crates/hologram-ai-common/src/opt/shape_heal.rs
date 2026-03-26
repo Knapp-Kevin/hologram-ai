@@ -212,6 +212,165 @@ fn heal_shape(
         // Identity-like: copy input shape.
         AiOp::Identity | AiOp::Cast { .. } => input_shapes.first().cloned().map(|s| vec![s]),
 
+        // MatMul: [batch..., M, K] x [batch..., K, N] → [batch..., M, N]
+        AiOp::MatMul | AiOp::BatchMatMul => {
+            if input_shapes.len() >= 2
+                && input_shapes[0].len() >= 2
+                && input_shapes[1].len() >= 2
+            {
+                let a = &input_shapes[0];
+                let b = &input_shapes[1];
+                // Output = a's batch + second-to-last dims, b's last dim.
+                let mut shape: Vec<DimExpr> = a[..a.len() - 1].to_vec();
+                shape.push(b[b.len() - 1].clone());
+                Some(vec![Shape::from(shape)])
+            } else {
+                None
+            }
+        }
+
+        // Gemm: [M, K] x [K, N] → [M, N] (with optional transposes)
+        AiOp::Gemm { trans_a, trans_b, .. } => {
+            if input_shapes.len() >= 2
+                && input_shapes[0].len() >= 2
+                && input_shapes[1].len() >= 2
+            {
+                let a = &input_shapes[0];
+                let b = &input_shapes[1];
+                let m = if *trans_a {
+                    a.last().cloned()
+                } else {
+                    a.first().cloned()
+                };
+                let n = if *trans_b {
+                    b.first().cloned()
+                } else {
+                    b.last().cloned()
+                };
+                if let (Some(m_dim), Some(n_dim)) = (m, n) {
+                    Some(vec![Shape::from(vec![m_dim, n_dim])])
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+
+        // Transpose: permute input dims.
+        AiOp::Transpose { perm } => {
+            if let Some(input) = input_shapes.first() {
+                if !input.is_empty() && perm.len() == input.len() {
+                    let shape: Vec<DimExpr> =
+                        perm.iter().map(|&p| input[p as usize].clone()).collect();
+                    Some(vec![Shape::from(shape)])
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+
+        // Concat: sum along axis, keep other dims.
+        AiOp::Concat { axis } => {
+            if input_shapes.is_empty() || input_shapes.iter().any(|s| s.is_empty()) {
+                return None;
+            }
+            let first = &input_shapes[0];
+            let norm_axis = if *axis < 0 {
+                (first.len() as i64 + *axis) as usize
+            } else {
+                *axis as usize
+            };
+            if norm_axis >= first.len() {
+                return None;
+            }
+            // Sum the axis dimension across all inputs.
+            let mut axis_sum: u64 = 0;
+            for s in input_shapes {
+                if let Some(d) = s.get(norm_axis).and_then(|d| d.as_concrete()) {
+                    axis_sum += d;
+                } else {
+                    return None;
+                }
+            }
+            let mut shape = first.clone();
+            shape[norm_axis] = DimExpr::Concrete(axis_sum);
+            Some(vec![shape])
+        }
+
+        // Conv2d: output spatial dims from convolution arithmetic.
+        AiOp::Conv { kernel_shape, strides, pads, dilations, .. } => {
+            if let Some(input) = input_shapes.first() {
+                if input.len() >= 4 {
+                    // input: [N, C_in, H, W], weight: [C_out, C_in/groups, kH, kW]
+                    let n = input[0].clone();
+                    let c_out = input_shapes
+                        .get(1)
+                        .and_then(|w| w.first())
+                        .cloned()
+                        .unwrap_or(input[1].clone());
+                    let h_in = input[2].as_concrete().unwrap_or(1);
+                    let w_in = input[3].as_concrete().unwrap_or(1);
+                    let kh = kernel_shape.first().copied().unwrap_or(1);
+                    let kw = kernel_shape.get(1).copied().unwrap_or(1);
+                    let sh = strides.first().copied().unwrap_or(1);
+                    let sw = strides.get(1).copied().unwrap_or(1);
+                    let ph = pads.first().copied().unwrap_or(0);
+                    let pw = pads.get(1).copied().unwrap_or(0);
+                    let dh = dilations.first().copied().unwrap_or(1);
+                    let dw = dilations.get(1).copied().unwrap_or(1);
+                    let h_out = (h_in + 2 * ph - dh * (kh - 1) - 1) / sh + 1;
+                    let w_out = (w_in + 2 * pw - dw * (kw - 1) - 1) / sw + 1;
+                    Some(vec![Shape::from(vec![
+                        n,
+                        c_out,
+                        DimExpr::Concrete(h_out),
+                        DimExpr::Concrete(w_out),
+                    ])])
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+
+        // Softmax, norms: shape-preserving.
+        AiOp::Softmax { .. }
+        | AiOp::LogSoftmax { .. }
+        | AiOp::RmsNorm { .. }
+        | AiOp::LayerNorm { .. }
+        | AiOp::GroupNorm { .. }
+        | AiOp::InstanceNorm { .. } => {
+            input_shapes.first().cloned().map(|s| vec![s])
+        }
+
+        // Gather: replace indexed axis with indices shape.
+        AiOp::Gather { axis } | AiOp::GatherElements { axis } => {
+            if input_shapes.len() >= 2 && !input_shapes[0].is_empty() && !input_shapes[1].is_empty() {
+                let data = &input_shapes[0];
+                let indices = &input_shapes[1];
+                let norm_axis = if *axis < 0 {
+                    (data.len() as i64 + *axis) as usize
+                } else {
+                    *axis as usize
+                };
+                let mut shape = Vec::new();
+                for (i, d) in data.iter().enumerate() {
+                    if i == norm_axis {
+                        shape.extend(indices.iter().cloned());
+                    } else {
+                        shape.push(d.clone());
+                    }
+                }
+                Some(vec![Shape::from(shape)])
+            } else {
+                None
+            }
+        }
+
         _ => None,
     }
 }
