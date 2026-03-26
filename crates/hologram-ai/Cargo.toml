@@ -47,3 +47,8 @@ rkyv.workspace       = true
 # Provides onnx_builder (pure Rust, no ORT) for mini fixture tests.
 hologram-ai-conformance = { path = "../hologram-ai-conformance" }
 bytemuck = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "inference"
+harness = false
