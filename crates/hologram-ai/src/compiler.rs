@@ -1178,6 +1178,15 @@ fn log_post_repair_diagnostics(ai_graph: &AiGraph) {
         .count();
     if empty_count > 0 {
         warn!(count = empty_count, "tensors still have empty shapes after repair");
+        for (&tid, info) in &ai_graph.tensor_info {
+            if info.shape.is_empty() {
+                let name = ai_graph.tensor_names.get(&tid).map(|s| s.as_str()).unwrap_or("?");
+                // Find which node produces this tensor.
+                let producer = ai_graph.nodes.iter().find(|n| n.outputs.contains(&tid));
+                let op_name = producer.map(|n| format!("{:?}", n.op)).unwrap_or_else(|| "input/param".into());
+                warn!(tid, name, op = %op_name, "empty shape tensor");
+            }
+        }
     }
 
     // Dynamic-dim root causes.
