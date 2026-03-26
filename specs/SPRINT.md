@@ -167,17 +167,23 @@ zero runtime code. All kernels belong in hologram base crate.
   hologram base inline dispatch fixed (9 missing ops). Shape propagation hardened:
   never downgrade Concrete dims to Dynamic (prevents post-concretization shape
   regression in intermediate attention tensors). Output: [1, 32, 768] all finite.
-- [ ] **Stable Diffusion support (Plan 027)**
-  - [ ] Phase 1: GroupNorm lowering — `FloatOp::GroupNorm` in hologram base + lowering
-    in `strategy.rs`. Critical blocker: SD UNet uses GroupNorm in every residual block.
-  - [ ] Phase 2: Single-component UNet compilation — compile SD v1.5 UNet ONNX,
-    fix any op dispatch failures (cross-attention, Resize, SiLU). Conformance test.
-  - [ ] Phase 3: Output type system — add `kind` field to manifest TOML, map to
-    `ModelKind::ImageGen` (already exists in hologram base). Extend detection heuristic.
-  - [ ] Phase 4: Full 3-component pipeline — text encoder + UNet + VAE decoder via
-    `--manifest`. Uses existing `compile_multi_onnx()` infrastructure (Plan 021).
-  - [ ] Phase 5: Runtime image output — multi-component `HoloRunner`, denoising loop
-    (Euler-a scheduler), `--output` flag for PNG. CLI demo code (compiler-only respected).
+- [ ] **Stable Diffusion support (Plans 027-031)**
+  - [x] Phase 1: GroupNorm lowering — `FloatOp::GroupNorm` in hologram base + lowering.
+  - [x] Phase 2: UNet compilation — compiles (1634 nodes, 3.4 GB, 0 warnings).
+    Split decomposition, LLM detection fix, diffusion download.
+  - [x] Phase 3: Output type system — manifest `kind` field, `ModelKind::ImageGen`.
+  - [x] Plan 028: Runtime shape resolution — `shape_resolve` module, `InputMetas`,
+    all norm/softmax/reduce/conv/pool use shape-aware resolution via TapeKernel.
+  - [x] Plan 029: Compiler shape hardening — ShapeHealing for MatMul/Conv/Transpose/
+    Concat/Gather, extra AggressiveProp round, constant N-D metas in arena.
+  - [x] Plan 031: ONNX import parameter inference — `resolve_op_params` pass infers
+    missing Conv `kernel_shape` from weight tensor spatial dims.
+  - [ ] **BLOCKER: Runtime meta propagation** — prior ops produce wrong-sized outputs
+    that cascade. Need every op to return `InOutBufWithMeta(computed_output_shape)`
+    so the meta chain is authoritative, not reliant on compiled hints. This is the
+    "TCP header" approach — tensor metadata flows with data through the graph.
+  - [ ] Phase 4: Full 3-component pipeline — text encoder + UNet + VAE decoder.
+  - [ ] Phase 5: Runtime image output — denoising loop, `--output` flag for PNG.
 - [ ] Test with Whisper (encoder-decoder, audio)
 - [ ] Fix any op dispatch failures discovered
 - [ ] Goal: `hologram-ai compile -m model.onnx` works for top-20 HuggingFace models
