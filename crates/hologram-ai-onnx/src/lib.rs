@@ -17,6 +17,7 @@ mod dtype_map;
 pub mod error;
 mod graph_builder;
 mod op_map;
+mod resolve_op_params;
 mod tensor_map;
 
 /// Options controlling ONNX import behaviour.
@@ -83,6 +84,10 @@ fn import_onnx_inner(
 
     let (mut ai_graph, oracle) =
         graph_builder::build_ai_graph(&graph_proto, graph_name, model_dir)?;
+
+    // Resolve optional op parameters from weight/input shapes.
+    // Must run before shape propagation so Conv kernel_shape etc. are available.
+    resolve_op_params::resolve_op_params(&mut ai_graph);
 
     // Store opset version in graph metadata for downstream passes.
     if opset_version > 0 {
