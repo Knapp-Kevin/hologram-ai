@@ -10,6 +10,55 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+/// Semantic classification of tensor content.
+///
+/// Tracks what kind of information a tensor represents, enabling
+/// precision analysis and validation. The `natural_bits` method returns
+/// the estimated information content per the thermodynamic framework
+/// (Landauer's principle applied to neural network precision).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SemanticHint {
+    #[default]
+    Unknown,
+    /// Raw pixel data (RGB/RGBA). ~24 bits natural precision.
+    Pixel,
+    /// Latent space representation (VAE output). ~4 bits.
+    Latent,
+    /// Token IDs. log2(vocab_size) bits.
+    Token,
+    /// Dense embedding vectors. ~12 bits.
+    Embedding,
+    /// Attention scores (post-softmax). ~8 bits.
+    AttentionWeight,
+    /// Pre-softmax logits. ~12 bits.
+    Logit,
+    /// Residual stream (accumulates across layers). High precision needed.
+    Residual,
+    /// Normalization output (RmsNorm/LayerNorm). ~12 bits.
+    NormOutput,
+    /// Positional encoding (RoPE, sinusoidal). ~8 bits.
+    Position,
+}
+
+impl SemanticHint {
+    /// Estimated natural precision in bits.
+    /// Returns `None` for `Unknown`.
+    pub fn natural_bits(&self) -> Option<u8> {
+        match self {
+            Self::Unknown => None,
+            Self::Pixel => Some(24),
+            Self::Latent => Some(4),
+            Self::Token => Some(16),
+            Self::Embedding => Some(12),
+            Self::AttentionWeight => Some(8),
+            Self::Logit => Some(12),
+            Self::Residual => Some(16),
+            Self::NormOutput => Some(12),
+            Self::Position => Some(8),
+        }
+    }
+}
+
 /// Full type + quantization information for a tensor.
 #[derive(Debug, Clone)]
 pub struct TensorInfo {
@@ -23,6 +72,9 @@ pub struct TensorInfo {
     /// `Some(v)` = concrete value, `None` = dynamic/symbolic.
     /// Populated by the `DataPropagation` pass.
     pub known_i64_values: Option<Vec<Option<i64>>>,
+    /// Semantic classification of this tensor's content.
+    /// Populated by importers and optimization passes.
+    pub semantic: SemanticHint,
 }
 
 impl TensorInfo {
@@ -33,6 +85,7 @@ impl TensorInfo {
             shape,
             quant: QuantDescriptor::none(),
             known_i64_values: None,
+            semantic: SemanticHint::Unknown,
         }
     }
 }

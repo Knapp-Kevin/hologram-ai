@@ -8,7 +8,7 @@ use crate::{
 };
 use hologram_ai_common::{
     AiGraph, AiNode, AiOp, DType, Dim, DimVarSource, DimVarTable, ImportWarning, NodeId,
-    QuantDescriptor, Shape, TensorId, TensorInfo,
+    QuantDescriptor, SemanticHint, Shape, TensorId, TensorInfo,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -125,6 +125,7 @@ pub fn build_ai_graph(
                 shape: Shape::new(),
                 quant: QuantDescriptor::none(),
                 known_i64_values: None,
+                semantic: SemanticHint::Unknown,
             });
         }
         for &tid in &input_tids {
@@ -134,6 +135,7 @@ pub fn build_ai_graph(
                 shape: Shape::new(),
                 quant: QuantDescriptor::none(),
                 known_i64_values: None,
+                semantic: SemanticHint::Unknown,
             });
         }
 
@@ -385,6 +387,7 @@ fn value_info_to_tensor_info(vi: &ValueInfoProto, dim_vars: &mut DimVarTable) ->
         shape,
         quant: QuantDescriptor::none(),
         known_i64_values: None,
+        semantic: SemanticHint::Unknown,
     }
 }
 

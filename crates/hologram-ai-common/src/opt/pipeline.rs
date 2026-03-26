@@ -27,8 +27,8 @@ impl OptPipeline {
             decompose::OpDecomposition, kv_slot_injection::KvSlotInjection,
             position_ids_injection::PositionIdsInjection,
             resolve_slice_params::ResolveSliceParams,
-            rmsnorm_fusion::RmsNormFusion, shape_prop::ShapePropagation,
-            swiglu_fusion::SwiGluFusion,
+            rmsnorm_fusion::RmsNormFusion, semantic_prop::SemanticPropagation,
+            shape_prop::ShapePropagation, swiglu_fusion::SwiGluFusion,
         };
         Self::new(vec![
             // Resolve ONNX opset 10+ Slice params from constant inputs
@@ -63,6 +63,9 @@ impl OptPipeline {
             Box::new(PositionIdsInjection),
             Box::new(AttentionFusion),
             Box::new(KvSlotInjection),
+            // Infer semantic hints (Embedding, AttentionWeight, Residual, etc.)
+            // from op types. Runs after all fusion passes so fused ops are present.
+            Box::new(SemanticPropagation),
             // Decompose compound ops (ReduceL1/L2, DepthToSpace, SpaceToDepth)
             // into primitive ops before lowering.
             Box::new(OpDecomposition),
@@ -86,7 +89,7 @@ impl OptPipeline {
             constant_fold::ConstantFolding, data_prop::DataPropagation,
             dead_node::DeadNodeElimination, decompose::OpDecomposition,
             resolve_slice_params::ResolveSliceParams,
-            shape_prop::ShapePropagation,
+            semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
         };
         Self::new(vec![
             Box::new(ResolveSliceParams),
@@ -96,6 +99,7 @@ impl OptPipeline {
             Box::new(ConstantEvaluation),
             Box::new(ConstantFolding),
             Box::new(OpDecomposition),
+            Box::new(SemanticPropagation),
             Box::new(ConstantDeduplication),
             Box::new(DeadNodeElimination),
         ])

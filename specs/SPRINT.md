@@ -254,6 +254,19 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] GPU backend: CUDA kernel implementations
 - [ ] GPU backend: WebGPU command encoder batching + buffer reuse (Phase 8.3d)
 
+### Precision & Information Theory (Plan 032)
+- [x] `SemanticHint` enum on `TensorInfo` — classifies tensors by information
+  content (Pixel ~24 bits, Latent ~4 bits, Token ~16 bits, Embedding ~12 bits,
+  AttentionWeight ~8 bits, Residual ~16 bits, NormOutput ~12 bits, Position ~8 bits).
+  `SemanticPropagation` pass infers hints from op types after fusion passes.
+  GGUF importer seeds Token (input_ids) and Embedding (embed output).
+  Based on thermodynamic precision framework (Landauer's principle).
+- [ ] Epilogue fusion — awaiting hologram base Plan 030 (`FusedMatMulActivation`).
+  hologram-ai `MatMulRelu/Gelu/Silu` AiOp variants exist, lowering will wire to
+  fused `GraphOp` once available. See `specs/plans/032-precision-epilogue-roadmap.md`.
+- [ ] Mixed-precision attention — FP8 scores + f32 softmax (future, needs FP8 dtype)
+- [ ] Calibration-based precision assignment — measurement-driven, not search (future)
+
 ### Architecture
 - [x] Simplify post-concretization pipeline — extracted shared
   `post_concretization_repair()` with early convergence detection

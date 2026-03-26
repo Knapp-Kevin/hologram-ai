@@ -551,13 +551,7 @@ mod tests {
     }
 
     fn f32_info(shape: crate::ir::Shape) -> TensorInfo {
-        TensorInfo {
-            logical_dtype: DType::F32,
-            storage_dtype: DType::F32,
-            shape,
-            quant: QuantDescriptor::none(),
-            known_i64_values: None,
-        }
+        TensorInfo::new(DType::F32, shape)
     }
 
     /// Build a minimal SDPA graph: Q@K^T → Add(mask) → Softmax → MatMul(V)

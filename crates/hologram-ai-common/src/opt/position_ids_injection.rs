@@ -26,7 +26,7 @@
 //! For decode:  `position_ids = [kv_write_pos]`
 
 use super::pipeline::Pass;
-use crate::ir::{AiGraph, AiOp, AiParam, DType, TensorInfo};
+use crate::ir::{AiGraph, AiOp, AiParam, DType, SemanticHint, TensorInfo};
 use hologram_ai_quant::QuantDescriptor;
 
 /// Inject `position_ids` input to replace Range-based position computation.
@@ -101,6 +101,7 @@ impl Pass for PositionIdsInjection {
                     shape: range_shape.clone(),
                     quant: QuantDescriptor::none(),
                     known_i64_values: None, // Runtime-provided, not constant
+                    semantic: SemanticHint::Position,
                 }
             });
 

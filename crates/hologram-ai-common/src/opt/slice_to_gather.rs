@@ -10,7 +10,7 @@
 //! are left as-is (the lowering will handle them or error).
 
 use super::pipeline::Pass;
-use crate::ir::{shape_from_concrete, AiGraph, AiOp, AiParam, DType, TensorInfo};
+use crate::ir::{shape_from_concrete, AiGraph, AiOp, AiParam, DType, SemanticHint, TensorInfo};
 use hologram_ai_quant::QuantDescriptor;
 
 /// Convert Slice nodes to Gather nodes with constant index tensors.
@@ -117,6 +117,7 @@ impl Pass for SliceToGather {
                 shape: index_shape,
                 quant: QuantDescriptor::none(),
                 known_i64_values: Some(indices.iter().map(|&v| Some(v)).collect()),
+                semantic: SemanticHint::Unknown,
             };
 
             graph

@@ -6,7 +6,7 @@ pub mod param;
 pub mod shape;
 
 pub use dtype::DType;
-pub use graph::{AiGraph, ImportWarning, MetaValue, TensorInfo, ValidationError};
+pub use graph::{AiGraph, ImportWarning, MetaValue, SemanticHint, TensorInfo, ValidationError};
 pub use node::{AiNode, NodeId, TensorId};
 pub use op::{AiOp, KvLayout, OpCategory, ScatterReduce};
 pub use param::AiParam;

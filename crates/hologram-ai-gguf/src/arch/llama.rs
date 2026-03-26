@@ -8,7 +8,7 @@ use crate::parser::{GgmlType, GgufFile};
 use anyhow::{Context, Result};
 use hologram_ai_common::{
     canonical_vars, shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, ConstraintStore, DType,
-    DimExpr, DimVarSource, DimVarTable, QuantDescriptor, Shape, TensorId, TensorInfo,
+    DimExpr, DimVarSource, DimVarTable, QuantDescriptor, SemanticHint, Shape, TensorId, TensorInfo,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -24,6 +24,7 @@ pub fn build_llama_graph(
     // ── Token embedding ────────────────────────────────────────────────
     let input_shape = Shape::from_vec(vec![b.batch_dim.clone(), b.seq_len_dim.clone()]);
     let input_ids = b.add_input("input_ids", DType::INT64, input_shape);
+    b.set_semantic(input_ids, SemanticHint::Token);
     let embed_weight = b.add_tensor(
         "token_embd.weight",
         gguf,
@@ -37,6 +38,7 @@ pub fn build_llama_graph(
         DType::F32,
         b.bsv(emb_dim),
     );
+    b.set_semantic(embedded, SemanticHint::Embedding);
 
     let mut hidden = embedded;
     let ffn_dim = params.feed_forward_length as u64;
@@ -288,6 +290,12 @@ impl<'a> GraphAssembler<'a> {
         tid
     }
 
+    fn set_semantic(&mut self, tid: TensorId, hint: SemanticHint) {
+        if let Some(info) = self.tensor_info.get_mut(&tid) {
+            info.semantic = hint;
+        }
+    }
+
     fn has_tensor(&self, name: &str, gguf: &GgufFile) -> bool {
         gguf.tensors.iter().any(|t| t.name == name)
     }
@@ -339,6 +347,7 @@ impl<'a> GraphAssembler<'a> {
             shape,
             quant,
             known_i64_values: None,
+            semantic: SemanticHint::Unknown,
         };
 
         let byte_offset = gguf.data_offset + desc.offset;

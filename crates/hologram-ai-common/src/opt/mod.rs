@@ -14,6 +14,7 @@ pub mod resolve_slice_params;
 pub mod rmsnorm_fusion;
 pub mod shape_consistency;
 pub mod shape_heal;
+pub mod semantic_prop;
 pub mod shape_prop;
 pub mod slice_to_gather;
 pub mod swiglu_fusion;

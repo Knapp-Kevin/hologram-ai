@@ -2,7 +2,9 @@
 
 use crate::{dtype_map::onnx_dtype, onnx_pb::TensorProto};
 use anyhow::Context;
-use hologram_ai_common::{shape_from_concrete, AiParam, DType, QuantDescriptor, TensorInfo};
+use hologram_ai_common::{
+    shape_from_concrete, AiParam, DType, QuantDescriptor, SemanticHint, TensorInfo,
+};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
@@ -29,6 +31,7 @@ pub fn tensor_to_param(
         shape,
         quant: QuantDescriptor::none(),
         known_i64_values: None,
+        semantic: SemanticHint::Unknown,
     };
 
     // Use Mmap for external data to avoid loading multi-GB weight files into memory.
