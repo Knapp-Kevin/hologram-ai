@@ -237,8 +237,6 @@ fn resolve_op(
             trans_a,
             trans_b,
         } => {
-            // When trans_b=true, weight is stored as [n, k] instead of [k, n].
-            // Swap the dim extraction accordingly.
             let (m, k, n, recipes) = if *trans_b {
                 match gemm_trans_b_recipes(inputs, tensor_info, dim_var_names) {
                     Some(v) => v,
@@ -250,6 +248,29 @@ fn resolve_op(
                     None => return Ok(None),
                 }
             };
+            // Validate k against weight param size when available.
+            if let Some(weight_info) = inputs.get(1).and_then(|tid| tensor_info.get(tid)) {
+                let weight_elems: u64 = weight_info.shape.iter()
+                    .filter_map(|d| d.as_concrete())
+                    .product();
+                if k > 0 && n > 0 && weight_elems > 0 && (k as u64 * n as u64) != weight_elems {
+                    let a_shape: Vec<_> = inputs.first()
+                        .and_then(|tid| tensor_info.get(tid))
+                        .map(|i| i.shape.iter().filter_map(|d| d.as_concrete()).collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    let w_shape: Vec<_> = weight_info.shape.iter()
+                        .filter_map(|d| d.as_concrete())
+                        .collect();
+                    tracing::warn!(
+                        m, k, n,
+                        weight_elems,
+                        ?a_shape,
+                        ?w_shape,
+                        trans_b,
+                        "Gemm k*n doesn't match weight element count"
+                    );
+                }
+            }
             let qb = quant_code(inputs.get(1), tensor_info);
             (
                 FloatOp::Gemm {

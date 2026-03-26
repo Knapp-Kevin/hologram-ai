@@ -26,10 +26,14 @@ impl OptPipeline {
             data_prop::DataPropagation, dead_node::DeadNodeElimination,
             decompose::OpDecomposition, kv_slot_injection::KvSlotInjection,
             position_ids_injection::PositionIdsInjection,
+            resolve_slice_params::ResolveSliceParams,
             rmsnorm_fusion::RmsNormFusion, shape_prop::ShapePropagation,
             swiglu_fusion::SwiGluFusion,
         };
         Self::new(vec![
+            // Resolve ONNX opset 10+ Slice params from constant inputs
+            // before shape propagation needs the concrete slice bounds.
+            Box::new(ResolveSliceParams),
             Box::new(ShapePropagation),
             Box::new(DataPropagation),
             // Second shape pass: DataPropagation fills known_i64_values for
@@ -81,9 +85,11 @@ impl OptPipeline {
             const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,
             constant_fold::ConstantFolding, data_prop::DataPropagation,
             dead_node::DeadNodeElimination, decompose::OpDecomposition,
+            resolve_slice_params::ResolveSliceParams,
             shape_prop::ShapePropagation,
         };
         Self::new(vec![
+            Box::new(ResolveSliceParams),
             Box::new(ShapePropagation),
             Box::new(DataPropagation),
             Box::new(ShapePropagation),
