@@ -152,6 +152,25 @@ zero runtime code. All kernels belong in hologram base crate.
   universal (1 or N components). Removes ~400+ lines of dual-model code
   and eliminates the entire class of layout mismatch bugs.
 
+### P7: LUT-GEMM Wiring + Compile-Time Quantization (Plan 030)
+- [x] `--quantize q4_0` CLI flag on compile command (`cli.rs`)
+- [x] `QuantStrategy` enum (`None`, `Auto`, `Q4_0`, `Q8_0`) threaded through
+  `ModelCompiler.quant_strategy` → `LoweringOptions` → `lower()`
+- [x] `try_convert_f32_to_lut4` in `builder.rs` — compile-time f32 → k-means
+  Q4 quantization for ONNX MatMul weights. Skips small weights (<256 per dim).
+  Uses `hologram::hologram_exec::lut_gemm::quantize::quantize_4bit` + rkyv serialize.
+- [x] GGUF Q4_0 → LUT-GEMM interception already wired (`try_convert_q4_0_to_lut4`
+  in builder.rs:340-377, intercepts `Gemm { quant_b: 1 }`)
+- [x] Per-step timing instrumentation in `run_cmd.rs` (archive load, prefill,
+  per-decode-step timing for first 5 steps)
+- [x] Criterion benchmark harness (`benches/inference.rs` — TTFT, 20-token
+  decode, single decode step for ONNX + GGUF)
+- [ ] E2E validation: compile with `--quantize q4_0`, run, verify `MatMulLut4`
+  dispatches fire and produce coherent output
+- [ ] Wire epilogue fusion: `MatMulRelu`/`MatMulGelu`/`MatMulSilu` AiOp variants
+  → `FusedMatMulActivation` graph ops (hologram base Plan 030 kernels now
+  available: `InlineMatMulActivation`, `MatMulLut4Activation`)
+
 ---
 
 ## Medium Term: Multi-model support
@@ -261,9 +280,11 @@ zero runtime code. All kernels belong in hologram base crate.
   `SemanticPropagation` pass infers hints from op types after fusion passes.
   GGUF importer seeds Token (input_ids) and Embedding (embed output).
   Based on thermodynamic precision framework (Landauer's principle).
-- [ ] Epilogue fusion — awaiting hologram base Plan 030 (`FusedMatMulActivation`).
-  hologram-ai `MatMulRelu/Gelu/Silu` AiOp variants exist, lowering will wire to
-  fused `GraphOp` once available. See `specs/plans/032-precision-epilogue-roadmap.md`.
+- [ ] Epilogue fusion — hologram base Plan 030 **DONE** (Sprint 23):
+  `InlineMatMulActivation`, `MatMulLut4Activation`, `MatMulLut8Activation`,
+  `InlineRmsNormActivation`, bias fusion (`FusedMatMulBiasActivation`).
+  hologram-ai `MatMulRelu/Gelu/Silu` AiOp variants exist but still lower as
+  plain `MatMul` — needs lowering update to emit fused graph ops (Plan 030 P7).
 - [ ] Mixed-precision attention — FP8 scores + f32 softmax (future, needs FP8 dtype)
 - [ ] Calibration-based precision assignment — measurement-driven, not search (future)
 

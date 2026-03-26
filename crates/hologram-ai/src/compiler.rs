@@ -156,6 +156,10 @@ pub struct ModelCompiler {
     /// When `Some(n)`, all seq-like dims are set to `n` instead of the
     /// model's `context_length`. Use `None` to auto-detect from metadata.
     pub seq_len_override: Option<u64>,
+    /// Weight quantization strategy for LUT-GEMM acceleration.
+    /// When set to `Q4_0`, f32 MatMul weights are quantized at compile time
+    /// to 4-bit centroid indices, enabling the LUT-GEMM execution path.
+    pub quant_strategy: hologram_ai_common::lower::QuantStrategy,
 }
 
 impl Default for ModelCompiler {
@@ -163,11 +167,19 @@ impl Default for ModelCompiler {
         Self {
             mmap: true,
             seq_len_override: None,
+            quant_strategy: hologram_ai_common::lower::QuantStrategy::Auto,
         }
     }
 }
 
 impl ModelCompiler {
+    /// Build `LoweringOptions` from this compiler's configuration.
+    fn lowering_options(&self) -> LoweringOptions {
+        LoweringOptions {
+            quant_strategy: self.quant_strategy,
+        }
+    }
+
     /// Compile a model source into a `.holo` archive.
     ///
     /// For LLM models (GGUF with transformer architecture), produces a pipeline
@@ -351,10 +363,11 @@ impl ModelCompiler {
         let node_count = ai_graph.nodes.len();
 
         // Lower (single-graph only for debug mode).
+        let lowering_opts = self.lowering_options();
         let lower_out = lower(
             &ai_graph,
             &mem_plan.kv_cache_layout,
-            &LoweringOptions::default(),
+            &lowering_opts,
             &LowerPhase::Forward,
         )
         .context("lowering failed")?;
@@ -435,10 +448,11 @@ impl ModelCompiler {
         let import_warnings = ai_graph.warnings.len();
         let node_count = ai_graph.nodes.len();
 
+        let lowering_opts = self.lowering_options();
         let lower_out = lower(
             &ai_graph,
             &mem_plan.kv_cache_layout,
-            &LoweringOptions::default(),
+            &lowering_opts,
             &LowerPhase::Forward,
         )
         .context("lowering failed")?;
@@ -562,11 +576,11 @@ impl ModelCompiler {
                 weight_source,
             });
 
-            let opts = LoweringOptions::default();
+            let lowering_opts = self.lowering_options();
             let archive = compile_one_component(
                 spec.graph,
                 &spec.mem_plan.kv_cache_layout,
-                &opts,
+                &lowering_opts,
                 &spec.phase,
                 weights_for_component,
             )

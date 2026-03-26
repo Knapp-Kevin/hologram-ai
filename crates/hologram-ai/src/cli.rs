@@ -44,6 +44,10 @@ enum Command {
         /// All shapes are baked to this value. Inputs are padded at runtime.
         #[arg(long, value_name = "N")]
         seq_len: Option<u64>,
+        /// Quantize f32 weights at compile time for LUT-GEMM acceleration.
+        /// Supported: q4_0 (4-bit, 16 centroids), q8_0 (8-bit, 256 centroids).
+        #[arg(long, value_name = "SCHEME")]
+        quantize: Option<String>,
     },
     /// Run a compiled `.holo` archive with shape-aware inference.
     Run(hologram_ai::commands::run_cmd::RunArgs),
@@ -79,6 +83,7 @@ fn main() -> anyhow::Result<()> {
             output,
             tokenizer,
             seq_len,
+            quantize,
         } => {
             let (source, model_path, manifest_kind) = if let Some(manifest_path) = &manifest {
                 let (source, kind) = parse_manifest(manifest_path)?;
@@ -89,8 +94,15 @@ fn main() -> anyhow::Result<()> {
                 (source, model_path.clone(), None)
             };
 
+            let quant_strategy = match quantize.as_deref() {
+                Some("q4_0" | "Q4_0") => hologram_ai_common::lower::QuantStrategy::Q4_0,
+                Some("q8_0" | "Q8_0") => hologram_ai_common::lower::QuantStrategy::Q8_0,
+                Some(other) => anyhow::bail!("unsupported quantization scheme '{other}' (supported: q4_0, q8_0)"),
+                None => hologram_ai_common::lower::QuantStrategy::Auto,
+            };
             let compiler = ModelCompiler {
                 seq_len_override: seq_len,
+                quant_strategy,
                 ..Default::default()
             };
             let compiled = compiler.compile(source)?;

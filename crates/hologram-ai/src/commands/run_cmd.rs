@@ -62,8 +62,10 @@ pub struct RunArgs {
 
 /// Execute the run command using shape-aware inference.
 pub fn execute(args: RunArgs) -> anyhow::Result<()> {
+    let load_start = std::time::Instant::now();
     let runner = HoloRunner::from_path(&args.file, args.cache_dir.as_deref(), args.config.as_deref())
         .with_context(|| format!("loading archive {}", args.file.display()))?;
+    info!("archive loaded in {:.1}ms", load_start.elapsed().as_secs_f64() * 1000.0);
 
     // Load optional metadata sections.
     // Try the runner's effective bytes first (sub-archive for pipeline),
@@ -293,6 +295,7 @@ fn run_generation(
         }
 
         // Execute: use KV cache if available, otherwise standard shape-aware.
+        let step_start = std::time::Instant::now();
         let outputs = if use_kv_cache {
             // Lazy-init KV cache on first call.
             if kv_state.is_none() {
@@ -364,10 +367,13 @@ fn run_generation(
         print!("{new_text}");
         std::io::stdout().flush().ok();
 
+        let step_ms = step_start.elapsed().as_secs_f64() * 1000.0;
         if step == 0 {
             let ttft_ms = start.elapsed().as_secs_f64() * 1000.0;
-            info!("\n[TTFT {ttft_ms:.0}ms]");
+            info!("\n[TTFT {ttft_ms:.0}ms | prefill {step_ms:.1}ms]");
             decode_start = Some(std::time::Instant::now());
+        } else if step < 5 || config.verbose {
+            info!("[step {step}: {step_ms:.1}ms]");
         }
     }
 
