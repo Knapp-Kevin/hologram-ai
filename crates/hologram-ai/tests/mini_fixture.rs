@@ -233,9 +233,11 @@ fn gguf_causal_logit_consistency() {
 #[test]
 #[cfg(feature = "e2e")]
 fn onnx_kv_decode_matches_full_prefill() {
-    let model = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
+    let causal = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
+    let fallback = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
+    let model = if causal.exists() { causal } else { fallback };
     if !model.exists() {
-        eprintln!("SKIP: {} not found", model.display());
+        eprintln!("SKIP: no TinyLlama ONNX model found");
         return;
     }
 
@@ -379,9 +381,11 @@ fn onnx_kv_decode_matches_full_prefill() {
 #[test]
 #[cfg(feature = "e2e")]
 fn onnx_kv_decode_variable_length() {
-    let model = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
+    let causal = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
+    let fallback = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
+    let model = if causal.exists() { causal } else { fallback };
     if !model.exists() {
-        eprintln!("SKIP: {} not found", model.display());
+        eprintln!("SKIP: no TinyLlama ONNX model found");
         return;
     }
 
