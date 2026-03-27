@@ -1600,6 +1600,9 @@ pub struct HoloRunner {
     shape_ctx: Option<ShapeContextGraph>,
     /// Pre-compiled execution tape (compiled seq_len shapes).
     tape: hologram::hologram_exec::tape::EnumTape,
+    /// Persistent weight cache for LUT-GEMM. Deserialized quantized weights
+    /// are cached here across execution calls, avoiding per-step rkyv overhead.
+    weight_cache: std::cell::RefCell<hologram::WeightCache>,
 }
 
 impl HoloRunner {
@@ -1739,7 +1742,13 @@ impl HoloRunner {
             let tape = hologram::build_tape_from_plan(&plan)
                 .map_err(|e| anyhow::anyhow!("building tape: {e}"))?;
 
-            Ok(Self { _storage: storage, plan, shape_ctx, tape })
+            Ok(Self {
+                _storage: storage,
+                plan,
+                shape_ctx,
+                tape,
+                weight_cache: std::cell::RefCell::new(hologram::WeightCache::new()),
+            })
         } else {
             // Legacy single-graph archive (backward compat).
             let shape_ctx = read_shape_context_from_plan(&probe, bytes)?;
@@ -1751,6 +1760,7 @@ impl HoloRunner {
                 plan: probe,
                 shape_ctx,
                 tape,
+                weight_cache: std::cell::RefCell::new(hologram::WeightCache::new()),
             })
         }
     }
@@ -1799,8 +1809,10 @@ impl HoloRunner {
         inputs: &hologram::GraphInputs,
         kv_state: &mut hologram::KvCacheState,
     ) -> anyhow::Result<hologram::GraphOutputs> {
-        hologram::execute_tape_with_kv(&self.tape, &self.plan, inputs, kv_state)
-            .map_err(|e| anyhow::anyhow!("{e}"))
+        hologram::execute_tape_with_kv_cached(
+            &self.tape, &self.plan, inputs, kv_state, &self.weight_cache,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
 
