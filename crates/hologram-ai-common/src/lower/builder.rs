@@ -378,9 +378,10 @@ pub fn lower(
                     }
                 }
 
-                // ── LUT-GEMM interception for f32 MatMul (compile-time quantization) ──
-                // When --quantize q4_0 is requested, convert f32 weight MatMuls
-                // to LUT-GEMM on-the-fly during lowering.
+                // ── LUT-GEMM interception for plain f32 MatMul ──
+                // Fused variants (FusedMatMulActivation) keep their f32 fused kernel
+                // which already eliminates the intermediate buffer. Only plain MatMul
+                // benefits from LUT-GEMM quantization.
                 if matches!(opts.quant_strategy, QuantStrategy::Q4_0)
                     && matches!(result.graph_op, GraphOp::Float(FloatOp::MatMul { .. }))
                 {
@@ -391,7 +392,7 @@ pub fn lower(
                     )? {
                         builder = builder.matmul_lut_4bit(
                             ConstantData::Bytes(lut_result.serialized_weights),
-                            &[input_idxs[0]], // activation input only
+                            &[input_idxs[0]],
                         );
                         let idx = builder.len() - 1;
                         if let Some(&tid) = node.outputs.first() {
@@ -409,13 +410,18 @@ pub fn lower(
                             cols = lut_result.cols,
                             "LUT-GEMM: quantized f32 MatMul → MatMulLut4"
                         );
-                        continue; // Skip normal FloatNeedsShape emission.
+                        continue;
                     }
                 }
 
                 // Capture FloatOp for shape projection before move.
+                // Extract FloatOp for shape projection. For fused ops, use the
+                // base op's shape semantics (e.g., MatMul for FusedMatMulActivation).
                 let float_op_for_spec: Option<FloatOp> = match &result.graph_op {
                     GraphOp::Float(fop) => Some(*fop),
+                    GraphOp::FusedMatMulActivation { m, k, n, .. } => {
+                        Some(FloatOp::MatMul { m: *m, k: *k, n: *n })
+                    }
                     _ => None,
                 };
 

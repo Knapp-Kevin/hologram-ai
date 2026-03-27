@@ -66,12 +66,10 @@ impl LoweringStrategy for ConcreteStrategy {
         match resolve_op(op, inputs, tensor_info, dim_var_names)? {
             Some((float_op, recipes)) => {
                 if recipes.iter().any(is_deferred) {
-                    Ok(None) // Has symbolic dims — pass to next strategy
+                    Ok(None)
                 } else {
-                    Ok(Some(SymbolicLowering {
-                        graph_op: GraphOp::Float(float_op),
-                        recipe: None,
-                    }))
+                    let graph_op = wrap_graph_op(op, float_op);
+                    Ok(Some(SymbolicLowering { graph_op, recipe: None }))
                 }
             }
             None => Ok(None),
@@ -105,10 +103,8 @@ impl LoweringStrategy for DeferredStrategy {
                 } else {
                     None
                 };
-                Ok(Some(SymbolicLowering {
-                    graph_op: GraphOp::Float(float_op),
-                    recipe,
-                }))
+                let graph_op = wrap_graph_op(op, float_op);
+                Ok(Some(SymbolicLowering { graph_op, recipe }))
             }
             None => Ok(None),
         }
@@ -208,6 +204,32 @@ fn gemm_trans_b_recipes(
     };
 
     Some((m, k, n, recipes))
+}
+
+/// Wrap a resolved `FloatOp` in the appropriate `GraphOp`.
+///
+/// For fused AiOp variants (MatMulRelu/Gelu/Silu), wraps in
+/// `GraphOp::FusedMatMulActivation` so the tape builder maps to the
+/// fused kernel (InlineMatMulActivation) which applies the activation
+/// in-register after matmul writeback — eliminating the intermediate buffer.
+///
+/// For all other ops, wraps in `GraphOp::Float`.
+fn wrap_graph_op(ai_op: &AiOp, float_op: FloatOp) -> GraphOp {
+    match ai_op {
+        AiOp::MatMulRelu => match float_op {
+            FloatOp::MatMul { m, k, n } => GraphOp::FusedMatMulActivation { m, k, n, activation: FloatOp::Relu },
+            _ => GraphOp::Float(float_op),
+        },
+        AiOp::MatMulGelu => match float_op {
+            FloatOp::MatMul { m, k, n } => GraphOp::FusedMatMulActivation { m, k, n, activation: FloatOp::Gelu },
+            _ => GraphOp::Float(float_op),
+        },
+        AiOp::MatMulSilu => match float_op {
+            FloatOp::MatMul { m, k, n } => GraphOp::FusedMatMulActivation { m, k, n, activation: FloatOp::Silu },
+            _ => GraphOp::Float(float_op),
+        },
+        _ => GraphOp::Float(float_op),
+    }
 }
 
 fn resolve_op(
