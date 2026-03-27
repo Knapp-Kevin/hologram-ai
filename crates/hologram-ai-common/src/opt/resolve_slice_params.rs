@@ -39,15 +39,17 @@ impl Pass for ResolveSliceParams {
                 let resolved_axes = read_i64_param(&graph.params, node.inputs.get(3).copied());
                 let resolved_steps = read_i64_param(&graph.params, node.inputs.get(4).copied());
 
-                if let (Some(s), Some(e)) = (resolved_starts, resolved_ends) {
-                    tracing::info!(
-                        starts = ?s, ends = ?e,
-                        "resolved Slice params from constant inputs"
-                    );
+                // Resolve what we can. If ends is unknown (dynamic, e.g.,
+                // sequence length), use i64::MAX as the ONNX sentinel for
+                // "slice to end of axis". This lets the lowering and runtime
+                // handle the dynamic bound correctly.
+                if let Some(s) = resolved_starts {
+                    let n = s.len();
+                    let e = resolved_ends.unwrap_or_else(|| vec![i64::MAX; n]);
                     *starts = s;
                     *ends = e;
-                    *axes = resolved_axes.unwrap_or_else(|| (0..starts.len() as i64).collect());
-                    *steps = resolved_steps.unwrap_or_else(|| vec![1; starts.len()]);
+                    *axes = resolved_axes.unwrap_or_else(|| (0..n as i64).collect());
+                    *steps = resolved_steps.unwrap_or_else(|| vec![1; n]);
                 }
             }
         }

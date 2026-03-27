@@ -177,6 +177,7 @@ impl ShapeProjection for FloatOp {
             FloatOp::TopK { .. } | FloatOp::NonZero | FloatOp::Compress { .. } => {
                 (ShapeSpecRepr::Unknown, None)
             }
+            FloatOp::ArgMax { .. } => (ShapeSpecRepr::DropLastDim(0), None),
 
             // ── KV cache ────────────────────────────────────────────────────
             FloatOp::KvWrite { .. } => (ShapeSpecRepr::SameAs(0), None),

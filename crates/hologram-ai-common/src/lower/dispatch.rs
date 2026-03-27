@@ -207,6 +207,15 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
             reason: "OneHot decomposition not yet implemented",
         },
 
+        // ── ArgMax/ArgMin ──────────────────────────────────────────────
+        ArgMax { axis, .. } => D::GraphOp(GraphOp::Float(FloatOp::ArgMax {
+            axis: *axis as u32,
+            keepdims: matches!(op, AiOp::ArgMax { keepdims: true, .. }),
+        })),
+        ArgMin { .. } => D::Unsupported {
+            reason: "ArgMin not yet implemented",
+        },
+
         // ── Control flow (Phase 4): subgraph lowering ──────────────────
         If { .. } | Loop { .. } | Scan { .. } => D::Subgraph,
 
