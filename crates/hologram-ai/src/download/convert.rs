@@ -27,15 +27,32 @@ os.makedirs(output_dir, exist_ok=True)
 warnings.filterwarnings("ignore")
 logging.disable(logging.WARNING)
 
-from transformers import AutoModel, AutoTokenizer, AutoConfig
+from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM, AutoModel
 import torch
 
 print(f"Loading model {model_id}...", file=sys.stderr)
 config = AutoConfig.from_pretrained(model_id)
-config.use_cache = False  # avoid DynamicCache in outputs
-model = AutoModel.from_pretrained(model_id, config=config, torch_dtype=torch.float32)
+config.use_cache = False
 
-# Save tokenizer and config
+# Detect causal decoder models (GPT, LLaMA, Mistral, etc.) and use
+# AutoModelForCausalLM so the ONNX export produces logits directly.
+# Encoder models (BERT, etc.) use AutoModel with hidden_state output.
+CAUSAL_TYPES = {
+    "llama", "gpt2", "gpt_neo", "gpt_neox", "mistral", "qwen2", "phi",
+    "gemma", "gemma2", "starcoder2", "codegen", "falcon",
+}
+model_type = getattr(config, "model_type", "")
+is_causal = model_type in CAUSAL_TYPES
+
+if is_causal:
+    print(f"Causal LM ({model_type}) — exporting with logits output", file=sys.stderr)
+    model = AutoModelForCausalLM.from_pretrained(model_id, config=config, torch_dtype=torch.float32)
+    output_names = ["logits"]
+else:
+    print(f"Encoder model ({model_type}) — exporting hidden states", file=sys.stderr)
+    model = AutoModel.from_pretrained(model_id, config=config, torch_dtype=torch.float32)
+    output_names = ["last_hidden_state"]
+
 try:
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     tokenizer.save_pretrained(output_dir)
@@ -44,17 +61,15 @@ except Exception as e:
 
 config.save_pretrained(output_dir)
 
-# Build dummy inputs
 seq_len = 8
 dummy_ids = torch.ones(1, seq_len, dtype=torch.long)
 dummy_mask = torch.ones(1, seq_len, dtype=torch.long)
 
 input_names = ["input_ids", "attention_mask"]
-output_names = ["last_hidden_state"]
 dynamic_axes = {
     "input_ids": {0: "batch_size", 1: "sequence_length"},
     "attention_mask": {0: "batch_size", 1: "sequence_length"},
-    "last_hidden_state": {0: "batch_size", 1: "sequence_length"},
+    output_names[0]: {0: "batch_size", 1: "sequence_length"},
 }
 
 onnx_path = os.path.join(output_dir, "model.onnx")
