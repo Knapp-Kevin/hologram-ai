@@ -437,7 +437,11 @@ impl<'a> GraphAssembler<'a> {
             dim_vars: self.dim_vars,
             shape_constraints: ConstraintStore::default(),
             subgraphs: HashMap::new(),
-            tensor_names: HashMap::new(),
+            tensor_names: self
+                .tensor_name_to_tid
+                .iter()
+                .map(|(name, &tid)| (tid, name.clone()))
+                .collect(),
             topo_cache: Default::default(),
         })
     }

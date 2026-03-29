@@ -141,6 +141,8 @@ pub struct ComponentSpec<'a> {
     /// Weight bytes (borrowed). Components sharing a weight group should pass
     /// the same slice to the first component and `None` to the rest.
     pub weights: Option<&'a [u8]>,
+    /// Per-tensor weight offset index for this component.
+    pub weight_index: Option<hologram::hologram_archive::weight::index::WeightIndex>,
 }
 
 // ── Model compiler ────────────────────────────────────────────────────────────
@@ -285,7 +287,7 @@ impl ModelCompiler {
         // Pipeline format is universal — even single-component models use it.
         use hologram_ai_common::sections::meta::ComponentRole;
 
-        let weights = collect_weight_bytes(&ai_graph)?;
+        let (weights, weight_index) = collect_weight_bytes(&ai_graph)?;
         let total_weight_bytes = weights.len() as u64;
         let extra_weights: Option<&[u8]> = if weights.is_empty() { None } else { Some(&weights) };
 
@@ -303,6 +305,7 @@ impl ModelCompiler {
                 mem_plan: &mem_plan,
                 phase: LowerPhase::Forward,
                 weights: extra_weights,
+                weight_index: Some(weight_index),
             }],
             vec![], // no inter-component connections for single model
         )?;
@@ -386,18 +389,20 @@ impl ModelCompiler {
         let compilation = hologram::compile(lower_out.graph).context("hologram::compile failed")?;
         let unpacked = unpack_archive(&compilation.archive)?;
         let layer_header = build_tensor_port_header(&unpacked.plan, &ai_graph);
-        let weights = collect_weight_bytes(&ai_graph)?;
+        let (weights, weight_index) = collect_weight_bytes(&ai_graph)?;
         let bundle = if lower_out.context.is_empty() {
             None
         } else {
             Some(&lower_out.context)
         };
         let total_weight_bytes = weights.len() as u64;
+        let wi = if weight_index.entries.is_empty() { None } else { Some(&weight_index) };
         let archive_bytes = build_final_archive(
             unpacked,
             if weights.is_empty() { None } else { Some(&weights) },
             Some(layer_header),
             bundle,
+            wi,
         )?;
 
         let archive = HoloArchive {
@@ -478,18 +483,20 @@ impl ModelCompiler {
             hologram::compile(lower_out.graph).context("hologram::compile failed")?;
         let unpacked = unpack_archive(&compilation.archive)?;
         let layer_header = build_tensor_port_header(&unpacked.plan, &ai_graph);
-        let weights = collect_weight_bytes(&ai_graph)?;
+        let (weights, weight_index) = collect_weight_bytes(&ai_graph)?;
         let bundle = if lower_out.context.is_empty() {
             None
         } else {
             Some(&lower_out.context)
         };
         let total_weight_bytes = weights.len() as u64;
+        let wi = if weight_index.entries.is_empty() { None } else { Some(&weight_index) };
         let archive_bytes = build_final_archive(
             unpacked,
             if weights.is_empty() { None } else { Some(&weights) },
             Some(layer_header),
             bundle,
+            wi,
         )?;
 
         let archive = HoloArchive {
@@ -568,6 +575,11 @@ impl ModelCompiler {
             } else {
                 None
             };
+            let wi_for_component = if n == 1 {
+                spec.weight_index.as_ref()
+            } else {
+                None
+            };
 
             descriptors.push(ComponentDescriptor {
                 name: spec.name.clone(),
@@ -583,6 +595,7 @@ impl ModelCompiler {
                 &lowering_opts,
                 &spec.phase,
                 weights_for_component,
+                wi_for_component,
             )
             .with_context(|| format!("compiling component '{}'", spec.name))?;
             info!(
@@ -722,8 +735,10 @@ impl ModelCompiler {
         // Collect weights and build ComponentSpecs.
         let mut specs: Vec<ComponentSpec<'_>> = Vec::with_capacity(graphs.len());
 
-        // Collect weight blobs for each weight group (stored in Vec for lifetime).
+        // Collect weight blobs and indexes for each weight group.
         let mut weight_blobs: Vec<Vec<u8>> = Vec::new();
+        let mut weight_indexes: Vec<hologram::hologram_archive::weight::index::WeightIndex> =
+            Vec::new();
         let mut weight_blob_indices: Vec<Option<usize>> = Vec::new();
 
         for (i, comp) in components.iter().enumerate() {
@@ -731,10 +746,11 @@ impl ModelCompiler {
             let is_first_in_group = weight_group_first.get(&comp.weight_group) == Some(&i);
 
             if is_first_in_group {
-                let w = collect_weight_bytes(graph)?;
+                let (w, wi) = collect_weight_bytes(graph)?;
                 if !w.is_empty() {
                     weight_blob_indices.push(Some(weight_blobs.len()));
                     weight_blobs.push(w);
+                    weight_indexes.push(wi);
                 } else {
                     weight_blob_indices.push(None);
                 }
@@ -747,6 +763,8 @@ impl ModelCompiler {
             let graph = &graphs[i];
             let weights: Option<&[u8]> = weight_blob_indices[i]
                 .map(|idx| weight_blobs[idx].as_slice());
+            let weight_index = weight_blob_indices[i]
+                .map(|idx| weight_indexes[idx].clone());
 
             specs.push(ComponentSpec {
                 name: comp.name.clone(),
@@ -757,6 +775,7 @@ impl ModelCompiler {
                 mem_plan: &mem_plans[i],
                 phase: LowerPhase::Named(comp.name.clone()),
                 weights,
+                weight_index,
             });
         }
 
@@ -884,8 +903,11 @@ fn build_final_archive(
     extra_weights: Option<&[u8]>,
     layer_header: Option<hologram::hologram_archive::entrypoint::schedule::LayerHeader>,
     bundle: Option<&hologram_ai_common::ContextBundle>,
+    weight_index: Option<&hologram::hologram_archive::weight::index::WeightIndex>,
 ) -> anyhow::Result<Vec<u8>> {
-    use hologram::hologram_archive::section::{EmbeddableSection, SECTION_LAYER_HEADER};
+    use hologram::hologram_archive::section::{
+        EmbeddableSection, SECTION_LAYER_HEADER, SECTION_WEIGHT_INDEX,
+    };
 
     let weights = match extra_weights {
         Some(w) => w.to_vec(),
@@ -914,12 +936,20 @@ fn build_final_archive(
         if bundle_kinds.contains(&kind) {
             continue;
         }
+        if weight_index.is_some() && kind == SECTION_WEIGHT_INDEX {
+            continue;
+        }
         writer = writer.add_raw_section(kind, bytes);
     }
 
     // Add the new LayerHeader section.
     if let Some(ref lh) = layer_header {
         writer = writer.add_raw_section(SECTION_LAYER_HEADER, lh.to_bytes());
+    }
+
+    // Add weight offset index section.
+    if let Some(wi) = weight_index {
+        writer = writer.add_raw_section(SECTION_WEIGHT_INDEX, wi.to_bytes());
     }
 
     // Add all bundle sections.
@@ -945,6 +975,7 @@ fn compile_one_component(
     opts: &LoweringOptions,
     phase: &LowerPhase,
     extra_weights: Option<&[u8]>,
+    weight_index: Option<&hologram::hologram_archive::weight::index::WeightIndex>,
 ) -> anyhow::Result<Vec<u8>> {
     let phase_name = phase.layer_name();
 
@@ -967,7 +998,7 @@ fn compile_one_component(
         Some(&lower_out.context)
     };
 
-    build_final_archive(unpacked, extra_weights, Some(layer_header), bundle)
+    build_final_archive(unpacked, extra_weights, Some(layer_header), bundle, weight_index)
 }
 
 /// Build a corrected `LayerHeader` with proper TensorPorts from the AiGraph.
@@ -1521,14 +1552,23 @@ fn validate_matmul_constants(
 
 /// The ordering must match builder.rs which assigns cumulative byte offsets
 /// as `source_id` in `ConstantData::Deferred` using the same sorted order.
-fn collect_weight_bytes(ai_graph: &AiGraph) -> anyhow::Result<Vec<u8>> {
+///
+/// Returns the weight blob and a [`WeightIndex`] mapping each tensor to its
+/// byte range and layer group within the blob.
+fn collect_weight_bytes(
+    ai_graph: &AiGraph,
+) -> anyhow::Result<(Vec<u8>, hologram::hologram_archive::weight::index::WeightIndex)> {
+    use hologram::hologram_archive::weight::index::{
+        derive_layer_group, WeightIndex, WeightIndexEntry,
+    };
+
     let mut sorted: Vec<_> = ai_graph
         .params
         .iter()
         .filter(|(_, p)| matches!(p, AiParam::Mmap { .. }))
         .collect();
     if sorted.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), WeightIndex { entries: vec![] }));
     }
     sorted.sort_by_key(|(&tid, _)| tid);
 
@@ -1543,8 +1583,9 @@ fn collect_weight_bytes(ai_graph: &AiGraph) -> anyhow::Result<Vec<u8>> {
     // intermediate per-weight Vec allocations.
     let mut blob = vec![0u8; total_size as usize];
     let mut write_offset = 0usize;
+    let mut entries = Vec::with_capacity(sorted.len());
 
-    for (_, param) in &sorted {
+    for (&tid, param) in &sorted {
         if let AiParam::Mmap {
             path, offset, len, ..
         } = param
@@ -1555,11 +1596,24 @@ fn collect_weight_bytes(ai_graph: &AiGraph) -> anyhow::Result<Vec<u8>> {
             f.seek(SeekFrom::Start(*offset))?;
             f.read_exact(&mut blob[write_offset..write_offset + n])
                 .with_context(|| format!("reading {n} bytes from {path:?}"))?;
+
+            let tensor_name = ai_graph
+                .tensor_names
+                .get(&tid)
+                .cloned()
+                .unwrap_or_else(|| format!("tensor_{tid}"));
+            entries.push(WeightIndexEntry {
+                tensor_name: tensor_name.clone(),
+                group: derive_layer_group(&tensor_name),
+                offset: write_offset as u64,
+                size: n as u64,
+            });
+
             write_offset += n;
         }
     }
 
-    Ok(blob)
+    Ok((blob, WeightIndex { entries }))
 }
 
 /// Rebuild a compiled archive adding an extra section.
@@ -1858,11 +1912,15 @@ pub fn read_shape_context_from_archive(archive_bytes: &[u8]) -> anyhow::Result<O
     read_shape_context_from_plan(&plan, archive_bytes)
 }
 
-/// Execute a compiled archive with variable-length shape support.
+/// Execute a compiled archive with variable-length input support.
 ///
 /// Builds a one-shot tape and executes via the EnumTape path.
 /// Dynamic sizes are resolved at execution time via `resolve_size()`
 /// and `infer_matmul_k()` in the tape executor.
+///
+/// If the archive was compiled from a model with attention layers
+/// (`n_layers > 0`), a fresh `KvCacheState` is initialised automatically
+/// so that KvWrite/KvRead ops succeed during the forward pass.
 ///
 /// For repeated execution, prefer [`HoloRunner`] which builds the tape once.
 pub fn run_with_shape_context(
@@ -1870,7 +1928,19 @@ pub fn run_with_shape_context(
     inputs: &hologram::GraphInputs,
 ) -> anyhow::Result<hologram::GraphOutputs> {
     let runner = HoloRunner::from_bytes(archive.bytes.clone())?;
-    runner.execute(inputs)
+    let m = &archive.metadata;
+
+    if m.n_layers > 0 {
+        let mut kv = hologram::KvCacheState::new(
+            m.n_layers,
+            m.n_kv_heads,
+            m.head_dim,
+            m.context_len as usize,
+        );
+        runner.execute_with_kv(inputs, &mut kv)
+    } else {
+        runner.execute(inputs)
+    }
 }
 
 pub fn rebuild_archive_with_section(

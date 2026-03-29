@@ -140,7 +140,7 @@ fn compile_then_run_tok(
         };
     }
 
-    // Step 2: run
+    // Step 2: run (greedy sampling for deterministic output)
     let run_output = std::process::Command::new(&bin)
         .args(["run"])
         .arg(&holo_path)
@@ -148,6 +148,7 @@ fn compile_then_run_tok(
         .arg(prompt)
         .arg("--max-tokens")
         .arg(max_tokens.to_string())
+        .args(["--temperature", "0"])
         .output()
         .expect("run command failed to start");
 
@@ -308,18 +309,22 @@ fn tinyllama_onnx_variable_seq_len_runs() {
         .compile(hologram_ai::ModelSource::OnnxPath(model))
         .expect("TinyLlama ONNX compilation failed");
 
-    // Run with different seq_len values using ShapeContextGraph hints.
-    // TinyLlama ONNX inputs:
-    //   0: input_ids [1, seq_len] (i64)
+    // Run with different seq_len values.
+    // TinyLlama ONNX inputs (after PositionIdsInjection):
+    //   0: input_ids     [1, seq_len] (i64)
     //   1: attention_mask [1, seq_len] (i64, all-ones)
+    //   2: position_ids   [seq_len]   (i64, 0..seq_len)
     for seq_len in [1usize, 7, 128] {
         let token_ids: Vec<i64> = vec![1i64; seq_len];
         let attn_mask: Vec<i64> = vec![1i64; seq_len];
+        let pos_ids: Vec<i64> = (0..seq_len as i64).collect();
         let id_bytes: Vec<u8> = bytemuck::cast_slice(&token_ids).to_vec();
         let mask_bytes: Vec<u8> = bytemuck::cast_slice(&attn_mask).to_vec();
+        let pos_bytes: Vec<u8> = bytemuck::cast_slice(&pos_ids).to_vec();
         let mut graph_inputs = hologram::GraphInputs::new();
         graph_inputs.set_with_shape(0, id_bytes, vec![1, seq_len]);
         graph_inputs.set_with_shape(1, mask_bytes, vec![1, seq_len]);
+        graph_inputs.set_with_shape(2, pos_bytes, vec![seq_len]);
 
         let outputs = hologram_ai::run_with_shape_context(&archive, &graph_inputs)
             .expect(&format!("seq_len={seq_len} execution failed"));

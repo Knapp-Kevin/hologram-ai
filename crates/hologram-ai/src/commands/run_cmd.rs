@@ -35,9 +35,10 @@ pub struct RunArgs {
     /// Text prompt for autoregressive generation (requires embedded tokenizer).
     #[arg(long)]
     pub prompt: Option<String>,
-    /// Maximum tokens to generate when using `--prompt` (default: 128).
-    #[arg(long, default_value = "128")]
-    pub max_tokens: usize,
+    /// Maximum tokens to generate when using `--prompt`.
+    /// Defaults to the model's max_seq_len if not specified.
+    #[arg(long)]
+    pub max_tokens: Option<usize>,
     /// Sampling temperature (0.0 = greedy argmax, default: 0.7).
     #[arg(long, default_value = "0.7")]
     pub temperature: f32,
@@ -130,7 +131,7 @@ pub fn execute(args: RunArgs) -> anyhow::Result<()> {
 // ── Generation config ────────────────────────────────────────────────────
 
 struct GenerationConfig {
-    max_tokens: usize,
+    max_tokens: Option<usize>,
     temperature: f32,
     top_k: usize,
     verbose: bool,
@@ -243,9 +244,17 @@ fn run_generation(
         info!("kv_cache: enabled");
     }
 
+    let max_tokens = config.max_tokens.unwrap_or_else(|| {
+        let limit = model_meta
+            .map(|m| m.max_seq_len as usize)
+            .unwrap_or(2048);
+        info!("max_tokens not set, using model max_seq_len: {limit}");
+        limit
+    });
+
     let mut decode_start: Option<std::time::Instant> = None;
 
-    for step in 0..config.max_tokens {
+    for step in 0..max_tokens {
         // With KV cache: step 0 = full prompt (prefill), step 1+ = single token (decode).
         let (effective_tokens, actual_len) = if use_kv_cache && step > 0 {
             let last = *token_ids.last().expect("no tokens");
@@ -355,7 +364,9 @@ fn run_generation(
             }
         };
 
-        if next_token == encoder.eos_id() {
+        // Allow at least one generated token before accepting EOS — the model
+        // should never legitimately end the response on the very first token.
+        if next_token == encoder.eos_id() && step > 0 {
             break;
         }
 
@@ -535,13 +546,23 @@ fn sample_next_token(
         *p /= sum;
     }
 
-    // 4. Sample from the distribution using a simple LCG PRNG.
-    // Use a per-step seed derived from token_ids to be reproducible-ish
-    // but different each step.
-    let seed = token_ids.iter().fold(0x517cc1b7u64, |h, &t| {
-        h.wrapping_mul(6364136223846793005).wrapping_add(t as u64)
-    });
-    let r = ((seed >> 16) as f32) / (u32::MAX as f32);
+    // 4. Sample from the distribution using xorshift64* PRNG.
+    // Seed from token_ids + time nanos for non-deterministic sampling.
+    let time_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut s = token_ids
+        .iter()
+        .fold(0x517cc1b7u64.wrapping_add(time_nanos), |h, &t| {
+            h.wrapping_mul(6364136223846793005).wrapping_add(t as u64)
+        });
+    // xorshift64* — three rounds for good avalanche.
+    s ^= s >> 12;
+    s ^= s << 25;
+    s ^= s >> 27;
+    s = s.wrapping_mul(0x2545F4914F6CDD1D);
+    let r = (s >> 11) as f32 / ((1u64 << 53) as f32);
     let r = r.clamp(0.0, 1.0);
 
     let mut cumulative = 0.0_f32;
