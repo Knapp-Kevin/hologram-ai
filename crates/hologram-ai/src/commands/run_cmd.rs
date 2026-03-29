@@ -471,7 +471,6 @@ fn sample_next_token(
     top_k: usize,
 ) -> Option<u32> {
     const PENALTY: f32 = 1.3;
-    const WINDOW: usize = 64;
 
     if !logit_bytes.len().is_multiple_of(4) {
         return None;
@@ -481,9 +480,9 @@ fn sample_next_token(
         .map(|b| f32::from_le_bytes(b.try_into().expect("4-byte chunk")))
         .collect();
 
-    // Repetition penalty on generated tokens only (not prompt).
-    let gen_start = prompt_len.max(token_ids.len().saturating_sub(WINDOW));
-    for &tok in &token_ids[gen_start..] {
+    // Repetition penalty on ALL generated tokens (not prompt).
+    // Covers the full output to prevent long-range repetition loops.
+    for &tok in &token_ids[prompt_len..] {
         let idx = tok as usize;
         if idx < logits.len() {
             if logits[idx] > 0.0 {
