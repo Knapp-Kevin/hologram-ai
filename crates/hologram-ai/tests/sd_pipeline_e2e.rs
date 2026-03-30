@@ -48,13 +48,23 @@ fn output_path() -> PathBuf {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn ensure_compiled(onnx: &std::path::Path, holo: &std::path::Path) -> bool {
+    ensure_compiled_with(onnx, holo, None)
+}
+
+fn ensure_compiled_with(
+    onnx: &std::path::Path,
+    holo: &std::path::Path,
+    seq_len: Option<u64>,
+) -> bool {
     if holo.exists() {
         return true;
     }
     if !onnx.exists() {
         return false;
     }
-    let archive = ModelCompiler::default()
+    let mut compiler = ModelCompiler::default();
+    compiler.seq_len_override = seq_len;
+    let archive = compiler
         .compile(ModelSource::OnnxPath(onnx.to_path_buf()))
         .expect("compilation failed");
     std::fs::write(holo, &archive.bytes).expect("writing archive");
@@ -94,30 +104,52 @@ fn bytes_to_f32(data: &[u8]) -> Vec<f32> {
 
 // ── Euler-a scheduler ────────────────────────────────────────────────────────
 
-/// Compute sigma schedule for Euler-a sampler (20 steps).
-fn euler_sigmas(n_steps: usize) -> Vec<f32> {
-    // Linear schedule from sigma_max to sigma_min.
-    let sigma_max: f32 = 14.6;
-    let sigma_min: f32 = 0.03;
-    (0..=n_steps)
-        .map(|i| {
-            let t = i as f32 / n_steps as f32;
-            sigma_max * (1.0 - t) + sigma_min * t
-        })
+/// Compute DDPM alpha_bar schedule for SD v1.5 (1000 timesteps).
+///
+/// SD v1.5 uses a linear beta schedule: beta_0=0.00085, beta_T=0.012.
+/// alpha_bar_t = product(1 - beta_i for i=0..t)
+fn ddpm_alpha_bars() -> Vec<f32> {
+    let n = 1000;
+    let beta_start = 0.00085f32;
+    let beta_end = 0.012f32;
+    let mut alpha_bar = Vec::with_capacity(n);
+    let mut cumulative = 1.0f32;
+    for i in 0..n {
+        let beta = beta_start + (beta_end - beta_start) * i as f32 / (n - 1) as f32;
+        cumulative *= 1.0 - beta;
+        alpha_bar.push(cumulative);
+    }
+    alpha_bar
+}
+
+/// Select timesteps for n_steps evenly spaced from 999 to 0.
+fn ddpm_timesteps(n_steps: usize) -> Vec<usize> {
+    (0..n_steps)
+        .map(|i| ((n_steps - 1 - i) * 999 / (n_steps - 1).max(1)))
         .collect()
 }
 
-/// One Euler step: latent = latent + (noise_pred - latent) / sigma * dt
-fn euler_step(
+/// One DDIM deterministic step.
+///
+/// Given x_t at timestep t and noise prediction eps:
+///   x0_pred = (x_t - sqrt(1 - alpha_bar_t) * eps) / sqrt(alpha_bar_t)
+///   x_{t-1} = sqrt(alpha_bar_{t-1}) * x0_pred + sqrt(1 - alpha_bar_{t-1}) * eps
+fn ddim_step(
     latent: &mut [f32],
     noise_pred: &[f32],
-    sigma: f32,
-    sigma_next: f32,
+    alpha_bar_t: f32,
+    alpha_bar_prev: f32,
 ) {
-    let dt = sigma_next - sigma;
-    for (l, &n) in latent.iter_mut().zip(noise_pred.iter()) {
-        // Euler-a: x_{t-1} = x_t + (model_output) * dt / sigma
-        *l += (n - *l / sigma) * dt;
+    let sqrt_ab = alpha_bar_t.sqrt();
+    let sqrt_1m_ab = (1.0 - alpha_bar_t).sqrt();
+    let sqrt_ab_prev = alpha_bar_prev.sqrt();
+    let sqrt_1m_ab_prev = (1.0 - alpha_bar_prev).sqrt();
+
+    for (l, &eps) in latent.iter_mut().zip(noise_pred.iter()) {
+        // Predict x0 from current noisy sample.
+        let x0 = (*l - sqrt_1m_ab * eps) / sqrt_ab.max(1e-8);
+        // Compute x_{t-1} deterministically.
+        *l = sqrt_ab_prev * x0 + sqrt_1m_ab_prev * eps;
     }
 }
 
@@ -180,7 +212,12 @@ fn sd_pipeline_generates_image() {
     }
 
     // Compile all components.
-    assert!(ensure_compiled(&text_encoder_onnx(), &text_encoder_holo()));
+    // Text encoder: compile at seq_len=77 (CLIP's max for SD v1.5).
+    assert!(ensure_compiled_with(
+        &text_encoder_onnx(),
+        &text_encoder_holo(),
+        Some(77),
+    ));
     assert!(ensure_compiled(&unet_onnx(), &unet_holo()));
     assert!(ensure_compiled(&vae_onnx(), &vae_holo()));
     eprintln!("all 3 components compiled");
@@ -188,7 +225,7 @@ fn sd_pipeline_generates_image() {
     let total_start = std::time::Instant::now();
 
     // ── Step 1: Tokenize ──────────────────────────────────────────────────
-    let prompt = "a photograph of a cat sitting on a windowsill";
+    let prompt = "dog";
     let token_ids = tokenize_clip(prompt);
     let token_bytes: Vec<u8> = token_ids.iter().flat_map(|v| v.to_le_bytes()).collect();
     eprintln!("tokenized: {} tokens", token_ids.len());
@@ -204,52 +241,99 @@ fn sd_pipeline_generates_image() {
 
     let (_name, hidden_bytes) = te_outputs.get(0).expect("no text encoder output");
     let hidden_states = bytes_to_f32(hidden_bytes);
-    // Take only first 77 positions × 768 dims (model may have compiled at longer seq).
-    let clip_len = (77 * 768).min(hidden_states.len());
+    let expected_len = 77 * 768;
+    let clip_len = expected_len.min(hidden_states.len());
     let hidden_77_768: Vec<f32> = hidden_states[..clip_len].to_vec();
+    // Debug: check hidden state statistics
+    let hs_min = hidden_77_768.iter().cloned().fold(f32::MAX, f32::min);
+    let hs_max = hidden_77_768.iter().cloned().fold(f32::MIN, f32::max);
+    let hs_mean = hidden_77_768.iter().sum::<f32>() / hidden_77_768.len() as f32;
     eprintln!("hidden states: {} floats (using {} for UNet)", hidden_states.len(), clip_len);
+    eprintln!("  min={hs_min:.4} max={hs_max:.4} mean={hs_mean:.6}");
 
     // ── Step 3: UNet Denoising Loop ───────────────────────────────────────
     let (_unet_loader, unet_plan, unet_tape) = load_model(&unet_holo());
 
-    let n_steps = 20;
-    let sigmas = euler_sigmas(n_steps);
+    let n_steps = 5; // Quick iteration — increase to 20+ for quality.
+    let alpha_bars = ddpm_alpha_bars();
+    let timesteps = ddpm_timesteps(n_steps);
 
-    // Initialize latent with deterministic noise (seed=42).
+    // Initialize latent with deterministic Gaussian noise (seed=42).
     let latent_len = 1 * 4 * 64 * 64;
     let mut latent: Vec<f32> = (0..latent_len)
         .map(|i| {
-            let seed = (i as u64).wrapping_mul(6364136223846793005).wrapping_add(1);
-            ((seed >> 33) as f32 / (1u64 << 31) as f32 - 0.5) * sigmas[0]
+            // Simple LCG PRNG → approximate Gaussian via Box-Muller.
+            let s1 = (i as u64).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let s2 = s1.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let u1 = (s1 >> 11) as f32 / (1u64 << 53) as f32 + 1e-10;
+            let u2 = (s2 >> 11) as f32 / (1u64 << 53) as f32;
+            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
         })
         .collect();
 
-    eprintln!("starting denoising: {} steps", n_steps);
+    eprintln!("starting denoising: {} steps (DDIM)", n_steps);
     let denoise_start = std::time::Instant::now();
 
-    for step in 0..n_steps {
-        let sigma = sigmas[step];
-        let sigma_next = sigmas[step + 1];
-        let timestep = (sigma * 1000.0 / 14.6).min(999.0);
+    // Unconditional (empty prompt) hidden states for classifier-free guidance.
+    let uncond_tokens = tokenize_clip("");
+    let uncond_bytes: Vec<u8> = uncond_tokens.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let mut uncond_inputs = hologram::GraphInputs::new();
+    uncond_inputs.set_with_shape(0, uncond_bytes, vec![1, 77]);
+    let uncond_outputs = execute(&te_tape, &te_plan, &uncond_inputs);
+    let (_, uncond_hidden_bytes) = uncond_outputs.get(0).expect("no uncond output");
+    let uncond_states = bytes_to_f32(uncond_hidden_bytes);
+    let uncond_77_768: Vec<f32> = uncond_states[..clip_len].to_vec();
+    eprintln!("unconditional hidden states ready");
 
-        let mut unet_inputs = hologram::GraphInputs::new();
-        unet_inputs.set_with_shape(0, f32_to_bytes(&latent), vec![1, 4, 64, 64]);
-        unet_inputs.set_with_shape(1, f32_to_bytes(&[timestep]), vec![1]);
-        unet_inputs.set_with_shape(2, f32_to_bytes(&hidden_77_768), vec![1, 77, 768]);
+    let guidance_scale: f32 = 7.5; // Standard CFG scale for SD v1.5.
 
+    for (step_idx, &t) in timesteps.iter().enumerate() {
+        let alpha_bar_t = alpha_bars[t];
+        let alpha_bar_prev = if step_idx + 1 < timesteps.len() {
+            alpha_bars[timesteps[step_idx + 1]]
+        } else {
+            1.0
+        };
+
+        let timestep_f32 = t as f32;
         let step_start = std::time::Instant::now();
-        let unet_outputs = execute(&unet_tape, &unet_plan, &unet_inputs);
+
+        // Conditional prediction (with text prompt).
+        let mut cond_inputs = hologram::GraphInputs::new();
+        cond_inputs.set_with_shape(0, f32_to_bytes(&latent), vec![1, 4, 64, 64]);
+        cond_inputs.set_with_shape(1, f32_to_bytes(&[timestep_f32]), vec![1]);
+        cond_inputs.set_with_shape(2, f32_to_bytes(&hidden_77_768), vec![1, 77, 768]);
+        let cond_out = execute(&unet_tape, &unet_plan, &cond_inputs);
+        let cond_noise = bytes_to_f32(cond_out.get(0).expect("no cond output").1);
+
+        // Unconditional prediction (empty prompt).
+        let mut uncond_unet_inputs = hologram::GraphInputs::new();
+        uncond_unet_inputs.set_with_shape(0, f32_to_bytes(&latent), vec![1, 4, 64, 64]);
+        uncond_unet_inputs.set_with_shape(1, f32_to_bytes(&[timestep_f32]), vec![1]);
+        uncond_unet_inputs.set_with_shape(2, f32_to_bytes(&uncond_77_768), vec![1, 77, 768]);
+        let uncond_out = execute(&unet_tape, &unet_plan, &uncond_unet_inputs);
+        let uncond_noise = bytes_to_f32(uncond_out.get(0).expect("no uncond output").1);
+
+        // Classifier-free guidance: noise = uncond + scale * (cond - uncond)
+        let noise_pred: Vec<f32> = uncond_noise
+            .iter()
+            .zip(cond_noise.iter())
+            .map(|(&u, &c)| u + guidance_scale * (c - u))
+            .collect();
+
         let step_time = step_start.elapsed();
 
-        let (_name, noise_bytes) = unet_outputs.get(0).expect("no UNet output");
-        let noise_pred = bytes_to_f32(noise_bytes);
-
         if noise_pred.len() >= latent_len {
-            euler_step(&mut latent, &noise_pred[..latent_len], sigma, sigma_next);
+            ddim_step(&mut latent, &noise_pred[..latent_len], alpha_bar_t, alpha_bar_prev);
         }
 
-        if step < 3 || step == n_steps - 1 {
-            eprintln!("  step {}/{}: {:.2?}", step + 1, n_steps, step_time);
+        if step_idx < 3 || step_idx == n_steps - 1 {
+            let np_min = noise_pred.iter().cloned().fold(f32::MAX, f32::min);
+            let np_max = noise_pred.iter().cloned().fold(f32::MIN, f32::max);
+            let lat_min = latent.iter().cloned().fold(f32::MAX, f32::min);
+            let lat_max = latent.iter().cloned().fold(f32::MIN, f32::max);
+            eprintln!("  step {}/{} (t={}): {:.2?} noise=[{np_min:.3}..{np_max:.3}] latent=[{lat_min:.3}..{lat_max:.3}]",
+                step_idx + 1, n_steps, t, step_time);
         }
     }
     eprintln!("denoising done: {:.2?}", denoise_start.elapsed());

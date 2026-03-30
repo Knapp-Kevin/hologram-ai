@@ -244,8 +244,15 @@ zero runtime code. All kernels belong in hologram base crate.
     execution as completed activations are freed immediately. Phases 1 (lazy
     constants) and 3 (mmap release) infrastructure exists but not wired;
     constants already zero-copy borrowed, OS handles page reclamation.
-  - [ ] Phase 4: Full 3-component pipeline archive via manifest.
-  - [ ] Phase 5: Runtime denoising loop + PNG image output.
+  - [x] All 3 components execute independently: text encoder (9.9s), UNet
+    (12.7s per step), VAE decoder (7.75s). MmapBuffer arena eviction bounds
+    RSS. Encoder-only detection prevents KV injection on CLIP.
+  - [x] **Full pipeline generates 512×512 image** — tokenize (CLIP BPE) →
+    text encoder → 20-step Euler-a denoising → VAE decode → PPM output.
+    337 seconds total on CPU with Accelerate BLAS.
+  - [ ] Phase 4: Multi-component pipeline archive via manifest (currently
+    each component compiled separately).
+  - [ ] Phase 5: Classifier-free guidance, proper scheduler, PNG output.
 - [ ] Test with Whisper (encoder-decoder, audio)
 - [ ] Fix any op dispatch failures discovered
 - [ ] Goal: `hologram-ai compile -m model.onnx` works for top-20 HuggingFace models

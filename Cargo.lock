@@ -966,10 +966,12 @@ dependencies = [
  "hologram-core",
  "hologram-graph",
  "hologram-ring",
+ "libc",
  "metal",
  "rayon",
  "rkyv",
  "smallvec",
+ "tracing",
 ]
 
 [[package]]
