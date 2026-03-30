@@ -84,7 +84,7 @@ fn bert_onnx_executes() {
         .expect("compilation failed");
 
     // Load and build tape.
-    let plan = hologram::load_from_bytes(&archive.bytes)
+    let plan = hologram::load_auto(&archive.bytes)
         .expect("loading plan failed");
     let tape = hologram::build_tape_from_plan(&plan)
         .expect("building execution tape");

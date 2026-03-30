@@ -95,17 +95,35 @@ fn propagate_shapes(mut graph: AiGraph, protect_settled: bool) -> anyhow::Result
                             .and_then(|ti| ti.known_i64_values.clone())
                     })
                 }
-                // Resize: sizes/scales from input[1] (after dynamic param resolution
-                // normalizes inputs to [X, scales_or_sizes]).
-                // Falls back to input[3] for unresolved 4-input layout.
+                // Resize: sizes from input[3] or input[1] (known_i64_values).
+                // If no integer sizes found, try float scales from input[2] or
+                // input[1] and multiply by input spatial dims.
                 AiOp::Resize { .. } => {
-                    let inputs = &graph.nodes[idx].inputs;
-                    inputs.get(3).or_else(|| inputs.get(1)).and_then(|tid| {
-                        graph
-                            .tensor_info
-                            .get(tid)
-                            .and_then(|ti| ti.known_i64_values.clone())
-                    })
+                    let inputs_ref = &graph.nodes[idx].inputs;
+                    // Try sizes input first.
+                    let sizes = inputs_ref.get(3).or_else(|| inputs_ref.get(1)).and_then(|tid| {
+                        graph.tensor_info.get(tid).and_then(|ti| ti.known_i64_values.clone())
+                    });
+                    if sizes.is_some() {
+                        sizes
+                    } else {
+                        // Try scales: read f32 constant param, multiply with input shape.
+                        let scales_tid = inputs_ref.get(2).or_else(|| inputs_ref.get(1));
+                        let scales = scales_tid.and_then(|tid| {
+                            graph.params.get(tid).and_then(|p| p.as_f32_slice()).map(|s| s.to_vec())
+                        });
+                        if let (Some(ref scales), Some(in_shape)) = (scales, input_shapes.first()) {
+                            let vals: Vec<Option<i64>> = in_shape.iter()
+                                .zip(scales.iter().chain(std::iter::repeat(&1.0f32)))
+                                .map(|(dim, &scale)| {
+                                    dim.as_concrete().map(|d| (d as f64 * scale as f64).round() as i64)
+                                })
+                                .collect();
+                            Some(vals)
+                        } else {
+                            None
+                        }
+                    }
                 }
                 // Pad: pads from input[1] (opset 11+).
                 AiOp::Pad { .. } => {
@@ -732,10 +750,9 @@ fn infer_custom_output_shapes(
             }
         }
 
-        // Resize: output shape from sizes input (known_i64_values via shape_known_values).
+        // Resize: output shape from sizes or scales (passed via shape_known_values).
         AiOp::Resize { .. } => {
             if let Some(vals) = shape_known_values {
-                // sizes input gives absolute output dimensions.
                 let shape: Vec<DimExpr> = vals
                     .iter()
                     .map(|v| match v {
@@ -749,7 +766,7 @@ fn infer_custom_output_shapes(
                     vec![Shape::from(shape)]
                 }
             } else {
-                // No sizes — preserve input shape as fallback.
+                // No sizes or scales — preserve input shape.
                 inputs.first().cloned().into_iter().collect()
             }
         }

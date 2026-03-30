@@ -162,6 +162,12 @@ pub struct ModelCompiler {
     /// When set to `Q4_0`, f32 MatMul weights are quantized at compile time
     /// to 4-bit centroid indices, enabling the LUT-GEMM execution path.
     pub quant_strategy: hologram_ai_common::lower::QuantStrategy,
+    /// Scale factor for spatial dimensions (H, W) in 4D tensors.
+    /// When `Some(n)`, input spatial dims are divided by `n` before
+    /// compilation. E.g., `spatial_scale: Some(4)` compiles a 512×512
+    /// model at 128×128 resolution, using 16× less activation memory.
+    /// Shape propagation derives all downstream dims from the scaled input.
+    pub spatial_scale: Option<u32>,
 }
 
 impl Default for ModelCompiler {
@@ -169,6 +175,7 @@ impl Default for ModelCompiler {
         Self {
             mmap: true,
             seq_len_override: None,
+            spatial_scale: None,
             quant_strategy: hologram_ai_common::lower::QuantStrategy::Auto,
         }
     }
@@ -194,8 +201,13 @@ impl ModelCompiler {
         }
 
         // Step 1 — import.
-        let ai_graph = self.import(source)?;
+        let mut ai_graph = self.import(source)?;
         info!(nodes = ai_graph.nodes.len(), params = ai_graph.params.len(), "import complete");
+
+        // Step 1b — apply spatial scaling if requested.
+        if let Some(scale) = self.spatial_scale {
+            apply_spatial_scale(&mut ai_graph, scale);
+        }
 
         // Step 2 — optimize.
         // Choose pipeline based on input signature: models with `input_ids`
@@ -1575,7 +1587,10 @@ fn collect_weight_bytes(
     let total_size: u64 = sorted
         .iter()
         .map(|(_, p)| match p {
-            AiParam::Mmap { len, .. } => *len,
+            AiParam::Mmap { len, .. } => {
+                // Account for 4-byte alignment padding per tensor.
+                (*len).div_ceil(4) * 4
+            }
             _ => 0,
         })
         .sum();
@@ -1610,10 +1625,68 @@ fn collect_weight_bytes(
             });
 
             write_offset += n;
+            // Pad to 4-byte alignment so f32 cast_slice never fails.
+            let aligned = (write_offset + 3) & !3;
+            write_offset = aligned;
         }
     }
 
     Ok((blob, WeightIndex { entries }))
+}
+
+/// Scale spatial dimensions (H, W) of 4D input tensors by dividing by `scale`.
+///
+/// For vision models (Conv2d, Resize), this reduces the compiled resolution
+/// and proportionally reduces activation memory. Shape propagation derives
+/// all downstream dims from the scaled inputs.
+///
+/// Only affects tensors referenced by graph inputs with 4D shapes (NCHW).
+fn apply_spatial_scale(graph: &mut AiGraph, scale: u32) {
+    use hologram_ai_common::Dim;
+
+    if scale <= 1 {
+        return;
+    }
+    let s = scale as u64;
+
+    // Scale input tensor shapes: dims 2 and 3 of 4D tensors.
+    for &input_tid in &graph.inputs {
+        if let Some(info) = graph.tensor_info.get_mut(&input_tid) {
+            if info.shape.len() == 4 {
+                for dim in info.shape[2..].iter_mut() {
+                    if let Some(v) = dim.as_concrete() {
+                        *dim = Dim::Concrete((v / s).max(1));
+                    }
+                }
+                tracing::info!(tid = input_tid, shape = ?info.shape, "spatial scale applied");
+            }
+        }
+    }
+
+    // Scale ALL non-param 4D tensor shapes proportionally.
+    // Weight tensors (in graph.params) are never scaled — their kernel sizes
+    // are architecture-fixed. All other 4D tensors are activations whose
+    // spatial dims should scale with the input.
+    //
+    // For Resize outputs: shape_prop will recompute from scales × input,
+    // giving the correct scaled output. For Conv2d outputs: shape_prop
+    // will recompute h_out = (h_in + 2*pad - kernel) / stride + 1.
+    let param_tids: std::collections::HashSet<_> = graph.params.keys().copied().collect();
+    for (&tid, info) in graph.tensor_info.iter_mut() {
+        if param_tids.contains(&tid) {
+            continue;
+        }
+        if info.shape.len() >= 4 {
+            // Scale spatial dims (all dims after batch and channel).
+            for dim in info.shape[2..].iter_mut() {
+                if let Some(v) = dim.as_concrete() {
+                    if v > 1 {
+                        *dim = Dim::Concrete((v / s).max(1));
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Rebuild a compiled archive adding an extra section.

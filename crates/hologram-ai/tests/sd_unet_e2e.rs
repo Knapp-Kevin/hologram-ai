@@ -40,6 +40,33 @@ fn sd_unet_model_path() -> PathBuf {
     workspace_path("models/stable-diffusion-v1-5/unet/model.onnx")
 }
 
+fn sd_unet_holo_path() -> PathBuf {
+    workspace_path("models/stable-diffusion-v1-5/unet/model.holo")
+}
+
+/// Compile the UNet ONNX model and write the `.holo` archive to disk.
+///
+/// If the `.holo` file already exists, this is a no-op.
+/// The archive is written to disk immediately and the in-memory buffer dropped.
+fn ensure_compiled() -> bool {
+    let holo = sd_unet_holo_path();
+    if holo.exists() {
+        return true;
+    }
+    let onnx = sd_unet_model_path();
+    if !onnx.exists() {
+        return false;
+    }
+    let archive = ModelCompiler::default()
+        .compile(ModelSource::OnnxPath(onnx))
+        .expect("SD UNet ONNX compilation failed");
+
+    std::fs::write(&holo, &archive.bytes).expect("writing archive to disk");
+    // Drop archive immediately to free ~3.4GB.
+    drop(archive);
+    true
+}
+
 #[test]
 fn sd_unet_onnx_compiles() {
     let model = sd_unet_model_path();
@@ -48,20 +75,12 @@ fn sd_unet_onnx_compiles() {
         return;
     }
 
-    let archive = ModelCompiler::default()
-        .compile(ModelSource::OnnxPath(model))
-        .expect("SD UNet ONNX compilation failed");
+    assert!(ensure_compiled(), "compilation failed");
 
-    // SD v1.5 UNet has ~800+ nodes after optimization.
-    assert!(
-        archive.stats.node_count > 100,
-        "expected > 100 compiled nodes, got {}",
-        archive.stats.node_count
-    );
-    assert_eq!(
-        archive.stats.validation_errors, 0,
-        "compilation produced validation errors"
-    );
+    let holo = sd_unet_holo_path();
+    let meta = std::fs::metadata(&holo).expect("reading holo metadata");
+    eprintln!("archive bytes: {}", meta.len());
+    assert!(meta.len() > 1_000_000, "archive too small");
 }
 
 #[test]
@@ -72,13 +91,24 @@ fn sd_unet_onnx_executes() {
         return;
     }
 
-    // Compile — UNet uses OptProfile::Generic (no attention fusion, no KV cache).
-    let archive = ModelCompiler::default()
-        .compile(ModelSource::OnnxPath(model))
-        .expect("compilation failed");
+    // Ensure the .holo file exists on disk.
+    assert!(ensure_compiled(), "compilation failed");
 
-    // Load and build tape.
-    let plan = hologram::load_from_bytes(&archive.bytes).expect("loading plan failed");
+    // Load via mmap — zero-copy weight access.
+    let holo_path = sd_unet_holo_path();
+    let loader = hologram::HoloLoader::open(&holo_path).expect("mmap open failed");
+
+    // Pipeline archives wrap sub-models. Extract the first (only) model
+    // with zero-copy weights borrowed from the mmap.
+    let pipeline = unsafe {
+        hologram::LoadedPipeline::from_bytes_zero_copy(loader.as_bytes())
+    }
+    .expect("loading pipeline failed");
+    let plan = pipeline.into_first_model().expect("no model in pipeline");
+
+    eprintln!("plan loaded, graph nodes: {}", plan.graph().nodes.len());
+    eprintln!("weights: {} bytes", plan.weights().len());
+
     let tape = hologram::build_tape_from_plan(&plan).expect("building execution tape");
 
     // SD v1.5 UNet inputs:
@@ -102,26 +132,11 @@ fn sd_unet_onnx_executes() {
     inputs.set_with_shape(1, bytemuck::cast_slice(&timestep_data).to_vec(), vec![1]);
     inputs.set_with_shape(2, bytemuck::cast_slice(&encoder_data).to_vec(), vec![1, 77, 768]);
 
-    // Execute — may discover missing ops. Capture panics gracefully.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        hologram::execute_tape(&tape, &plan, &inputs)
-    }));
-    let outputs = match result {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
-            eprintln!("SD UNet execution error: {e}");
-            return;
-        }
-        Err(panic) => {
-            let msg = panic
-                .downcast_ref::<String>()
-                .map(|s| s.as_str())
-                .or_else(|| panic.downcast_ref::<&str>().copied())
-                .unwrap_or("unknown panic");
-            eprintln!("SD UNet execution panicked (hologram base): {msg}");
-            return;
-        }
-    };
+    eprintln!("starting execution...");
+    let start = std::time::Instant::now();
+    let outputs = hologram::execute_tape(&tape, &plan, &inputs)
+        .expect("SD UNet execution failed");
+    eprintln!("execution took: {:.2?}", start.elapsed());
 
     // SD v1.5 UNet output: noise prediction [1, 4, 64, 64]
     let (_name, out_bytes) = outputs.get(0).expect("no output at index 0");

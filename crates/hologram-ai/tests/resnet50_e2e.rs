@@ -66,7 +66,7 @@ fn resnet50_onnx_executes() {
         .expect("compilation failed");
 
     // Load plan directly from archive bytes.
-    let plan = hologram::load_from_bytes(&archive.bytes)
+    let plan = hologram::load_auto(&archive.bytes)
         .expect("loading plan failed");
 
     // Build input: [1, 3, 224, 224] of deterministic f32

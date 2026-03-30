@@ -42,6 +42,17 @@ impl AiParam {
         }
     }
 
+    /// Interpret inline data as f32 slice (for small constant params like scales).
+    /// Returns `None` for mmap params or if the data isn't aligned/sized for f32.
+    pub fn as_f32_slice(&self) -> Option<&[f32]> {
+        match self {
+            AiParam::Inline { data, .. } if data.len() >= 4 => {
+                bytemuck::try_cast_slice(data).ok()
+            }
+            _ => None,
+        }
+    }
+
     /// Whether this parameter has no backing data (invalid).
     pub fn is_empty(&self) -> bool {
         match self {
