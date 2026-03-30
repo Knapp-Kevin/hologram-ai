@@ -176,10 +176,24 @@ zero runtime code. All kernels belong in hologram base crate.
   ("The capital of France is Paris.") via LUT-GEMM Psumbook path.
   GGUF Q4_0 has quality loss from double quantization (Q4→f32→k-means).
 - [ ] Q4_0 performance: Psumbook kernel is 30× slower than f32 BLAS —
-  needs SIMD vectorization (hologram base kernel optimization).
-  **Plan 037**: fused Q4_0 dequant-matmul eliminates full-matrix
-  dequantization; adaptive remainder micro-kernels; SIMD Psumbook dot;
-  page-aligned tensors in HoloArchive.
+  **Plan 037** (active):
+  - [x] Phase 1: Fused Q4_0 dequant-matmul — `matmul_dequant_q4_0` eliminates
+    full K×N f32 materialization (hologram base). 3 bit-exact tests.
+  - [x] Phase 1b: Fused Q6_K dequant-matmul — `matmul_dequant_q6_k` extends
+    fused path to Q6_K 210-byte super-blocks. 3 bit-exact tests.
+  - [x] Phase 6: Per-op profiling — `#[cfg(feature = "profile")]` tracing span
+    on `dispatch_float_into` for SD pipeline analysis.
+  - [x] Phase 2: Adaptive remainder micro-kernels — `m_remainder_tiled()`
+    uses `micro_kernel_packed<2, 8>` and `<1, 8>` for leftover rows.
+  - [x] Phase 3: Explicit SIMD micro-kernels — NEON (`vfmaq_f32`) on aarch64,
+    AVX2+FMA (`_mm256_fmadd_ps`) on x86_64. Both packed and strided variants.
+    Wired into all matmul paths (f32, fused Q4_0, fused Q6_K).
+  - [x] Phase 4: SIMD Psumbook dot — NEON `dot_neon_256` + AVX2 `dot_avx2_256`
+    (pre-existing, verified).
+  - [x] Phase 5: Page-aligned tensors — `is_tensor_page_aligned()` reader +
+    3 roundtrip tests for `page_align_weight_blob`.
+  - [x] Phase 7: Static duty partitioning — `with_min_len(duty)` on all 3
+    parallel matmul paths (f32, Q4_0, Q6_K).
 - [x] Epilogue fusion wired: `MatMulRelu`/`MatMulGelu`/`MatMulSilu` →
   `GraphOp::FusedMatMulActivation` via `wrap_graph_op()` in strategy.rs.
   Tape builder maps to `InlineMatMulActivation`. Decode: 20.5 → 28.5 → 39.1 tok/s.
