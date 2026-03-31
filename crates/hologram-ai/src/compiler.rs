@@ -1658,7 +1658,11 @@ fn apply_spatial_scale(graph: &mut AiGraph, scale: u32) {
     }
     let s = scale as u64;
 
-    // Scale input tensor shapes: dims 2 and 3 of 4D tensors.
+    // Scale ONLY input tensor shapes — let shape propagation derive all
+    // intermediate shapes from the (now-scaled) inputs. This avoids the
+    // bug where pre-scaling intermediates conflicts with shape propagation's
+    // own inference (e.g., ForceConcretize sets Dynamic→1, then Resize
+    // computes 1×scale=2 instead of the correct scaled value).
     for &input_tid in &graph.inputs {
         if let Some(info) = graph.tensor_info.get_mut(&input_tid) {
             if info.shape.len() == 4 {
@@ -1676,17 +1680,12 @@ fn apply_spatial_scale(graph: &mut AiGraph, scale: u32) {
     // Weight tensors (in graph.params) are never scaled — their kernel sizes
     // are architecture-fixed. All other 4D tensors are activations whose
     // spatial dims should scale with the input.
-    //
-    // For Resize outputs: shape_prop will recompute from scales × input,
-    // giving the correct scaled output. For Conv2d outputs: shape_prop
-    // will recompute h_out = (h_in + 2*pad - kernel) / stride + 1.
     let param_tids: std::collections::HashSet<_> = graph.params.keys().copied().collect();
     for (&tid, info) in graph.tensor_info.iter_mut() {
-        if param_tids.contains(&tid) {
+        if param_tids.contains(&tid) || graph.inputs.contains(&tid) {
             continue;
         }
         if info.shape.len() >= 4 {
-            // Scale spatial dims (all dims after batch and channel).
             for dim in info.shape[2..].iter_mut() {
                 if let Some(v) = dim.as_concrete() {
                     if v > 1 {
