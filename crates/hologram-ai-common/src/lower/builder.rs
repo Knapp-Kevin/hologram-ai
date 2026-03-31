@@ -414,6 +414,46 @@ pub fn lower(
                     }
                 }
 
+                // ── Conv2d LUT-GEMM interception ─────────────────────────────
+                // Pre-quantize Conv2d weights at compile time for zero runtime overhead.
+                if let GraphOp::Float(FloatOp::Conv2d {
+                    kernel_h, kernel_w, stride_h, stride_w,
+                    pad_h, pad_w, dilation_h, dilation_w,
+                    group, input_h, input_w,
+                }) = &result.graph_op
+                {
+                    if let Some(lut_result) = try_convert_conv2d_to_lut4(
+                        node, ai_graph, *kernel_h, *kernel_w, *group,
+                    )? {
+                        builder = builder.conv2d_lut_4bit(
+                            ConstantData::Bytes(lut_result.serialized_weights),
+                            &input_idxs,
+                            *kernel_h, *kernel_w,
+                            *stride_h, *stride_w,
+                            *pad_h, *pad_w,
+                            *dilation_h, *dilation_w,
+                            *group, *input_h, *input_w,
+                        );
+                        let idx = builder.len() - 1;
+                        if let Some(&tid) = node.outputs.first() {
+                            let out_shape = output_shape(Some(&tid), &ai_graph.tensor_info);
+                            if let Some(ref s) = out_shape {
+                                builder = builder.set_node_shape(idx, s.clone());
+                            }
+                            let dtype = input_float_dtype(Some(&tid), &ai_graph.tensor_info);
+                            builder = builder.set_node_dtype(idx, dtype);
+                            tid_to_idx.insert(tid, idx);
+                        }
+                        tracing::info!(
+                            node_id = node.id,
+                            rows = lut_result.rows,
+                            cols = lut_result.cols,
+                            "LUT-GEMM: pre-quantized Conv2d → Conv2dLut4"
+                        );
+                        continue; // Skip normal FloatNeedsShape emission.
+                    }
+                }
+
                 // Capture FloatOp for shape projection before move.
                 // Extract FloatOp for shape projection. For fused ops, use the
                 // base op's shape semantics (e.g., MatMul for FusedMatMulActivation).
@@ -1382,6 +1422,106 @@ fn try_convert_f32_to_lut4(
         serialized_weights: serialized,
         rows: rows as u32,
         cols: cols as u32,
+    }))
+}
+
+/// Try to convert a Conv2d weight to LUT-GEMM Q4 format for compile-time quantization.
+///
+/// Conv2d weights are [OC, IC/group, KH, KW]. Reshape to 2D [OC, kernel_size],
+/// transpose to [kernel_size, OC] (LUT-GEMM layout: rows=K, cols=N), then quantize.
+///
+/// Returns `None` if weight isn't found or is too small for LUT-GEMM benefit.
+fn try_convert_conv2d_to_lut4(
+    node: &AiNode,
+    ai_graph: &AiGraph,
+    _kernel_h: u32,
+    _kernel_w: u32,
+    group: u32,
+) -> anyhow::Result<Option<Lut4ConversionResult>> {
+    use hologram::hologram_exec::lut_gemm::quantize::quantize_4bit;
+
+    // Weight is input[1] of the Conv2d node.
+    let weight_tid = match node.inputs.get(1) {
+        Some(&tid) => tid,
+        None => return Ok(None),
+    };
+
+    // Must be a parameter (not an intermediate activation).
+    let param = match ai_graph.params.get(&weight_tid) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    // Get weight shape: [OC, IC/group, KH, KW].
+    let info = match ai_graph.tensor_info.get(&weight_tid) {
+        Some(info) => info,
+        None => return Ok(None),
+    };
+    let dims: Vec<usize> = info
+        .shape
+        .iter()
+        .filter_map(|d| match d {
+            Dim::Concrete(n) => Some(*n as usize),
+            _ => None,
+        })
+        .collect();
+    if dims.len() < 2 {
+        return Ok(None);
+    }
+
+    let oc = dims[0];
+    let group = group.max(1) as usize;
+    let oc_per_group = oc / group;
+    let kernel_size: usize = dims[1..].iter().product();
+
+    // Skip small convolutions where LUT-GEMM overhead isn't worth it.
+    if oc_per_group < 64 || kernel_size < 16 {
+        return Ok(None);
+    }
+
+    // Read f32 weight data.
+    let raw_bytes = param_bytes_owned(param)?;
+    let expected_bytes = oc * kernel_size * 4;
+    if raw_bytes.len() != expected_bytes {
+        tracing::warn!(
+            got = raw_bytes.len(),
+            expected = expected_bytes,
+            "Conv2d weight size mismatch, skipping LUT quantization"
+        );
+        return Ok(None);
+    }
+
+    let f32_weights: Vec<f32> = raw_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
+        .collect();
+
+    // For grouped conv, quantize each group's weights separately.
+    // For now, only handle group=1 (all SD Conv2d ops are group=1).
+    if group > 1 {
+        return Ok(None);
+    }
+
+    // Transpose from [OC, kernel_size] → [kernel_size, OC] for LUT-GEMM layout.
+    let mut w_t = vec![0.0f32; kernel_size * oc_per_group];
+    for oc_idx in 0..oc_per_group {
+        for k in 0..kernel_size {
+            w_t[k * oc_per_group + oc_idx] = f32_weights[oc_idx * kernel_size + k];
+        }
+    }
+
+    // K-means quantization → QuantizedWeights4 (16 centroids).
+    let qw4 = quantize_4bit(&w_t, kernel_size as u32, oc_per_group as u32);
+
+    // Serialize via rkyv.
+    let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&qw4)
+        .map_err(|e| anyhow::anyhow!("rkyv serialize QuantizedWeights4: {e}"))?
+        .to_vec();
+
+    Ok(Some(Lut4ConversionResult {
+        serialized_weights: serialized,
+        rows: kernel_size as u32,
+        cols: oc_per_group as u32,
     }))
 }
 
