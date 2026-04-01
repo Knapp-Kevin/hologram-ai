@@ -211,13 +211,34 @@ enum SeqMode {
     Variable { max_seq: usize },
 }
 
-fn resolve_seq_mode(runner: &HoloRunner) -> SeqMode {
-    let max_seq = load_meta_seq_len(runner).unwrap_or(2048);
+fn resolve_seq_mode(runner: &HoloRunner, prompt_len: Option<usize>) -> SeqMode {
+    // Detect compiled seq_len from the graph's first 2D input shape [1, seq].
+    let graph = runner.plan().graph();
+    let compiled_seq: Option<usize> = graph
+        .node_shapes
+        .iter()
+        .find(|(_, shape)| shape.len() == 2 && shape[0] == 1 && shape[1] > 1)
+        .map(|(_, shape)| shape[1]);
 
-    // Variable mode: the hologram executor resolves baked FloatOp params
-    // (size in Softmax/RmsNorm/etc.) from runtime buffer sizes via resolve_size(),
-    // and MatMul re-derives k via infer_matmul_k(). No padding needed.
-    SeqMode::Variable { max_seq }
+    if let (Some(compiled), Some(prompt)) = (compiled_seq, prompt_len) {
+        if compiled != prompt {
+            warn!(
+                "compiled seq_len={compiled} does not match prompt length={prompt}. \
+                 Recompile with `--seq-len {prompt}` for correct results. \
+                 Using FixedPad={compiled} (output may be incorrect)."
+            );
+        }
+    }
+
+    // Use FixedPad matching compiled seq_len when known. Variable-length
+    // execution has known shape resolution bugs when compiled_seq != runtime_seq.
+    // KV cache decode (seq=1) works correctly in both modes.
+    if let Some(seq) = compiled_seq {
+        SeqMode::FixedPad(seq)
+    } else {
+        let max_seq = load_meta_seq_len(runner).unwrap_or(2048);
+        SeqMode::Variable { max_seq }
+    }
 }
 
 /// Try to read max_seq_len from embedded ModelMetaSection.
@@ -243,10 +264,10 @@ fn run_generation(
     let plan = runner.plan();
     let encoder = MiniBpeEncoder::from_tokenizer_section(tok_section);
     let input_dtype = resolve_input_dtype(plan, "input_ids");
-    let seq_mode = resolve_seq_mode(runner);
 
     let mut token_ids = encoder.encode(prompt);
     let prompt_len = token_ids.len();
+    let seq_mode = resolve_seq_mode(runner, Some(prompt_len));
     info!("token_ids: {:?}", &token_ids);
 
     // Startup diagnostics.
