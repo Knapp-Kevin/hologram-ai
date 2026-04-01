@@ -118,13 +118,16 @@ pub fn execute(args: RunArgs) -> anyhow::Result<()> {
     info!("archive loaded in {:.1}ms", load_start.elapsed().as_secs_f64() * 1000.0);
 
     // Load optional metadata sections.
-    // Try the runner's effective bytes first (sub-archive for pipeline),
-    // then the raw archive bytes (pipeline wrapper where CLI embeds sections).
+    // Try the effective bytes (sub-archive) first, then fall back to the raw
+    // bytes (pipeline wrapper where sections are embedded outside the sub-archive).
+    // Pre-parse the raw plan once to avoid re-parsing per section.
     let effective = runner.archive_bytes();
+    let raw = runner.raw_bytes();
+    let raw_plan = hologram::load_from_bytes(raw).ok();
     let tokenizer = load_section::<TokenizerSection>(effective, runner.plan(), SECTION_TOKENIZER)
-        .or_else(|| load_section_from_raw::<TokenizerSection>(runner.raw_bytes(), SECTION_TOKENIZER));
+        .or_else(|| raw_plan.as_ref().and_then(|p| load_section::<TokenizerSection>(raw, p, SECTION_TOKENIZER)));
     let model_meta = load_section::<ModelMetaSection>(effective, runner.plan(), SECTION_MODEL_META)
-        .or_else(|| load_section_from_raw::<ModelMetaSection>(runner.raw_bytes(), SECTION_MODEL_META));
+        .or_else(|| raw_plan.as_ref().and_then(|p| load_section::<ModelMetaSection>(raw, p, SECTION_MODEL_META)));
 
     print_model_info(runner.plan(), &model_meta);
 
@@ -703,6 +706,7 @@ where
 
 /// Load a section from raw archive bytes (loads the plan on-the-fly).
 /// Used as fallback for pipeline archives where sections are in the wrapper.
+#[allow(dead_code)]
 fn load_section_from_raw<T: SectionDeserialize>(raw: &[u8], kind: u32) -> Option<T> {
     let plan = hologram::load_from_bytes(raw).ok()?;
     load_section(raw, &plan, kind)
