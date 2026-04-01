@@ -370,6 +370,34 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] Phase 3: E2E validation — TinyLlama with q8, q4, asymmetric q8:q4, boundary
   layers, WHT, and sparse V. Quality + memory + performance benchmarks.
 
+### P9: CPU Inference Performance — 100-200+ tok/s (Plan 040)
+
+**Target:** 100-200+ effective tok/s for Llama 8B on CPU. WASM supported.
+**Branch:** `feat/cpu-inference-perf` in both repos.
+
+#### Tier 1: Wire existing infrastructure (hologram-ai only)
+- [ ] 1.1 Wire KV cache quantization — `--kv-quant` CLI flag, `KvCacheState::with_config()`
+- [ ] 1.2 Wire epilogue fusion end-to-end — lowering emits fused MatMul+Activation
+- [ ] 1.3 Verify sparse V decode is active in non-BLAS attention path
+
+#### Tier 2: Compute kernel optimizations (hologram base + hologram-ai)
+- [ ] 2.1 Speculative decoding — draft model + batched verification (2-4x throughput)
+- [ ] 2.2 Flash attention SIMD — NEON/AVX2 dot product + L2-tiled K/V blocking
+- [ ] 2.3 AMX/BLAS hybrid — dequant to f16, use Accelerate HGEMM (Apple Silicon)
+- [ ] 2.4 AVX-512 VNNI micro-kernels — `_mm512_dpbusd_epi32` (x86_64)
+- [ ] 2.5 wasm32-simd128 support — recover SIMD for WASM builds
+
+#### Tier 3: Extreme quantization (hologram base + hologram-ai)
+- [ ] 3.1 Q2/ternary quantization (BitNet-style) — 2x over Q4, bitmask inner loop
+- [ ] 3.2 Continuous batching — amortize weight reads across N concurrent users
+- [ ] 3.3 Sliding window attention — O(n*w) instead of O(n²)
+
+#### Tier 4: System-level + archive streaming (hologram base)
+- [ ] 4.1 Huge pages for weight buffers
+- [ ] 4.2 Compile-time weight reordering (pre-packed layout)
+- [ ] 4.3 Multi-level prefetch enhancement
+- [ ] 5.1-5.5 Layer-by-layer streaming (lazy constant seeding, per-instruction eviction)
+
 ### Precision & Information Theory (Plan 032)
 - [x] `SemanticHint` enum on `TensorInfo` — classifies tensors by information
   content (Pixel ~24 bits, Latent ~4 bits, Token ~16 bits, Embedding ~12 bits,
