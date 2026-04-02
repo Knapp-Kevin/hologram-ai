@@ -403,27 +403,45 @@ zero runtime code. All kernels belong in hologram base crate.
   (uses SwiGLU), but ready for GPT-2/BERT (GeLU). Lowering + kernel already
   handle fused variants.
 
-**Phase 2: Q4 AMX/BLAS hybrid kernel (→ ~40 tok/s)**
-- [ ] 2A. Dequant-per-tile AMX hybrid — dequant Q4 to f16, call cblas_hgemm
-  (Accelerate → AMX). Gets both Q4 compression AND AMX speed. Hologram base.
+**Phase 2: Single-path executor + zero-copy (→ 40 tok/s)** — DONE
+- [x] 2A. `execute_direct` — single execution path, pre-allocated buffers, one
+  dispatch match per instruction. Eliminated execute_inner, dispatch_kernel_par,
+  execute_parallel. tape.rs: 5,829 → 4,188 lines (-28%).
+- [x] 2B. Zero-copy input gathering — unsafe raw pointer aliasing for input slots,
+  mutable output slot. No per-instruction clone. 370ms → 21.5ms/step.
+- [x] 2C. Q4 BLAS hybrid in single path — `dispatch_lut_gemm_4` dequants centroids
+  → f32 (cached in WeightCache), then cblas_sgemm. 870ms → 22ms/step.
+- **Result: 2.4 → 40.9 tok/s (17x speedup), TinyLlama f32 + Q4, M4 Max.**
 
-**Phase 3: Variable-length execution fix (→ any prompt length)**
-- [ ] 3A. Fix resolve_size() + 0-sentinels for seq-dependent dims. Compile once
-  at max seq_len, run with any prompt length. Both repos.
+**Phase 3: Path to 100+ tok/s**
 
-**Phase 4: Speculative decoding (→ 100-200 tok/s)**
-- [ ] 4A. SpeculativeDecoder — draft model + batched verification. 2-4x
-  throughput multiplier. New module in hologram-ai.
+3A. **Speculative decoding** (→ 100 tok/s effective)
+- Draft model (e.g., TinyLlama 1B Q4) generates N candidate tokens at ~4x speed
+- Target model verifies all N in one batched forward pass (1 weight read for N tokens)
+- 60-70% acceptance rate → 2-3x effective throughput multiplier
+- At 40 tok/s base: **80-120 tok/s effective**
+- New module: `crates/hologram-ai/src/speculative.rs`
+- CLI: `--draft-model <path>` flag
 
-**Phase 5: Archive compression**
-- [ ] 5A. Wire hologram-compression for --compress on compile. Decompress to
-  cache at load time (already implemented in HoloRunner).
+3B. **Layer-level parallelism** (→ ~2x per-step speedup)
+- Parallel attention heads — Q*K^T and score*V independently per head
+- Parallel FFN up/gate projections — gate and up MatMuls are independent
+- Use rayon at layer level, not instruction level
+- At 40 tok/s base: **~60-80 tok/s**
 
-**Backlog: Layer-level parallelism**
-- [ ] Parallel attention heads — compute Q*K^T and score*V independently per head
-- [ ] Parallel FFN up/gate projections — gate and up MatMuls are independent
-- [ ] Implement at the layer level, not instruction level (removed execute_parallel)
-- [ ] Use rayon for inter-head parallelism when n_heads >= 4
+3C. **Variable-length execution fix** (→ any prompt length)
+- Fix resolve_size() + 0-sentinels for seq-dependent dims
+- Compile once at max seq_len, run with any prompt length
+- Unblocks arbitrary prompt lengths without recompilation
+
+3D. **Archive compression** (→ smaller files)
+- Wire hologram-compression for --compress on compile
+- Decompress to cache at load time (already implemented in HoloRunner)
+- Q4 archive ~0.5 GB → ~0.2 GB compressed
+
+3E. **Q4 archive size optimization** (→ ~0.5 GB)
+- Strip f32 originals from Q4 archive (requires constant offset remapping)
+- Infrastructure ready (predict_quantized_weight_tids)
 
 #### Tier 2: Compute kernel optimizations (hologram base + hologram-ai)
 - [ ] 2.1 Speculative decoding — draft model + batched verification (2-4x throughput)
