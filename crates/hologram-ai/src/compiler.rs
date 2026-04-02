@@ -262,6 +262,12 @@ impl ModelCompiler {
         let is_llm = looks_like_causal_lm && prefill_mem.kv_cache_layout.n_layers > 0;
 
         use hologram_ai_common::sections::meta::ComponentRole;
+
+        // TODO: when Q4 quantization is enabled, quantized weights become dead
+        // in the weight section (replaced by Q4 constants in the graph). Stripping
+        // them requires remapping constant offsets which is a larger refactor.
+        // For now, include all weights — archive size is larger than optimal but
+        // correct. The Q4 constants are still used for execution.
         let (weights, weight_index) = collect_weight_bytes(&ai_graph)?;
         let total_weight_bytes = weights.len() as u64;
         let extra_weights: Option<&[u8]> = if weights.is_empty() { None } else { Some(&weights) };
@@ -1627,6 +1633,79 @@ fn validate_matmul_constants(
 fn collect_weight_bytes(
     ai_graph: &AiGraph,
 ) -> anyhow::Result<(Vec<u8>, hologram::hologram_archive::weight::index::WeightIndex)> {
+    collect_weight_bytes_filtered(ai_graph, &std::collections::HashSet::new())
+}
+
+/// Predict which weight TIDs will be quantized during lowering.
+///
+/// Mirrors the gating logic in `try_convert_f32_to_lut4` in the builder:
+/// - Weight is input[1] of a MatMul node
+/// - Weight is a 2D parameter with both dims ≥ 256
+/// - Output dim doesn't match attention head sizes (not Q/K/V/O projection)
+#[allow(dead_code)] // TODO: use once constant offset remapping is implemented
+fn predict_quantized_weight_tids(
+    ai_graph: &AiGraph,
+) -> std::collections::HashSet<hologram_ai_common::ir::TensorId> {
+    use hologram_ai_common::ir::{AiOp, Dim};
+    let mut quantized = std::collections::HashSet::new();
+
+    // Collect attention dimensions for gating.
+    let attn_dims: Vec<usize> = ai_graph.nodes.iter()
+        .filter_map(|n| match &n.op {
+            AiOp::GroupedQueryAttention { num_heads, num_kv_heads, head_dim, .. } => {
+                Some(vec![
+                    *num_heads as usize * *head_dim as usize,
+                    *num_kv_heads as usize * *head_dim as usize,
+                ])
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect();
+
+    for node in &ai_graph.nodes {
+        if !matches!(node.op, AiOp::MatMul) {
+            continue;
+        }
+        // Weight is input[1].
+        let weight_tid = match node.inputs.get(1) {
+            Some(&tid) => tid,
+            None => continue,
+        };
+        // Must be a parameter.
+        if !ai_graph.params.contains_key(&weight_tid) {
+            continue;
+        }
+        // Must have 2D concrete shape with both dims ≥ 256.
+        let info = match ai_graph.tensor_info.get(&weight_tid) {
+            Some(info) => info,
+            None => continue,
+        };
+        let dims: Vec<usize> = info.shape.iter()
+            .filter_map(|d| match d { Dim::Concrete(n) => Some(*n as usize), _ => None })
+            .collect();
+        if dims.len() != 2 || dims[0] < 256 || dims[1] < 256 {
+            continue;
+        }
+        // Skip attention projections (output dim matches head sizes).
+        if attn_dims.contains(&dims[1]) {
+            continue;
+        }
+        quantized.insert(weight_tid);
+    }
+
+    quantized
+}
+
+/// Collect weight bytes, skipping TIDs in `skip_tids`.
+///
+/// Used for Q4 quantization: weights that are quantized to LUT-GEMM format
+/// during lowering become dead — they're replaced by graph constants.
+/// Skipping them avoids embedding redundant f32 originals in the archive.
+fn collect_weight_bytes_filtered(
+    ai_graph: &AiGraph,
+    skip_tids: &std::collections::HashSet<hologram_ai_common::ir::TensorId>,
+) -> anyhow::Result<(Vec<u8>, hologram::hologram_archive::weight::index::WeightIndex)> {
     use hologram::hologram_archive::weight::index::{
         derive_layer_group, WeightIndex, WeightIndexEntry,
     };
@@ -1634,7 +1713,7 @@ fn collect_weight_bytes(
     let mut sorted: Vec<_> = ai_graph
         .params
         .iter()
-        .filter(|(_, p)| matches!(p, AiParam::Mmap { .. }))
+        .filter(|(&tid, p)| matches!(p, AiParam::Mmap { .. }) && !skip_tids.contains(&tid))
         .collect();
     if sorted.is_empty() {
         return Ok((Vec::new(), WeightIndex { entries: vec![] }));
