@@ -27,8 +27,10 @@ impl OptPipeline {
             decompose::OpDecomposition, kv_slot_injection::KvSlotInjection,
             matmul_activation_fusion::MatMulActivationFusion,
             norm_projection_fusion::NormProjectionFusion,
+            scalar_absorption::ScalarAbsorption,
             shared_input_projection_fusion::SharedInputProjectionFusion,
             swiglu_projection_fusion::SwiGluProjectionFusion,
+            transpose_matmul_fusion::TransposeMatMulFusion,
             position_ids_injection::PositionIdsInjection,
             resolve_slice_params::ResolveSliceParams,
             rmsnorm_fusion::RmsNormFusion, semantic_prop::SemanticPropagation,
@@ -57,6 +59,14 @@ impl OptPipeline {
             // so norm chains are already collapsed. Must run before
             // AttentionFusion to avoid interfering with SDPA pattern matching.
             Box::new(SwiGluFusion),
+            // Absorb Transpose(swap-last-2) → MatMul into Gemm { trans_a/trans_b }.
+            // Eliminates intermediate transposed buffer. Must run before
+            // MatMulActivationFusion (which matches on MatMul nodes).
+            Box::new(TransposeMatMulFusion),
+            // Absorb MatMul → Mul(scalar) into Gemm { alpha }.
+            // Eliminates full-tensor scalar multiply. Must run before other
+            // matmul fusions to simplify the graph.
+            Box::new(ScalarAbsorption),
             // Fuse MatMul → SiLU/GeLU/ReLU into MatMulSilu/Gelu/Relu.
             // Eliminates intermediate activation buffer; the tape kernel
             // applies activation in-register during matmul writeback.

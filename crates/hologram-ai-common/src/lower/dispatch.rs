@@ -125,7 +125,7 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
         // ── Identity pass-through ────────────────────────────────────────
         Squeeze { .. } => D::Identity,
         Unsqueeze { .. } => D::Identity,
-        Expand => D::GraphOp(GraphOp::Float(FloatOp::Reshape)),
+        Expand => D::Identity,
         Slice { .. } => D::FloatNeedsShape,
         Split { .. } => D::MultiOutput,
         Tile { .. } => D::Identity,

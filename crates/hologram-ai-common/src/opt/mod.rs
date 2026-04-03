@@ -19,9 +19,11 @@ pub mod shape_prop;
 pub mod slice_to_gather;
 pub mod matmul_activation_fusion;
 pub mod norm_projection_fusion;
+pub mod scalar_absorption;
 pub mod shared_input_projection_fusion;
 pub mod swiglu_fusion;
 pub mod swiglu_projection_fusion;
+pub mod transpose_matmul_fusion;
 
 pub use add_rmsnorm_fusion::AddRmsNormFusion;
 pub use matmul_activation_fusion::MatMulActivationFusion;
