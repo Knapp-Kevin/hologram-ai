@@ -495,31 +495,32 @@ blocks. Decode-only (M=1); prefill falls back to separate BLAS calls. The
 general fusion rule: if an op's output has exactly one consumer and no global
 reduction, fuse them.
 
-**Wave 1: Core deep fusions (hologram base + hologram-ai)**
-- [ ] `FloatOp::NormProjectionGemv` — RmsNorm → multi-output GEMV (QKV or Gate+Up)
-- [ ] `FloatOp::AddNormProjectionGemv` — Add + RmsNorm → multi-output GEMV
-- [ ] `FloatOp::SwiGluProjectionGemv` — SiLU×Mul → down-projection GEMV
-- [ ] `fused_decode.rs` kernel implementations (M=1 fused, M>1 decomposed fallback)
-- [ ] TapeKernel variants + tape_builder + dispatch_kernel wiring
-- [ ] M=1 `cblas_sgemv` fast path in `dispatch_matmul` (benefits all M=1 matmuls)
-- [ ] `FusedNormProjection` + `FusedSwiGluProjection` AiOp variants
-- [ ] `NormProjectionFusion` + `SwiGluProjectionFusion` passes
-- [ ] Lowering + pipeline ordering
+**Wave 1: Core deep fusions (hologram base + hologram-ai) — DONE**
+- [x] `FloatOp::NormProjectionGemv` / `AddNormProjectionGemv` / `SwiGluProjectionGemv`
+- [x] TapeKernel variants + tape_builder + dispatch_kernel wiring
+- [x] M=1 fast path: normalize into caller Vec, skip arena allocation
+- [x] `FusedNormProjection` + `FusedSwiGluProjection` AiOp variants
+- [x] `NormProjectionFusion` (44 fusions on TinyLlama ONNX) — multi-output lowering:
+  1 norm node + N MatMul nodes sharing norm output. No weight concatenation.
+- [x] `SwiGluProjectionFusion` (22 fusions on TinyLlama ONNX)
+- [x] Lowering + pipeline ordering
+- [x] ShapeContextGraph serialization panic fixed (graceful fallback)
+- [x] Fusion metrics: 6 → 2 nodes per FFN layer (67% reduction in unit tests)
+- [x] TinyLlama ONNX E2E: compiles + generates "The capital of France is Paris."
 
-**Wave 2: Shape chain elimination + GEMM absorption**
-- [ ] GQA Expand chain (Unsqueeze→Expand→Reshape) → dead node after attention fusion
-- [ ] Q/K/V Reshape+Transpose absorption into attention (198 nodes eliminated)
-- [ ] Transpose → MatMul absorption (emit Gemm trans_b instead of separate Transpose)
-- [ ] MatMul → Mul(scalar) absorption (fold into Gemm alpha parameter)
-- [ ] Expand → Identity lowering when element count unchanged
+**Wave 2: Shape chain elimination + GEMM absorption — DONE**
+- [x] GQA Expand chain — already eliminated by DeadNodeElimination after AttentionFusion
+- [x] `TransposeMatMulFusion` — absorb Transpose(swap-last-2) → MatMul into Gemm trans_b
+- [x] `ScalarAbsorption` — fold MatMul → Mul(scalar) into Gemm alpha
+- [x] Expand → Identity lowering (zero-copy pass-through instead of Reshape)
+- [ ] Q/K/V Reshape+Transpose absorption into attention (future)
 
 **Wave 3: Extended patterns (all model types)**
 - [ ] Embed + Norm fusion (post-embedding normalization: Qwen, Gemma)
 - [ ] Final Norm + LM Head fusion (single-consumer logit projection)
 - [ ] LayerNorm + Projection (BERT, GPT-2, CLIP encoder models)
-- [ ] Attention → Output Projection fusion
+- [ ] Attention → Residual Add fusion (Plan 039 #5)
 - [ ] Conv2d + GroupNorm + Activation chain (SD UNet)
-- [ ] Scalar broadcast absorption into compute ops
 - [ ] LUT4 variants (dequant preamble first, inline if profiling demands)
 
 **Wave 4: General rule-based fusion walker**
@@ -527,9 +528,34 @@ reduction, fuse them.
 - [ ] Rules: elementwise fuse freely, norm fuses with Add or projection,
   max 1 GEMM per group, Softmax/Attention are barriers
 
-**Expected impact:** 88 fewer buffer allocations + 88 fewer dispatch calls per
-decode step (22-layer model) from Wave 1 alone. Wave 2 eliminates ~200
-shape-only nodes. Wave 3 extends to encoder + vision models.
+#### Runtime Performance (Plan 039 — hologram base)
+
+**Phase 1: Multi-core unlock (highest impact — 2-3x decode throughput)**
+- [ ] Fix `dispatch_kernel_par` bug — missing arms for MatMulLut4/8, Conv2d*
+  in parallel dispatch. Blocks all multi-core quantized inference. (Plan 039 #1)
+- [ ] N-dimension parallelism for M=1 GEMM — partition n_tiles across rayon
+  threads. Each thread writes non-overlapping output columns. (Plan 039 #2)
+
+**Phase 2: Memory bandwidth**
+- [ ] Multi-level weight prefetch — `MADV_WILLNEED` for levels i+1 AND i+2,
+  `MADV_DONTNEED` for level i-2. ~20 lines, 5-15% on large models. (Plan 039 #3)
+- [ ] Shared B-panel packing — restructure GEMM loop to pack B once per
+  (N-tile, K-block), fan out M-tiles. 15-25% GEMM speedup. (Plan 039 #6)
+
+**Phase 3: Fusion gaps (hologram base graph-level)**
+- [ ] AddRmsNorm + Activation fusion — `FusedAddRmsNormActivation` GraphOp.
+  Every LLM transformer block. 3-5% latency. (Plan 039 #4)
+- [ ] SwiGLU fusion from Split → Silu → Mul pattern at graph level.
+  Catches patterns the compiler doesn't see. 3-5%. (Plan 039 #7)
+- [ ] Attention + Residual Add fusion — `FusedAttentionResidualAdd` GraphOp.
+  Eliminates full attention output buffer. 5-8%. (Plan 039 #5)
+
+**Phase 4: Memory & platform**
+- [ ] Wire workspace buffer reuse — `WorkspaceLayout` → arena pre-allocation.
+  20-40% peak activation memory reduction. (Plan 039 #8)
+- [ ] Adaptive sparse_v threshold — configurable per `KvCacheConfig`.
+  5-20% decode speedup at 32K+ context. (Plan 039 #10)
+- [ ] wasm32 SIMD128 micro-kernels — MR=4, NR=4. 3-4x wasm GEMM. (Plan 039 #11)
 
 #### Tier 2: Compute kernel optimizations (hologram base + hologram-ai)
 - [ ] 2.1 Speculative decoding — draft model + batched verification (2-4x throughput)
