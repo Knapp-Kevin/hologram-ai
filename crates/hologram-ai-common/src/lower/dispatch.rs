@@ -93,6 +93,8 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
 
         // ── Fused ops needing shape resolution ─────────────────────────
         FusedLayerNormResidual { .. } => D::FloatNeedsShape,
+        FusedNormProjection { .. } => D::FloatNeedsShape,
+        FusedSwiGluProjection => D::FloatNeedsShape,
 
         // ── Native FloatOp: params from AiOp (no shape resolution needed) ─
         RotaryEmbedding { .. } => D::FloatNeedsShape,

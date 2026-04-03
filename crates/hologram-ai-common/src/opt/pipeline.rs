@@ -26,7 +26,9 @@ impl OptPipeline {
             data_prop::DataPropagation, dead_node::DeadNodeElimination,
             decompose::OpDecomposition, kv_slot_injection::KvSlotInjection,
             matmul_activation_fusion::MatMulActivationFusion,
+            norm_projection_fusion::NormProjectionFusion,
             shared_input_projection_fusion::SharedInputProjectionFusion,
+            swiglu_projection_fusion::SwiGluProjectionFusion,
             position_ids_injection::PositionIdsInjection,
             resolve_slice_params::ResolveSliceParams,
             rmsnorm_fusion::RmsNormFusion, semantic_prop::SemanticPropagation,
@@ -63,6 +65,13 @@ impl OptPipeline {
             // FusedLayerNormResidual. Runs after RmsNormFusion (needs fused
             // RmsNorm nodes) and before AttentionFusion.
             Box::new(AddRmsNormFusion),
+            // Deep decode fusions (Plan 054):
+            // Fuse [Add+]RmsNorm → multi-way MatMul projection.
+            // Runs after AddRmsNormFusion (consumes its output).
+            Box::new(NormProjectionFusion),
+            // Fuse FusedSwiGLU → MatMul (down projection).
+            // Runs after SwiGluFusion (consumes FusedSwiGLU nodes).
+            Box::new(SwiGluProjectionFusion),
             // Fuse shared-input MatMul projections:
             // QKV: 3 MatMuls → 1 MatMul + 3 Slices (saves 44 BLAS calls)
             // Gate+Up: 2 MatMuls → 1 MatMul + 2 Slices (saves 22 BLAS calls)
