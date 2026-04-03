@@ -37,7 +37,7 @@
 //! Only f32 weights are concatenated (Q4 weights skipped to avoid rkyv overflow).
 
 use super::pipeline::Pass;
-use crate::ir::{AiGraph, AiNode, AiOp, AiParam, Dim, DType, SemanticHint, TensorId, TensorInfo};
+use crate::ir::{AiGraph, AiNode, AiOp, DType, TensorId};
 use std::collections::{HashMap, HashSet};
 
 pub struct NormProjectionFusion;
@@ -61,17 +61,6 @@ impl Pass for NormProjectionFusion {
         let mut fused_count: u32 = 0;
 
         let mut next_node_id = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
-        let mut next_tid = graph
-            .nodes
-            .iter()
-            .flat_map(|n| n.outputs.iter().chain(n.inputs.iter()))
-            .copied()
-            .max()
-            .unwrap_or(0)
-            + 1;
-        if let Some(max_param_tid) = graph.params.keys().max() {
-            next_tid = next_tid.max(*max_param_tid + 1);
-        }
 
         for (norm_idx, norm_node) in graph.nodes.iter().enumerate() {
             let (epsilon, has_residual_add) = match &norm_node.op {
@@ -167,85 +156,34 @@ impl Pass for NormProjectionFusion {
             }
 
             let split_sizes: Vec<usize> = weight_infos.iter().map(|w| w.2).collect();
-            let n_total: usize = split_sizes.iter().sum();
 
-            // Concatenate weights along N axis.
-            let concat_result = concat_weights_along_n(&graph, &matmul_consumers, k);
-            let concat_bytes = match concat_result {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    tracing::warn!(
-                        norm_idx,
-                        "NormProjectionFusion: weight concat failed: {e}"
-                    );
-                    continue;
-                }
-            };
-
-            // Allocate TIDs for concat weight and fused output.
-            let concat_weight_tid = next_tid;
-            next_tid += 1;
-            let fused_output_tid = next_tid;
-            next_tid += 1;
-
-            // Register concat weight.
-            let weight_shape = crate::ir::shape_from_concrete(&[k as u64, n_total as u64]);
-            let weight_info = TensorInfo {
-                shape: weight_shape,
-                logical_dtype: DType::F32,
-                storage_dtype: DType::F32,
-                quant: hologram_ai_quant::QuantDescriptor::none(),
-                known_i64_values: None,
-                semantic: SemanticHint::Unknown,
-            };
-            graph.params.insert(
-                concat_weight_tid,
-                AiParam::Inline {
-                    data: concat_bytes,
-                    info: weight_info.clone(),
-                },
-            );
-            graph.tensor_info.insert(concat_weight_tid, weight_info);
-
-            // Register fused output tensor info.
-            let fused_output_info = {
-                let input_tid = norm_node.inputs[0];
-                let mut shape = graph
-                    .tensor_info
-                    .get(&input_tid)
-                    .map(|i| i.shape.clone())
-                    .unwrap_or_else(|| crate::ir::shape_from_concrete(&[1]));
-                if let Some(last) = shape.last_mut() {
-                    *last = Dim::Concrete(n_total as u64);
-                }
-                TensorInfo {
-                    shape,
-                    logical_dtype: DType::F32,
-                    storage_dtype: DType::F32,
-                    quant: hologram_ai_quant::QuantDescriptor::none(),
-                    known_i64_values: None,
-                    semantic: SemanticHint::Unknown,
-                }
-            };
-            graph.tensor_info.insert(fused_output_tid, fused_output_info);
-
-            // Build fused node inputs.
-            let fused_inputs = if has_residual_add {
-                // FusedLayerNormResidual inputs: [x, residual, weight]
+            // Build fused node inputs: [x, (residual,) norm_weight, W_a, W_b, ...]
+            // No weight concatenation — pass original weights directly.
+            // The fused kernel normalizes once, then does N separate projections
+            // from the same normed buffer. This avoids rkyv serialization overflow
+            // from inline concatenated weights.
+            let mut fused_inputs = if has_residual_add {
                 vec![
                     norm_node.inputs[0], // x
                     norm_node.inputs[1], // residual
                     norm_node.inputs[2], // norm_weight
-                    concat_weight_tid,   // proj_weight
                 ]
             } else {
-                // RmsNorm inputs: [x, weight]
                 vec![
                     norm_node.inputs[0], // x
                     norm_node.inputs[1], // norm_weight
-                    concat_weight_tid,   // proj_weight
                 ]
             };
+            // Append each projection weight.
+            for &(_, weight_tid, _) in &matmul_consumers {
+                fused_inputs.push(weight_tid);
+            }
+
+            // Create one output per projection (multi-output node).
+            let fused_outputs: Vec<TensorId> = matmul_consumers
+                .iter()
+                .map(|&(_, _, orig_out_tid)| orig_out_tid)
+                .collect();
 
             let fused_node_id = next_node_id;
             next_node_id += 1;
@@ -257,35 +195,10 @@ impl Pass for NormProjectionFusion {
                     has_residual_add,
                 },
                 fused_inputs,
-                vec![fused_output_tid],
+                fused_outputs,
             );
 
-            let mut new_nodes = vec![fused_node];
-
-            // Create Slice nodes for each original output.
-            let mut col_offset = 0i64;
-            for (i, &(_, _, orig_out_tid)) in matmul_consumers.iter().enumerate() {
-                let slice_node_id = next_node_id;
-                next_node_id += 1;
-                let start = col_offset;
-                let end = col_offset + split_sizes[i] as i64;
-
-                let slice_node = AiNode::new(
-                    slice_node_id,
-                    AiOp::Slice {
-                        axes: vec![-1],
-                        starts: vec![start],
-                        ends: vec![end],
-                        steps: vec![1],
-                    },
-                    vec![fused_output_tid],
-                    vec![orig_out_tid],
-                );
-
-                // Preserve original output tensor info.
-                new_nodes.push(slice_node);
-                col_offset = end;
-            }
+            let new_nodes = vec![fused_node];
 
             // Mark norm + matmul nodes for removal.
             to_remove.insert(norm_idx);
@@ -300,7 +213,6 @@ impl Pass for NormProjectionFusion {
                 norm_idx,
                 n_projections = matmul_consumers.len(),
                 ?split_sizes,
-                n_total,
                 has_residual_add,
                 "NormProjectionFusion: fused Norm + {}-way projection",
                 matmul_consumers.len(),
@@ -348,6 +260,7 @@ impl Pass for NormProjectionFusion {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn get_2d_shape(graph: &AiGraph, tid: TensorId) -> Option<(usize, usize)> {
+    use crate::ir::Dim;
     let info = graph.tensor_info.get(&tid)?;
     let dims: Vec<usize> = info
         .shape
@@ -364,77 +277,10 @@ fn get_2d_shape(graph: &AiGraph, tid: TensorId) -> Option<(usize, usize)> {
     }
 }
 
-fn param_bytes(param: &AiParam) -> anyhow::Result<Vec<u8>> {
-    use anyhow::Context;
-    match param {
-        AiParam::Inline { data, .. } => Ok(data.clone()),
-        AiParam::Mmap {
-            path, offset, len, ..
-        } => {
-            use std::io::{Read, Seek, SeekFrom};
-            let mut f = std::fs::File::open(path)
-                .with_context(|| format!("opening mmap param at {path:?}"))?;
-            f.seek(SeekFrom::Start(*offset))?;
-            let mut buf = vec![0u8; *len as usize];
-            f.read_exact(&mut buf)?;
-            Ok(buf)
-        }
-    }
-}
-
-/// Concatenate weight matrices along the N (column) axis.
-fn concat_weights_along_n(
-    graph: &AiGraph,
-    matmul_consumers: &[(usize, TensorId, TensorId)],
-    k: usize,
-) -> anyhow::Result<Vec<u8>> {
-    let ns: Vec<usize> = matmul_consumers
-        .iter()
-        .map(|&(_, weight_tid, _)| {
-            graph
-                .tensor_info
-                .get(&weight_tid)
-                .and_then(|i| i.shape.last())
-                .and_then(|d| d.as_concrete())
-                .map(|c| c as usize)
-                .unwrap_or(0)
-        })
-        .collect();
-    let n_total: usize = ns.iter().sum();
-
-    let weight_data: Vec<Vec<u8>> = matmul_consumers
-        .iter()
-        .map(|&(_, weight_tid, _)| {
-            let param = graph
-                .params
-                .get(&weight_tid)
-                .ok_or_else(|| anyhow::anyhow!("weight param not found for tid {}", weight_tid))?;
-            param_bytes(param)
-        })
-        .collect::<anyhow::Result<_>>()?;
-
-    let mut result = vec![0u8; k * n_total * 4];
-    for row in 0..k {
-        let mut col_offset = 0usize;
-        for (m_idx, &n_i) in ns.iter().enumerate() {
-            let src_start = row * n_i * 4;
-            let src_end = src_start + n_i * 4;
-            let dst_start = (row * n_total + col_offset) * 4;
-            if src_end <= weight_data[m_idx].len() {
-                result[dst_start..dst_start + n_i * 4]
-                    .copy_from_slice(&weight_data[m_idx][src_start..src_end]);
-            }
-            col_offset += n_i;
-        }
-    }
-
-    Ok(result)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{AiGraph, AiNode, AiOp, AiParam, TensorInfo};
+    use crate::ir::{AiGraph, AiNode, AiOp, AiParam, SemanticHint, TensorInfo};
 
     fn empty_graph() -> AiGraph {
         AiGraph {
@@ -486,7 +332,6 @@ mod tests {
         g.tensor_info.insert(12, info_a);
         g.tensor_info.insert(13, info_b);
 
-        // Input x shape: [1, 512]
         g.tensor_info.insert(10, TensorInfo {
             shape: crate::ir::shape_from_concrete(&[1, 512]),
             logical_dtype: DType::F32,
@@ -503,23 +348,14 @@ mod tests {
         ];
 
         let result = NormProjectionFusion.run(g).expect("pass should succeed");
-        // Should produce: 1 FusedNormProjection + 2 Slices = 3 nodes
-        assert_eq!(result.nodes.len(), 3, "should have fused_node + 2 slices");
+        // Multi-output: 1 FusedNormProjection with 2 outputs (no Slices needed).
+        assert_eq!(result.nodes.len(), 1, "should have 1 fused node");
         assert!(
             matches!(result.nodes[0].op, AiOp::FusedNormProjection { .. }),
-            "first node should be FusedNormProjection, got {:?}",
+            "should be FusedNormProjection, got {:?}",
             result.nodes[0].op
         );
-        assert!(
-            matches!(result.nodes[1].op, AiOp::Slice { .. }),
-            "second node should be Slice"
-        );
-        assert!(
-            matches!(result.nodes[2].op, AiOp::Slice { .. }),
-            "third node should be Slice"
-        );
 
-        // Check FusedNormProjection params.
         if let AiOp::FusedNormProjection {
             epsilon,
             split_sizes,
@@ -531,9 +367,10 @@ mod tests {
             assert!(!has_residual_add);
         }
 
-        // Slices should output the original tids.
-        assert_eq!(result.nodes[1].outputs, vec![30]);
-        assert_eq!(result.nodes[2].outputs, vec![31]);
+        // Outputs should be the original MatMul output tids.
+        assert_eq!(result.nodes[0].outputs, vec![30, 31]);
+        // Inputs: [x, norm_weight, W_a, W_b]
+        assert_eq!(result.nodes[0].inputs, vec![10, 11, 12, 13]);
     }
 
     #[test]

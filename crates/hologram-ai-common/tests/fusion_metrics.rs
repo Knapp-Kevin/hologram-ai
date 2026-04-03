@@ -255,14 +255,10 @@ fn ffn_block_swiglu_projection_fusion() {
         "should have exactly 1 FusedSwiGluProjection"
     );
 
-    // NormProjectionFusion should fire: RmsNorm + 2 MatMuls → FusedNormProjection + 2 Slices
+    // NormProjectionFusion should fire: RmsNorm + 2 MatMuls → 1 FusedNormProjection (multi-output)
     assert_eq!(
         after_counts.get("FusedNormProjection").copied().unwrap_or(0), 1,
         "should have exactly 1 FusedNormProjection"
-    );
-    assert_eq!(
-        after_counts.get("Slice").copied().unwrap_or(0), 2,
-        "should have 2 Slice nodes from NormProjectionFusion"
     );
 
     // No standalone MatMul should remain (all absorbed into fusions).
@@ -271,7 +267,7 @@ fn ffn_block_swiglu_projection_fusion() {
         "all MatMuls should be absorbed into fused ops"
     );
 
-    // Net node reduction: 6 original → 4 (FusedNormProj + 2 Slices + FusedSwiGluProj)
+    // Net node reduction: 6 original → 2 (FusedNormProj + FusedSwiGluProj)
     assert!(
         after_nodes <= before_nodes,
         "fusion should not increase node count: {after_nodes} > {before_nodes}"
@@ -358,7 +354,7 @@ fn multi_layer_ffn_fusion_scaling() {
     );
     eprintln!("Op counts: {after_counts:?}");
 
-    // Per layer: 1 FusedNormProjection + 2 Slices + 1 FusedSwiGluProjection = 4 nodes
+    // Per layer: 1 FusedNormProjection (multi-output) + 1 FusedSwiGluProjection = 2 nodes
     // vs original: 6 nodes per layer
     assert_eq!(
         after_counts.get("FusedNormProjection").copied().unwrap_or(0),
@@ -371,11 +367,6 @@ fn multi_layer_ffn_fusion_scaling() {
         "should have {n_layers} FusedSwiGluProjection ops"
     );
     assert_eq!(
-        after_counts.get("Slice").copied().unwrap_or(0),
-        n_layers * 2,
-        "should have {} Slice ops", n_layers * 2
-    );
-    assert_eq!(
         after_counts.get("MatMul").copied().unwrap_or(0),
         0,
         "no standalone MatMul should remain"
@@ -383,5 +374,5 @@ fn multi_layer_ffn_fusion_scaling() {
 
     // Verify linear scaling: each layer should contribute the same reduction.
     let nodes_per_layer = after_nodes / n_layers;
-    assert_eq!(nodes_per_layer, 4, "expected 4 nodes per layer after fusion (NormProj + 2 Slice + SwiGluProj)");
+    assert_eq!(nodes_per_layer, 2, "expected 2 nodes per layer after fusion (NormProj + SwiGluProj)");
 }
