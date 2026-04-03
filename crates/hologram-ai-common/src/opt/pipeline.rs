@@ -26,6 +26,7 @@ impl OptPipeline {
             data_prop::DataPropagation, dead_node::DeadNodeElimination,
             decompose::OpDecomposition, kv_slot_injection::KvSlotInjection,
             matmul_activation_fusion::MatMulActivationFusion,
+            shared_input_projection_fusion::SharedInputProjectionFusion,
             position_ids_injection::PositionIdsInjection,
             resolve_slice_params::ResolveSliceParams,
             rmsnorm_fusion::RmsNormFusion, semantic_prop::SemanticPropagation,
@@ -62,6 +63,10 @@ impl OptPipeline {
             // FusedLayerNormResidual. Runs after RmsNormFusion (needs fused
             // RmsNorm nodes) and before AttentionFusion.
             Box::new(AddRmsNormFusion),
+            // Fuse shared-input MatMul projections:
+            // QKV: 3 MatMuls → 1 MatMul + 3 Slices (saves 44 BLAS calls)
+            // Gate+Up: 2 MatMuls → 1 MatMul + 2 Slices (saves 22 BLAS calls)
+            Box::new(SharedInputProjectionFusion),
             // Replace Range(0, seq, 1) position generators with a position_ids
             // input. Enables KV cache decode at seq=1 by passing the correct
             // absolute position from the generation loop.

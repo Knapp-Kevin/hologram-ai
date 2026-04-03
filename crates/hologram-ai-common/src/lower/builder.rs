@@ -382,20 +382,18 @@ pub fn lower(
                 // Fused variants (FusedMatMulActivation) keep their f32 fused kernel
                 // which already eliminates the intermediate buffer. Only plain MatMul
                 // benefits from LUT-GEMM quantization.
-                // Skip MatMuls that feed into attention (Q/K/V projections) — the
-                // fused attention kernel expects f32 inputs.
-                // Skip Q/K/V/O projection MatMuls — their output feeds into the
-                // fused attention kernel which expects f32 input. Detect by checking
-                // if the MatMul's output dimension matches an attention head size.
-                // Q/O projections: output = n_q_heads * head_dim (e.g., 2048)
-                // K/V projections: output = n_kv_heads * head_dim (e.g., 256)
+                // Skip MatMuls that produce Q/K/V/O projections for attention.
+                // These have output N matching attention head dimensions AND input K
+                // matching hidden_size. FFN down_proj has K=ffn_intermediate (≠hidden_size)
+                // and is NOT skipped despite having N=hidden_size.
                 let attn_dims: Vec<usize> = ai_graph.nodes.iter()
                     .filter_map(|n| match &n.op {
                         AiOp::GroupedQueryAttention { num_heads, num_kv_heads, head_dim, .. } => {
-                            Some(vec![
-                                *num_heads as usize * *head_dim as usize,
-                                *num_kv_heads as usize * *head_dim as usize,
-                            ])
+                            let q_dim = *num_heads as usize * *head_dim as usize;
+                            let kv_dim = *num_kv_heads as usize * *head_dim as usize;
+                            // Include individual dims AND fused QKV dim (from
+                            // SharedInputProjectionFusion: N_q + N_k + N_v).
+                            Some(vec![q_dim, kv_dim, q_dim + 2 * kv_dim])
                         }
                         _ => None,
                     })

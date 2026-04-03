@@ -444,6 +444,49 @@ zero runtime code. All kernels belong in hologram base crate.
 - Strip f32 originals from Q4 archive (constant offset remapping)
 - Q4 archive: 5 GB → ~0.5 GB → ~0.2 GB compressed
 
+#### Plan 051: Full Byte-Domain Q4 MatMul — 60+ tok/s
+- Branch: `feat/hologram-lut-q4`
+- **Core idea:** Quantize activations to int8 at runtime, making the entire
+  Q4 matmul inner loop pure integer (int8×int8→int16→int32). f32 conversion
+  happens ONCE per output element instead of per K-row.
+- Strategy A: `vmull_s8` (int8×int8→int16) + `vaddw_s16` (int16→int32 accumulate)
+- 18 NEON ops per 32 columns vs current 36 → 2x inner-loop reduction
+- K-unroll by 4 for ILP → projected 2.6x total speedup
+- [ ] Phase 1: `quantize_activation_row` helper (NEON-vectorized)
+- [ ] Phase 2: `lut_gemm_4bit_neon_int8` kernel (replaces nibbleview)
+- [ ] Phase 3: K-unroll by 4 + N-chunk 64
+- [ ] Phase 4: Profile vs BLAS, lower/remove hybrid threshold
+- [ ] Phase 5: Update scalar fallback + WASM path
+- **Result: 43-44 tok/s — near Q4 bandwidth ceiling on Apple Silicon**
+- [x] Phase 1-2: int8 activation quantization + NEON vmull/vaddw kernel
+  - Pure LUT: 12.5 → 20 tok/s (1.6x from int8 activations)
+  - Compile-time int8 centroid table, K-unrolled by 4 for ILP
+- [x] Phase 3: Unified LUT+BLAS pipeline (no threshold branching)
+  - LUT handles Q4 storage + dequant (hologram's core value)
+  - BLAS/AMX handles matmul compute (hardware acceleration)
+  - Single path: LUT dequant → BLAS sgemm on macOS; int8 LUT kernel on non-BLAS
+- [x] NEON f32 vecmat for M=1 — **tested, AMX faster** (10 vs 43 tok/s)
+  - Apple AMX hardware outperforms software NEON even for M=1 vecmat
+  - Kept as fallback for non-BLAS platforms (WASM, Linux without Accelerate)
+- [x] Profiling infrastructure (`HOLOGRAM_PROFILE=1`, per-kernel-type timing)
+- [x] SharedInputProjectionFusion pass (Plan 052)
+  - QKV: 3 MatMuls → 1 MatMul + 3 Slices (22 fusions fire on TinyLlama)
+  - Gate+Up: 2 MatMuls → 1 MatMul + 2 Slices (22 fusions fire)
+  - **Tested, currently slower on Apple Silicon** — AMX handles small matmuls
+    efficiently; fused larger matmul + Slice overhead is net slower
+  - Disabled for now; useful on non-AMX platforms where BLAS overhead is higher
+  - Gate+Up fusion hits rkyv serialization overflow for large Q4 weights (11264 cols)
+- **Profiling findings (21ms/step at 43 tok/s):**
+  - MatMulLut4 (Q4 dequant→BLAS): 10ms/48% (45 calls)
+  - MatMul f32 (down_proj+attn): 9.4ms/45% (110 calls)
+  - Transpose: 0.3ms/1.5% (89 calls)
+  - Everything else: 1.3ms/5%
+  - **96% of time is in matmul** — AMX is at hardware throughput limit
+- **Path to 60+ tok/s requires reducing data per step (Tier 3):**
+  - Q2/ternary quantization — half the weight reads (2x bandwidth ceiling)
+  - Speculative decoding — multiple effective tokens per forward pass
+  - Sliding window attention — reduce KV cache reads at long context
+
 #### Tier 2: Compute kernel optimizations (hologram base + hologram-ai)
 - [ ] 2.1 Speculative decoding — draft model + batched verification (2-4x throughput)
 - [x] 2.2 Flash attention SIMD — NEON `vfmaq_f32` / AVX2 `_mm256_fmadd_ps`

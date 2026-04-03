@@ -18,6 +18,7 @@ pub mod semantic_prop;
 pub mod shape_prop;
 pub mod slice_to_gather;
 pub mod matmul_activation_fusion;
+pub mod shared_input_projection_fusion;
 pub mod swiglu_fusion;
 
 pub use add_rmsnorm_fusion::AddRmsNormFusion;
@@ -34,4 +35,5 @@ pub use shape_heal::ShapeHealing;
 pub use shape_prop::AggressiveShapePropagation;
 pub use resolve_slice_params::ResolveSliceParams;
 pub use slice_to_gather::SliceToGather;
+pub use shared_input_projection_fusion::SharedInputProjectionFusion;
 pub use swiglu_fusion::SwiGluFusion;
