@@ -487,6 +487,50 @@ zero runtime code. All kernels belong in hologram base crate.
   - Speculative decoding — multiple effective tokens per forward pass
   - Sliding window attention — reduce KV cache reads at long context
 
+#### Deep Decode Fusion (Plan 054) — eliminate intermediate buffers
+
+Today's fusions are shallow (2-op chains). Deep fusion chains 3-4 ops into
+single dispatches, eliminating all intermediate buffers through transformer
+blocks. Decode-only (M=1); prefill falls back to separate BLAS calls. The
+general fusion rule: if an op's output has exactly one consumer and no global
+reduction, fuse them.
+
+**Wave 1: Core deep fusions (hologram base + hologram-ai)**
+- [ ] `FloatOp::NormProjectionGemv` — RmsNorm → multi-output GEMV (QKV or Gate+Up)
+- [ ] `FloatOp::AddNormProjectionGemv` — Add + RmsNorm → multi-output GEMV
+- [ ] `FloatOp::SwiGluProjectionGemv` — SiLU×Mul → down-projection GEMV
+- [ ] `fused_decode.rs` kernel implementations (M=1 fused, M>1 decomposed fallback)
+- [ ] TapeKernel variants + tape_builder + dispatch_kernel wiring
+- [ ] M=1 `cblas_sgemv` fast path in `dispatch_matmul` (benefits all M=1 matmuls)
+- [ ] `FusedNormProjection` + `FusedSwiGluProjection` AiOp variants
+- [ ] `NormProjectionFusion` + `SwiGluProjectionFusion` passes
+- [ ] Lowering + pipeline ordering
+
+**Wave 2: Shape chain elimination + GEMM absorption**
+- [ ] GQA Expand chain (Unsqueeze→Expand→Reshape) → dead node after attention fusion
+- [ ] Q/K/V Reshape+Transpose absorption into attention (198 nodes eliminated)
+- [ ] Transpose → MatMul absorption (emit Gemm trans_b instead of separate Transpose)
+- [ ] MatMul → Mul(scalar) absorption (fold into Gemm alpha parameter)
+- [ ] Expand → Identity lowering when element count unchanged
+
+**Wave 3: Extended patterns (all model types)**
+- [ ] Embed + Norm fusion (post-embedding normalization: Qwen, Gemma)
+- [ ] Final Norm + LM Head fusion (single-consumer logit projection)
+- [ ] LayerNorm + Projection (BERT, GPT-2, CLIP encoder models)
+- [ ] Attention → Output Projection fusion
+- [ ] Conv2d + GroupNorm + Activation chain (SD UNet)
+- [ ] Scalar broadcast absorption into compute ops
+- [ ] LUT4 variants (dequant preamble first, inline if profiling demands)
+
+**Wave 4: General rule-based fusion walker**
+- [ ] Replace individual fusion passes with single configurable walker
+- [ ] Rules: elementwise fuse freely, norm fuses with Add or projection,
+  max 1 GEMM per group, Softmax/Attention are barriers
+
+**Expected impact:** 88 fewer buffer allocations + 88 fewer dispatch calls per
+decode step (22-layer model) from Wave 1 alone. Wave 2 eliminates ~200
+shape-only nodes. Wave 3 extends to encoder + vision models.
+
 #### Tier 2: Compute kernel optimizations (hologram base + hologram-ai)
 - [ ] 2.1 Speculative decoding — draft model + batched verification (2-4x throughput)
 - [x] 2.2 Flash attention SIMD — NEON `vfmaq_f32` / AVX2 `_mm256_fmadd_ps`

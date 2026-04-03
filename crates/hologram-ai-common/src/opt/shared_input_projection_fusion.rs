@@ -47,7 +47,19 @@ impl Pass for SharedInputProjectionFusion {
         "SharedInputProjectionFusion"
     }
 
-    fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
+    fn run(&self, graph: AiGraph) -> anyhow::Result<AiGraph> {
+        // Disabled: profiling shows fused matmuls are slower on Apple Silicon AMX
+        // (single large sgemm is slower than multiple small ones for M=1 decode).
+        // Also gate+up fusion hits rkyv overflow for large Q4 weights.
+        // Infrastructure preserved for non-AMX platforms and future use.
+        //
+        // To re-enable: remove the early return and uncomment the fusion paths below.
+        return Ok(graph);
+
+        #[allow(unreachable_code, clippy::overly_complex_bool_expr, clippy::needless_borrow,
+                clippy::iter_over_hash_type, clippy::for_kv_map, unused_variables, unused_mut)]
+        {
+        let mut graph = graph;
         // Collect MatMul nodes grouped by their shared input tensor.
         // Key: input[0] tid, Value: vec of (node_idx, weight_tid, K, N).
         let mut shared_input_groups: HashMap<TensorId, Vec<MatMulInfo>> = HashMap::new();
@@ -245,6 +257,7 @@ impl Pass for SharedInputProjectionFusion {
         graph.nodes = result_nodes;
         graph.invalidate_topo_cache();
         Ok(graph)
+        } // end #[allow(unreachable_code)]
     }
 }
 

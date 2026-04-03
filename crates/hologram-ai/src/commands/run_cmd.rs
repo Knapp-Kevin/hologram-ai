@@ -7,7 +7,7 @@
 
 use anyhow::Context as _;
 use clap::Args;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use hologram::hologram_archive::section::model_meta::{ModelMetaSection, SECTION_MODEL_META};
 use hologram::hologram_archive::section::tokenizer::{
     MiniBpeEncoder, TokenizerSection, SECTION_TOKENIZER,
@@ -688,7 +688,7 @@ fn print_logit_diagnostics(
     let max = floats.iter().copied().reduce(f32::max).unwrap_or(0.0);
     let mean = floats.iter().sum::<f32>() / floats.len() as f32;
 
-    info!(
+    debug!(
         "[logit-debug] step={step} pos={target_pos} vocab={vocab_size} \
          total_bytes={} nan={nan_count} inf={inf_count} zero={zero_count} \
          min={min:.4} max={max:.4} mean={mean:.6}",
@@ -699,7 +699,7 @@ fn print_logit_diagnostics(
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     for (i, (tok_id, val)) in indexed.iter().take(5).enumerate() {
         let tok_str = tok_section.id_to_token(*tok_id as u32).unwrap_or("<unk>");
-        info!(
+        debug!(
             "[logit-debug] top-{}: id={tok_id} val={val:.6} \"{tok_str}\"",
             i + 1
         );
