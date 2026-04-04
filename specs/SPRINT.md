@@ -537,49 +537,58 @@ reduction, fuse them.
   threads. Each thread writes non-overlapping output columns. (Plan 039 #2)
 
 **Phase 2: Memory bandwidth**
-- [ ] Multi-level weight prefetch — `MADV_WILLNEED` for levels i+1 AND i+2,
-  `MADV_DONTNEED` for level i-2. ~20 lines, 5-15% on large models. (Plan 039 #3)
-- [ ] Shared B-panel packing — restructure GEMM loop to pack B once per
-  (N-tile, K-block), fan out M-tiles. 15-25% GEMM speedup. (Plan 039 #6)
+- [x] Multi-level weight prefetch — madvise(WILLNEED/DONTNEED) wired in execute_direct
+- [ ] Shared B-panel packing — restructure GEMM loop (Plan 039 #6)
 
 **Phase 3: Fusion gaps (hologram base graph-level)**
-- [ ] AddRmsNorm + Activation fusion — `FusedAddRmsNormActivation` GraphOp.
-  Every LLM transformer block. 3-5% latency. (Plan 039 #4)
-- [ ] SwiGLU fusion from Split → Silu → Mul pattern at graph level.
-  Catches patterns the compiler doesn't see. 3-5%. (Plan 039 #7)
-- [ ] Attention + Residual Add fusion — `FusedAttentionResidualAdd` GraphOp.
-  Eliminates full attention output buffer. 5-8%. (Plan 039 #5)
+- [x] AddRmsNorm + Activation fusion — already in hologram base
+- [ ] SwiGLU fusion from Split → Silu → Mul pattern (Plan 039 #7)
+- [ ] Attention + Residual Add fusion (Plan 039 #5)
 
 **Phase 4: Memory & platform**
-- [ ] Wire workspace buffer reuse — `WorkspaceLayout` → arena pre-allocation.
-  20-40% peak activation memory reduction. (Plan 039 #8)
-- [ ] Adaptive sparse_v threshold — configurable per `KvCacheConfig`.
-  5-20% decode speedup at 32K+ context. (Plan 039 #10)
-- [ ] wasm32 SIMD128 micro-kernels — MR=4, NR=4. 3-4x wasm GEMM. (Plan 039 #11)
+- [ ] Wire workspace buffer reuse (Plan 039 #8)
+- [x] Adaptive sparse_v threshold — HOLOGRAM_SPARSE_V_THRESHOLD env var
+- [ ] wasm32 SIMD128 micro-kernels (Plan 039 #11)
 
-#### Path to 60+ tok/s (Plan 055) — 3 phases
+#### Path to 60+ tok/s (Plans 055-057) — RESULTS
 
-**Phase 1: Strip f32 from Q4 archives (hologram-ai) — BLOCKER**
-- [ ] Pre-scan Q4 eligibility before parameter registration in builder.rs
-- [ ] Skip f32 bytes for Q4-eligible weights (register empty placeholder)
-- [ ] Test: ONNX Q4 archive < 1 GB, tok/s matches GGUF Q4 (38-43)
-- Currently ONNX `--quantize q4_0` produces 4.5 GB (f32 not stripped)
+**Achieved: 43.0 tok/s** on ONNX TinyLlama `--quantize q4_0` (from 2.7 f32 baseline).
+This is the AMX hardware ceiling for TinyLlama 1.1B on Apple Silicon CPU.
+See Plan 057 for full session summary.
 
-**Phase 2: Speculative decoding (hologram-ai + hologram base)**
-- [ ] 3-component compilation: prefill (seq=N) + decode (seq=1) + verify (seq=8)
-- [ ] HoloRunner 3-tape loading with shared WeightCache
-- [ ] `SpeculativeDecoder` struct: draft N tokens → verify batch → accept/reject
-- [ ] Acceptance/rejection sampling (Leviathan et al. 2023)
-- [ ] `--speculative` + `--draft-steps N` CLI flags
-- Target: 2x effective throughput → 76+ effective tok/s
+**Phase 1: Per-row Q4 + early-quant + prewarm — DONE (43 tok/s)**
+- [x] Per-row symmetric linear Q4 quantization (replaced global k-means)
+- [x] Early weight quantization at param registration (before graph optimization)
+- [x] Dequant cache prewarm at model load (zero warmup penalty)
+- [x] SwiGluProjectionGemv decompose to FusedSwiGLU + MatMulLut4 for Q4 weights
+- [x] `feeds_attention` fix: check K == hidden_size (not just N)
+- Steady-state: 21ms/step, 93% in BLAS sgemm (AMX hardware ceiling)
 
-**Phase 3: Q2 quantization (hologram base + hologram-ai)**
-- [ ] `QuantizedWeights2` (4 centroids, 2-bit indices) + `quantize_2bit()`
-- [ ] `lut_gemm_2bit()` kernel (NEON/AVX2) + `MatMulLut2` graph/tape ops
-- [ ] `--quantize q2_0` CLI flag + compiler integration + quality gate
-- Target: base tok/s 50-60 (half weight reads vs Q4)
+**Phase 2: Speculative decoding infrastructure — DONE (needs draft model)**
+- [x] 3-component pipeline: prefill (seq=N) + decode (seq=1) + verify (seq=8)
+- [x] HoloRunner 3-tape loading with shared WeightCache + prewarm
+- [x] Batch verify via execute_verify() — ONE forward pass for N tokens
+- [x] `--speculative` + `--draft-steps N` CLI flags
+- [x] KvCacheState.truncate_to() for draft rollback
+- ⚠ Self-speculative: 0% acceptance (M=1 vs M=N numerical divergence)
+- Needs: separate draft model or exact numerical agreement
 
-**Combined:** Phase 1+2 = 76+ tok/s. Phase 1+2+3 = 100+ tok/s.
+**Phase 3: Q2 quantization — DONE (infrastructure only)**
+- [x] Full Q2 stack: QuantizedWeights2, quantize_2bit, lut_gemm_2bit, MatMulLut2
+- [x] `--quantize q2_0` CLI flag + compiler integration
+- ⚠ Pure integer Q2 kernel slower than AMX BLAS (tested: 400ms vs 21ms)
+- ⚠ Bandwidth reduction doesn't help when AMX uses cached f32 dequant
+
+**What doesn't work for 60+ on CPU (Apple Silicon):**
+- Any software kernel (NEON/scalar/int8) is 8-20x slower than AMX BLAS
+- Bandwidth reduction doesn't help (AMX uses cached f32 regardless of Q level)
+- Self-speculative fails (numerical divergence between M=1 and M=N)
+- Level-parallel: BLAS already uses multi-core AMX internally
+
+**Viable paths to 60+ (future work):**
+- Separate draft model for speculative decoding (60-80 effective tok/s)
+- Metal GPU (100+ tok/s, deferred per user preference)
+- Smaller models (Phi-2, Gemma-2B — same architecture, fewer parameters)
 
 #### Tier 2: Compute kernel optimizations (hologram base + hologram-ai)
 - [ ] 2.1 Speculative decoding — see Plan 055 Phase 2 above
