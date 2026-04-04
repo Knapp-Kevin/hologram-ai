@@ -103,7 +103,11 @@ impl Pass for ConstantDeduplication {
             }
         }
 
-        tracing::debug!(dedup_count, saved_mb = saved_bytes as f64 / 1_048_576.0, "const-dedup: deduplicated constants");
+        tracing::debug!(
+            dedup_count,
+            saved_mb = saved_bytes as f64 / 1_048_576.0,
+            "const-dedup: deduplicated constants"
+        );
 
         Ok(graph)
     }
@@ -217,13 +221,7 @@ mod tests {
         ti.insert(10u32, info.clone());
         ti.insert(20u32, info.clone());
 
-        let g = make_graph(
-            vec![],
-            vec![],
-            vec![],
-            params,
-            ti,
-        );
+        let g = make_graph(vec![], vec![], vec![], params, ti);
 
         let g2 = ConstantDeduplication.run(g).unwrap();
         assert_eq!(g2.params.len(), 2);
@@ -239,13 +237,7 @@ mod tests {
         params.insert(10u32, AiParam::inline(data.clone(), info.clone()));
         params.insert(20u32, AiParam::inline(data, info.clone()));
 
-        let g = make_graph(
-            vec![],
-            vec![],
-            vec![],
-            params,
-            HashMap::new(),
-        );
+        let g = make_graph(vec![], vec![], vec![], params, HashMap::new());
 
         let g2 = ConstantDeduplication.run(g).unwrap();
         // Both should remain (too small to dedup).

@@ -100,10 +100,8 @@ fn sd_unet_onnx_executes() {
 
     // Pipeline archives wrap sub-models. Extract the first (only) model
     // with zero-copy weights borrowed from the mmap.
-    let pipeline = unsafe {
-        hologram::LoadedPipeline::from_bytes_zero_copy(loader.as_bytes())
-    }
-    .expect("loading pipeline failed");
+    let pipeline = unsafe { hologram::LoadedPipeline::from_bytes_zero_copy(loader.as_bytes()) }
+        .expect("loading pipeline failed");
     let plan = pipeline.into_first_model().expect("no model in pipeline");
 
     eprintln!("plan loaded, graph nodes: {}", plan.graph().nodes.len());
@@ -121,9 +119,17 @@ fn sd_unet_onnx_executes() {
     let encoder_data = vec![0.0f32; 1 * 77 * 768];
 
     let mut inputs = hologram::GraphInputs::new();
-    inputs.set_with_shape(0, bytemuck::cast_slice(&sample_data).to_vec(), vec![1, 4, 64, 64]);
+    inputs.set_with_shape(
+        0,
+        bytemuck::cast_slice(&sample_data).to_vec(),
+        vec![1, 4, 64, 64],
+    );
     inputs.set_with_shape(1, bytemuck::cast_slice(&timestep_data).to_vec(), vec![1]);
-    inputs.set_with_shape(2, bytemuck::cast_slice(&encoder_data).to_vec(), vec![1, 77, 768]);
+    inputs.set_with_shape(
+        2,
+        bytemuck::cast_slice(&encoder_data).to_vec(),
+        vec![1, 77, 768],
+    );
 
     eprintln!("starting execution...");
     let start = std::time::Instant::now();
@@ -153,7 +159,11 @@ fn sd_unet_onnx_executes() {
     // SD v1.5 UNet output: noise prediction [1, 4, 64, 64]
     let (_name, out_bytes) = outputs.get(0).expect("no output at index 0");
     let out_floats = bytes_to_f32(out_bytes);
-    eprintln!("output: {} floats ({} bytes)", out_floats.len(), out_bytes.len());
+    eprintln!(
+        "output: {} floats ({} bytes)",
+        out_floats.len(),
+        out_bytes.len()
+    );
 
     // Should have 1*4*64*64 = 16384 floats.
     let expected_len = 1 * 4 * 64 * 64;
@@ -176,8 +186,12 @@ fn sd_unet_onnx_executes() {
     let min = out_floats.iter().cloned().fold(f32::MAX, f32::min);
     let max = out_floats.iter().cloned().fold(f32::MIN, f32::max);
     let mean = out_floats.iter().sum::<f32>() / out_floats.len() as f32;
-    let variance = out_floats.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / out_floats.len() as f32;
-    eprintln!("output: min={min:.4} max={max:.4} mean={mean:.6} std={:.4}", variance.sqrt());
+    let variance =
+        out_floats.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / out_floats.len() as f32;
+    eprintln!(
+        "output: min={min:.4} max={max:.4} mean={mean:.6} std={:.4}",
+        variance.sqrt()
+    );
 
     // Save for ORT comparison.
     std::fs::write("/tmp/hologram_unet_out.bin", out_bytes).expect("saving output");

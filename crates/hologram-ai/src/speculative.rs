@@ -64,12 +64,7 @@ pub fn speculative_decode_step(
 
     // ── Phase 1: Draft N tokens greedily ────────────────────────────────
     for _i in 0..config.draft_steps {
-        let outputs = run_single_token(
-            runner,
-            kv_state,
-            current_token,
-            config,
-        )?;
+        let outputs = run_single_token(runner, kv_state, current_token, config)?;
 
         let logit_data = match outputs.get(0) {
             Some((_, data)) => data,
@@ -108,23 +103,24 @@ pub fn speculative_decode_step(
     verify_tokens.extend_from_slice(&draft_tokens);
     let verify_len = verify_tokens.len();
 
-    let verify_bytes = verify_tokens.iter()
+    let verify_bytes = verify_tokens
+        .iter()
         .flat_map(|&id| serialize_token(id, config.input_dtype))
         .collect::<Vec<u8>>();
     let mut inputs = GraphInputs::new();
     inputs.set_with_shape(config.input_slot, verify_bytes, vec![1, verify_len]);
 
     if let Some(slot) = config.mask_slot {
-        let mask_dtype = config.mask_dtype.unwrap_or(
-            hologram::hologram_archive::weight::WeightDType::I64,
-        );
-        let mask_bytes: Vec<u8> = (0..verify_len).flat_map(|_| {
-            match mask_dtype {
+        let mask_dtype = config
+            .mask_dtype
+            .unwrap_or(hologram::hologram_archive::weight::WeightDType::I64);
+        let mask_bytes: Vec<u8> = (0..verify_len)
+            .flat_map(|_| match mask_dtype {
                 hologram::hologram_archive::weight::WeightDType::I64 => 1i64.to_le_bytes().to_vec(),
                 hologram::hologram_archive::weight::WeightDType::I32 => 1i32.to_le_bytes().to_vec(),
                 _ => 1i64.to_le_bytes().to_vec(),
-            }
-        }).collect();
+            })
+            .collect();
         inputs.set_with_shape(slot, mask_bytes, vec![1, verify_len]);
     }
 
@@ -179,7 +175,8 @@ pub fn speculative_decode_step(
         let last_start = n_drafts * config.bytes_per_pos;
         let last_end = last_start + config.bytes_per_pos;
         if last_end <= logit_data.len() {
-            if let Some(bonus) = greedy_argmax(&logit_data[last_start..last_end], config.vocab_size) {
+            if let Some(bonus) = greedy_argmax(&logit_data[last_start..last_end], config.vocab_size)
+            {
                 accepted.push(bonus);
             }
         }
@@ -191,9 +188,7 @@ pub fn speculative_decode_step(
 
     info!(
         n_drafts,
-        n_accepted,
-        n_forward_passes,
-        "speculative: drafted {n_drafts}, accepted {n_accepted}"
+        n_accepted, n_forward_passes, "speculative: drafted {n_drafts}, accepted {n_accepted}"
     );
 
     Ok(SpeculativeResult {
@@ -216,9 +211,9 @@ fn run_single_token(
 
     // Attention mask: all-ones for single-token decode.
     if let Some(slot) = config.mask_slot {
-        let mask_dtype = config.mask_dtype.unwrap_or(
-            hologram::hologram_archive::weight::WeightDType::I64,
-        );
+        let mask_dtype = config
+            .mask_dtype
+            .unwrap_or(hologram::hologram_archive::weight::WeightDType::I64);
         let mask_bytes = match mask_dtype {
             hologram::hologram_archive::weight::WeightDType::I64 => 1i64.to_le_bytes().to_vec(),
             hologram::hologram_archive::weight::WeightDType::I32 => 1i32.to_le_bytes().to_vec(),

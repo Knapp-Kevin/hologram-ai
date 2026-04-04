@@ -164,10 +164,7 @@ fn ort_softmax_multi_row() {
     let rows = 2;
     let cols = 4;
     let model = onnx_builder::softmax(rows, cols);
-    let ort_out = run_ort(
-        &model,
-        vec![inp("input", vec![rows, cols], data.clone())],
-    );
+    let ort_out = run_ort(&model, vec![inp("input", vec![rows, cols], data.clone())]);
     // dispatch_float Softmax operates on total_len / size rows automatically
     let holo_out = dispatch_f32(&FloatOp::Softmax { size: cols as u32 }, &[&data]);
     assert_close(&holo_out, &ort_out, 1e-5, 1e-4, "Softmax_multi_row");

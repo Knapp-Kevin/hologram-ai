@@ -81,17 +81,16 @@ impl Pass for ScalarAbsorption {
             };
 
             // Also absorb if the MatMul is already a Gemm.
-            let (base_alpha, base_beta, trans_a, trans_b) =
-                match &graph.nodes[mm_idx].op {
-                    AiOp::MatMul => (1.0_f32, 0.0_f32, false, false),
-                    AiOp::Gemm {
-                        alpha,
-                        beta,
-                        trans_a,
-                        trans_b,
-                    } => (*alpha, *beta, *trans_a, *trans_b),
-                    _ => continue,
-                };
+            let (base_alpha, base_beta, trans_a, trans_b) = match &graph.nodes[mm_idx].op {
+                AiOp::MatMul => (1.0_f32, 0.0_f32, false, false),
+                AiOp::Gemm {
+                    alpha,
+                    beta,
+                    trans_a,
+                    trans_b,
+                } => (*alpha, *beta, *trans_a, *trans_b),
+                _ => continue,
+            };
 
             let fused = AiNode::new(
                 mul_node.id,
@@ -175,11 +174,7 @@ fn try_match_matmul_scalar(
 fn scalar_f32_value(graph: &AiGraph, tid: TensorId) -> Option<f32> {
     // Check inline parameter.
     if let Some(AiParam::Inline { data, info }) = graph.params.get(&tid) {
-        let n_elems: u64 = info
-            .shape
-            .iter()
-            .filter_map(|d| d.as_concrete())
-            .product();
+        let n_elems: u64 = info.shape.iter().filter_map(|d| d.as_concrete()).product();
         if n_elems == 1 && data.len() == 4 {
             let bytes: [u8; 4] = [data[0], data[1], data[2], data[3]];
             return Some(f32::from_le_bytes(bytes));
@@ -226,7 +221,13 @@ mod tests {
             known_i64_values: None,
             semantic: SemanticHint::Unknown,
         };
-        (AiParam::Inline { data, info: info.clone() }, info)
+        (
+            AiParam::Inline {
+                data,
+                info: info.clone(),
+            },
+            info,
+        )
     }
 
     #[test]
@@ -250,8 +251,16 @@ mod tests {
         let result = ScalarAbsorption.run(g).expect("pass should succeed");
         assert_eq!(result.nodes.len(), 1, "MatMul+Mul collapsed to 1 Gemm");
         match &result.nodes[0].op {
-            AiOp::Gemm { alpha, beta, trans_a, trans_b } => {
-                assert!((*alpha - 0.125).abs() < f32::EPSILON, "alpha should be 0.125");
+            AiOp::Gemm {
+                alpha,
+                beta,
+                trans_a,
+                trans_b,
+            } => {
+                assert!(
+                    (*alpha - 0.125).abs() < f32::EPSILON,
+                    "alpha should be 0.125"
+                );
                 assert!((*beta - 0.0).abs() < f32::EPSILON);
                 assert!(!trans_a);
                 assert!(!trans_b);

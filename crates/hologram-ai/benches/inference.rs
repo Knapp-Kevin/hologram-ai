@@ -113,9 +113,13 @@ fn load_model(path: &Path) -> Option<BenchModel> {
     let meta = load_meta(&runner);
 
     let (use_kv, n_layers, n_kv_heads, head_dim, max_seq) = match &meta {
-        Some(m) if m.n_layers > 0 => {
-            (true, m.n_layers, m.n_kv_heads, m.head_dim, m.max_seq_len as usize)
-        }
+        Some(m) if m.n_layers > 0 => (
+            true,
+            m.n_layers,
+            m.n_kv_heads,
+            m.head_dim,
+            m.max_seq_len as usize,
+        ),
         _ => (false, 0, 0, 0, 2048),
     };
 
@@ -154,9 +158,7 @@ fn build_inputs(
     inputs.set_with_shape(model.input_slot, input_bytes, vec![1, seq_len]);
 
     if let Some(slot) = model.mask_slot {
-        let mask_bytes: Vec<u8> = (0..seq_len)
-            .flat_map(|_| 1i64.to_le_bytes())
-            .collect();
+        let mask_bytes: Vec<u8> = (0..seq_len).flat_map(|_| 1i64.to_le_bytes()).collect();
         inputs.set_with_shape(slot, mask_bytes, vec![1, seq_len]);
     }
 

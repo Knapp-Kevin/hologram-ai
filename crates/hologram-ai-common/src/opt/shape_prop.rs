@@ -56,136 +56,144 @@ impl Pass for AggressiveShapePropagation {
 }
 
 fn propagate_shapes(mut graph: AiGraph, protect_settled: bool) -> anyhow::Result<AiGraph> {
-        let order = graph.topo_order();
+    let order = graph.topo_order();
 
-        // Build node lookup.
-        let node_idx: std::collections::HashMap<u32, usize> = graph
-            .nodes
+    // Build node lookup.
+    let node_idx: std::collections::HashMap<u32, usize> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.id, i))
+        .collect();
+
+    // Shape propagation: single pass in topological order.
+    for &nid in order.iter() {
+        let idx = match node_idx.get(&nid) {
+            Some(&i) => i,
+            None => continue,
+        };
+
+        let input_shapes: Vec<Shape> = graph.nodes[idx]
+            .inputs
             .iter()
-            .enumerate()
-            .map(|(i, n)| (n.id, i))
+            .map(|tid| {
+                graph
+                    .tensor_info
+                    .get(tid)
+                    .map(|ti| ti.shape.clone())
+                    .unwrap_or_default()
+            })
             .collect();
 
-        // Shape propagation: single pass in topological order.
-        for &nid in order.iter() {
-            let idx = match node_idx.get(&nid) {
-                Some(&i) => i,
-                None => continue,
-            };
-
-            let input_shapes: Vec<Shape> = graph.nodes[idx]
-                .inputs
-                .iter()
-                .map(|tid| {
-                    graph
-                        .tensor_info
-                        .get(tid)
-                        .map(|ti| ti.shape.clone())
-                        .unwrap_or_default()
-                })
-                .collect();
-
-            // For Reshape/Expand/Resize/Pad: try to get known_i64_values from shape inputs.
-            let shape_known_values: Option<Vec<Option<i64>>> = match &graph.nodes[idx].op {
-                AiOp::Reshape { .. } | AiOp::Expand => {
-                    graph.nodes[idx].inputs.get(1).and_then(|tid| {
+        // For Reshape/Expand/Resize/Pad: try to get known_i64_values from shape inputs.
+        let shape_known_values: Option<Vec<Option<i64>>> = match &graph.nodes[idx].op {
+            AiOp::Reshape { .. } | AiOp::Expand => graph.nodes[idx].inputs.get(1).and_then(|tid| {
+                graph
+                    .tensor_info
+                    .get(tid)
+                    .and_then(|ti| ti.known_i64_values.clone())
+            }),
+            // Resize: sizes from input[3] or input[1] (known_i64_values).
+            // If no integer sizes found, try float scales from input[2] or
+            // input[1] and multiply by input spatial dims.
+            AiOp::Resize { .. } => {
+                let inputs_ref = &graph.nodes[idx].inputs;
+                // Try sizes input first.
+                let sizes = inputs_ref
+                    .get(3)
+                    .or_else(|| inputs_ref.get(1))
+                    .and_then(|tid| {
                         graph
                             .tensor_info
                             .get(tid)
                             .and_then(|ti| ti.known_i64_values.clone())
-                    })
-                }
-                // Resize: sizes from input[3] or input[1] (known_i64_values).
-                // If no integer sizes found, try float scales from input[2] or
-                // input[1] and multiply by input spatial dims.
-                AiOp::Resize { .. } => {
-                    let inputs_ref = &graph.nodes[idx].inputs;
-                    // Try sizes input first.
-                    let sizes = inputs_ref.get(3).or_else(|| inputs_ref.get(1)).and_then(|tid| {
-                        graph.tensor_info.get(tid).and_then(|ti| ti.known_i64_values.clone())
                     });
-                    if sizes.is_some() {
-                        sizes
+                if sizes.is_some() {
+                    sizes
+                } else {
+                    // Try scales: read f32 constant param, multiply with input shape.
+                    let scales_tid = inputs_ref.get(2).or_else(|| inputs_ref.get(1));
+                    let scales = scales_tid.and_then(|tid| {
+                        graph
+                            .params
+                            .get(tid)
+                            .and_then(|p| p.as_f32_slice())
+                            .map(|s| s.to_vec())
+                    });
+                    if let (Some(ref scales), Some(in_shape)) = (scales, input_shapes.first()) {
+                        let vals: Vec<Option<i64>> = in_shape
+                            .iter()
+                            .zip(scales.iter().chain(std::iter::repeat(&1.0f32)))
+                            .map(|(dim, &scale)| {
+                                dim.as_concrete()
+                                    .map(|d| (d as f64 * scale as f64).round() as i64)
+                            })
+                            .collect();
+                        Some(vals)
                     } else {
-                        // Try scales: read f32 constant param, multiply with input shape.
-                        let scales_tid = inputs_ref.get(2).or_else(|| inputs_ref.get(1));
-                        let scales = scales_tid.and_then(|tid| {
-                            graph.params.get(tid).and_then(|p| p.as_f32_slice()).map(|s| s.to_vec())
-                        });
-                        if let (Some(ref scales), Some(in_shape)) = (scales, input_shapes.first()) {
-                            let vals: Vec<Option<i64>> = in_shape.iter()
-                                .zip(scales.iter().chain(std::iter::repeat(&1.0f32)))
-                                .map(|(dim, &scale)| {
-                                    dim.as_concrete().map(|d| (d as f64 * scale as f64).round() as i64)
-                                })
-                                .collect();
-                            Some(vals)
-                        } else {
-                            None
-                        }
+                        None
                     }
                 }
-                // Pad: pads from input[1] (opset 11+).
-                AiOp::Pad { .. } => {
-                    graph.nodes[idx].inputs.get(1).and_then(|tid| {
-                        graph
-                            .tensor_info
-                            .get(tid)
-                            .and_then(|ti| ti.known_i64_values.clone())
-                    })
-                }
-                _ => None,
-            };
+            }
+            // Pad: pads from input[1] (opset 11+).
+            AiOp::Pad { .. } => graph.nodes[idx].inputs.get(1).and_then(|tid| {
+                graph
+                    .tensor_info
+                    .get(tid)
+                    .and_then(|ti| ti.known_i64_values.clone())
+            }),
+            _ => None,
+        };
 
-            let output_tids = graph.nodes[idx].outputs.clone();
-            let op = graph.nodes[idx].op.clone();
+        let output_tids = graph.nodes[idx].outputs.clone();
+        let op = graph.nodes[idx].op.clone();
 
-            let inferred = infer_output_shapes(&op, &input_shapes, shape_known_values.as_deref());
+        let inferred = infer_output_shapes(&op, &input_shapes, shape_known_values.as_deref());
 
-            for (i, tid) in output_tids.iter().enumerate() {
-                if let Some(shape) = inferred.get(i) {
-                    if let Some(info) = graph.tensor_info.get_mut(tid) {
-                        // ShapePropagation (protect_settled=true) protects
-                        // fully-concrete shapes so oracle-seeded values and
-                        // previously-correct inferences are not replaced by
-                        // weaker op-rule inferences.
-                        //
-                        // AggressiveShapePropagation (protect_settled=false)
-                        // overwrites any existing shape when it can infer a
-                        // non-empty one. Used post-concretization to repair
-                        // oracle shapes that were concretized to wrong values
-                        // (e.g. '(32//batch_size)' Var → 1 instead of 32).
-                        //
-                        // The `!shape.is_empty()` guard ensures Opaque ops
-                        // (infer empty) never clear existing shapes.
-                        let is_settled = protect_settled
-                            && !info.shape.is_empty()
-                            && info.shape.iter().all(|d| matches!(d, DimExpr::Concrete(_)));
-                        if !is_settled && !shape.is_empty() {
-                            // Never downgrade a Concrete dim to Dynamic/Var, and
-                            // never shrink a Concrete dim to a smaller Concrete value.
-                            // This prevents AggressiveShapePropagation from overwriting
-                            // correct shapes with force-concretized inputs (e.g., Resize
-                            // output [1,512,128,128] shrunk to [1,512,2,2] because
-                            // ForceConcretize set the input spatial dims to 1).
-                            if info.shape.len() == shape.len() {
-                                let mut merged = shape.clone();
-                                for (new_dim, old_dim) in merged.iter_mut().zip(info.shape.iter()) {
-                                    if matches!(new_dim, DimExpr::Dynamic | DimExpr::Var(_))
-                                        && matches!(old_dim, DimExpr::Concrete(_))
-                                    {
-                                        *new_dim = old_dim.clone();
-                                    }
+        for (i, tid) in output_tids.iter().enumerate() {
+            if let Some(shape) = inferred.get(i) {
+                if let Some(info) = graph.tensor_info.get_mut(tid) {
+                    // ShapePropagation (protect_settled=true) protects
+                    // fully-concrete shapes so oracle-seeded values and
+                    // previously-correct inferences are not replaced by
+                    // weaker op-rule inferences.
+                    //
+                    // AggressiveShapePropagation (protect_settled=false)
+                    // overwrites any existing shape when it can infer a
+                    // non-empty one. Used post-concretization to repair
+                    // oracle shapes that were concretized to wrong values
+                    // (e.g. '(32//batch_size)' Var → 1 instead of 32).
+                    //
+                    // The `!shape.is_empty()` guard ensures Opaque ops
+                    // (infer empty) never clear existing shapes.
+                    let is_settled = protect_settled
+                        && !info.shape.is_empty()
+                        && info.shape.iter().all(|d| matches!(d, DimExpr::Concrete(_)));
+                    if !is_settled && !shape.is_empty() {
+                        // Never downgrade a Concrete dim to Dynamic/Var, and
+                        // never shrink a Concrete dim to a smaller Concrete value.
+                        // This prevents AggressiveShapePropagation from overwriting
+                        // correct shapes with force-concretized inputs (e.g., Resize
+                        // output [1,512,128,128] shrunk to [1,512,2,2] because
+                        // ForceConcretize set the input spatial dims to 1).
+                        if info.shape.len() == shape.len() {
+                            let mut merged = shape.clone();
+                            for (new_dim, old_dim) in merged.iter_mut().zip(info.shape.iter()) {
+                                if matches!(new_dim, DimExpr::Dynamic | DimExpr::Var(_))
+                                    && matches!(old_dim, DimExpr::Concrete(_))
+                                {
+                                    *new_dim = old_dim.clone();
                                 }
-                                info.shape = merged;
-                            } else {
-                                info.shape = shape.clone();
                             }
+                            info.shape = merged;
+                        } else {
+                            info.shape = shape.clone();
                         }
                     }
                 }
             }
         }
+    }
 
     // Dtype propagation: fixpoint loop until no changes.
     // Single pass is insufficient because intermediate tensors default to F32
@@ -217,7 +225,9 @@ fn propagate_shapes(mut graph: AiGraph, protect_settled: bool) -> anyhow::Result
             let inferred_dtypes = infer_output_dtypes(&op, &input_dtypes, output_tids.len());
 
             for (i, tid) in output_tids.iter().enumerate() {
-                let inferred_dtype = inferred_dtypes.get(i).copied()
+                let inferred_dtype = inferred_dtypes
+                    .get(i)
+                    .copied()
                     .unwrap_or_else(|| input_dtypes.first().copied().unwrap_or(DType::F32));
                 if let Some(info) = graph.tensor_info.get_mut(tid) {
                     // Update if the current dtype differs from inferred AND
@@ -599,7 +609,7 @@ fn infer_custom_output_shapes(
                 let w = &inputs[1];
                 let mut shape = Vec::new();
                 shape.push(x[0].clone()); // N (batch)
-                // C_out from weight[0]
+                                          // C_out from weight[0]
                 if !w.is_empty() {
                     shape.push(w[0].clone());
                 } else {
@@ -688,7 +698,8 @@ fn infer_custom_output_shapes(
                             let p_begin = pads.get(i).copied().unwrap_or(0);
                             let p_end = pads.get(spatial_rank + i).copied().unwrap_or(0);
                             let effective_k = d * (k - 1) + 1;
-                            let out = pool_output_dim(in_dim, effective_k, s, p_begin, p_end, *ceil_mode);
+                            let out =
+                                pool_output_dim(in_dim, effective_k, s, p_begin, p_end, *ceil_mode);
                             shape.push(DimExpr::Concrete(out));
                         } else {
                             shape.push(DimExpr::Dynamic);
@@ -835,18 +846,13 @@ fn infer_custom_output_shapes(
         }
 
         // ScatterND: output = data shape (input[0]).
-        AiOp::ScatterND { .. } => {
-            inputs.first().cloned().into_iter().collect()
-        }
+        AiOp::ScatterND { .. } => inputs.first().cloned().into_iter().collect(),
 
         // NonZero: output = [rank, num_nonzero] (dynamic second dim).
         AiOp::NonZero => {
             if let Some(x) = inputs.first() {
                 let rank = x.len() as u64;
-                vec![Shape::from(vec![
-                    DimExpr::Concrete(rank),
-                    DimExpr::Dynamic,
-                ])]
+                vec![Shape::from(vec![DimExpr::Concrete(rank), DimExpr::Dynamic])]
             } else {
                 vec![Shape::new()]
             }
@@ -1014,7 +1020,9 @@ fn infer_custom_output_shapes(
         }
 
         // Gemm: [M, K] x [K, N] → [M, N] (with optional transposes).
-        AiOp::Gemm { trans_a, trans_b, .. } => {
+        AiOp::Gemm {
+            trans_a, trans_b, ..
+        } => {
             if inputs.len() >= 2 && inputs[0].len() == 2 && inputs[1].len() == 2 {
                 let a = &inputs[0];
                 let b = &inputs[1];
@@ -1057,7 +1065,13 @@ fn infer_custom_output_shapes(
                 let y_shape = x.clone();
                 if *training && x.len() >= 2 {
                     let c_shape = Shape::from(vec![x[1].clone()]);
-                    vec![y_shape, c_shape.clone(), c_shape.clone(), c_shape.clone(), c_shape]
+                    vec![
+                        y_shape,
+                        c_shape.clone(),
+                        c_shape.clone(),
+                        c_shape.clone(),
+                        c_shape,
+                    ]
                 } else {
                     vec![y_shape]
                 }
@@ -1079,7 +1093,14 @@ fn infer_custom_output_shapes(
 }
 
 /// Compute pooling output dimension, with optional ceil_mode.
-fn pool_output_dim(in_dim: u64, effective_kernel: u64, stride: u64, p_begin: u64, p_end: u64, ceil_mode: bool) -> u64 {
+fn pool_output_dim(
+    in_dim: u64,
+    effective_kernel: u64,
+    stride: u64,
+    p_begin: u64,
+    p_end: u64,
+    ceil_mode: bool,
+) -> u64 {
     let padded = in_dim + p_begin + p_end;
     if padded < effective_kernel {
         return 0;
@@ -1172,10 +1193,7 @@ fn resolve_reshape_shape(vals: &[Option<i64>], data_shape: Option<&Shape>) -> Ve
         .filter_map(|d| d.as_concrete())
         .product::<u64>()
         .max(1);
-    let data_symbolic: Vec<&DimExpr> = ds
-        .iter()
-        .filter(|d| d.as_concrete().is_none())
-        .collect();
+    let data_symbolic: Vec<&DimExpr> = ds.iter().filter(|d| d.as_concrete().is_none()).collect();
 
     // Product of already-resolved output dims (excluding unknowns).
     let out_concrete: u64 = shape
@@ -1289,10 +1307,8 @@ fn resolve_reshape_shape(vals: &[Option<i64>], data_shape: Option<&Shape>) -> Ve
                     if ratio == 1 {
                         shape[idx] = sym.clone();
                     } else {
-                        shape[idx] = DimExpr::Mul(
-                            Box::new(sym.clone()),
-                            Box::new(DimExpr::Concrete(ratio)),
-                        );
+                        shape[idx] =
+                            DimExpr::Mul(Box::new(sym.clone()), Box::new(DimExpr::Concrete(ratio)));
                     }
                 } else {
                     shape[idx] = DimExpr::Concrete(ratio.max(1));
@@ -1636,8 +1652,14 @@ mod tests {
 
     fn relu_graph_with_shapes(in_shape: &[u64], out_shape: &[u64]) -> AiGraph {
         let mut ti = HashMap::new();
-        ti.insert(0u32, TensorInfo::new(DType::F32, shape_from_concrete(in_shape)));
-        ti.insert(1u32, TensorInfo::new(DType::F32, shape_from_concrete(out_shape)));
+        ti.insert(
+            0u32,
+            TensorInfo::new(DType::F32, shape_from_concrete(in_shape)),
+        );
+        ti.insert(
+            1u32,
+            TensorInfo::new(DType::F32, shape_from_concrete(out_shape)),
+        );
         AiGraph {
             name: "test".into(),
             nodes: vec![AiNode::new(0, AiOp::Relu, vec![0], vec![1])],
@@ -1690,7 +1712,10 @@ mod tests {
 
         let mut ti = HashMap::new();
         // Input: fully concrete.
-        ti.insert(0u32, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 4])));
+        ti.insert(
+            0u32,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[2, 4])),
+        );
         // Output: has a Dynamic dim — not settled, propagation should fill it.
         let partial: Shape = smallvec![DimExpr::Concrete(2), DimExpr::Dynamic];
         ti.insert(1u32, TensorInfo::new(DType::F32, partial));
@@ -1715,7 +1740,10 @@ mod tests {
 
         let g2 = ShapePropagation.run(g).unwrap();
         let out = &g2.tensor_info[&1].shape;
-        assert_eq!(out.as_slice(), shape_from_concrete(&[2, 4]).as_slice(),
-            "Dynamic dim in output should be replaced by propagated concrete shape");
+        assert_eq!(
+            out.as_slice(),
+            shape_from_concrete(&[2, 4]).as_slice(),
+            "Dynamic dim in output should be replaced by propagated concrete shape"
+        );
     }
 }

@@ -12,7 +12,9 @@
 
 use hologram_ai::{ModelCompiler, ModelSource};
 use hologram_ai_conformance::ort_runner::onnx_builder;
-use hologram_ai_conformance::ort_runner::runner::{run_onnx_all_outputs, run_onnx_file_typed, OrtInput, OrtInputTyped};
+use hologram_ai_conformance::ort_runner::runner::{
+    run_onnx_all_outputs, run_onnx_file_typed, OrtInput, OrtInputTyped,
+};
 use hologram_ai_conformance::tolerance::Tolerance;
 
 /// Default tolerance for execution conformance (slightly looser than kernel tests
@@ -25,10 +27,7 @@ fn exec_tol() -> Tolerance {
 }
 
 /// Helper: compile ONNX bytes, execute through hologram, return final output f32s.
-fn compile_and_execute(
-    model_bytes: &[u8],
-    inputs: &[(&str, Vec<usize>, Vec<f32>)],
-) -> Vec<f32> {
+fn compile_and_execute(model_bytes: &[u8], inputs: &[(&str, Vec<usize>, Vec<f32>)]) -> Vec<f32> {
     let compiler = ModelCompiler::default();
     let (archive, _debug_map) = compiler
         .compile_with_debug_info(ModelSource::OnnxBytes(model_bytes.to_vec()))
@@ -42,8 +41,8 @@ fn compile_and_execute(
     }
 
     // Execute via HoloRunner (handles pipeline archives).
-    let runner = hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes)
-        .expect("loading runner");
+    let runner =
+        hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes).expect("loading runner");
     let outputs = runner.execute(&graph_inputs).expect("execution failed");
 
     // Extract first output as f32 (safe — no alignment requirement).
@@ -83,8 +82,16 @@ fn matmul_matches_ort() {
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
         vec![
-            OrtInput { name: "A".into(), shape: vec![m, k], data: a_data.clone() },
-            OrtInput { name: "B".into(), shape: vec![k, n], data: b_data.clone() },
+            OrtInput {
+                name: "A".into(),
+                shape: vec![m, k],
+                data: a_data.clone(),
+            },
+            OrtInput {
+                name: "B".into(),
+                shape: vec![k, n],
+                data: b_data.clone(),
+            },
         ],
     )
     .expect("ORT failed");
@@ -114,14 +121,15 @@ fn softmax_matches_ort() {
 
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
-        vec![OrtInput { name: "input".into(), shape: vec![rows, size], data: input_data.clone() }],
+        vec![OrtInput {
+            name: "input".into(),
+            shape: vec![rows, size],
+            data: input_data.clone(),
+        }],
     )
     .expect("ORT failed");
 
-    let holo_out = compile_and_execute(
-        &model_bytes,
-        &[("input", vec![rows, size], input_data)],
-    );
+    let holo_out = compile_and_execute(&model_bytes, &[("input", vec![rows, size], input_data)]);
 
     let cmp = hologram_ai_conformance::tolerance::compare_outputs(
         &holo_out,
@@ -145,22 +153,35 @@ fn rmsnorm_composite_matches_ort() {
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
         vec![
-            OrtInput { name: "X".into(), shape: vec![rows, size], data: x_data.clone() },
-            OrtInput { name: "Weight".into(), shape: vec![size], data: w_data.clone() },
+            OrtInput {
+                name: "X".into(),
+                shape: vec![rows, size],
+                data: x_data.clone(),
+            },
+            OrtInput {
+                name: "Weight".into(),
+                shape: vec![size],
+                data: w_data.clone(),
+            },
         ],
     )
     .expect("ORT failed");
 
     let holo_out = compile_and_execute(
         &model_bytes,
-        &[("X", vec![rows, size], x_data), ("Weight", vec![size], w_data)],
+        &[
+            ("X", vec![rows, size], x_data),
+            ("Weight", vec![size], w_data),
+        ],
     );
 
     // Composite ops: slightly looser tolerance.
-    let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
-    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-        &holo_out, &ort_outputs[0].data, tol,
-    );
+    let tol = Tolerance {
+        atol: 1e-3,
+        rtol: 1e-2,
+    };
+    let cmp =
+        hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_outputs[0].data, tol);
     assert!(cmp.passed, "RmsNorm mismatch: {}", cmp.message);
 }
 
@@ -179,20 +200,38 @@ fn gemm_trans_b_matches_ort() {
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
         vec![
-            OrtInput { name: "A".into(), shape: vec![m, k], data: a_data.clone() },
-            OrtInput { name: "B".into(), shape: vec![n, k], data: b_data.clone() },
-            OrtInput { name: "C".into(), shape: vec![m, n], data: c_data.clone() },
+            OrtInput {
+                name: "A".into(),
+                shape: vec![m, k],
+                data: a_data.clone(),
+            },
+            OrtInput {
+                name: "B".into(),
+                shape: vec![n, k],
+                data: b_data.clone(),
+            },
+            OrtInput {
+                name: "C".into(),
+                shape: vec![m, n],
+                data: c_data.clone(),
+            },
         ],
     )
     .expect("ORT failed");
 
     let holo_out = compile_and_execute(
         &model_bytes,
-        &[("A", vec![m, k], a_data), ("B", vec![n, k], b_data), ("C", vec![m, n], c_data)],
+        &[
+            ("A", vec![m, k], a_data),
+            ("B", vec![n, k], b_data),
+            ("C", vec![m, n], c_data),
+        ],
     );
 
     let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-        &holo_out, &ort_outputs[0].data, exec_tol(),
+        &holo_out,
+        &ort_outputs[0].data,
+        exec_tol(),
     );
     assert!(cmp.passed, "Gemm transB mismatch: {}", cmp.message);
 }
@@ -212,9 +251,21 @@ fn layernorm_composite_matches_ort() {
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
         vec![
-            OrtInput { name: "X".into(), shape: vec![rows, size], data: x_data.clone() },
-            OrtInput { name: "Weight".into(), shape: vec![size], data: w_data.clone() },
-            OrtInput { name: "Bias".into(), shape: vec![size], data: b_data.clone() },
+            OrtInput {
+                name: "X".into(),
+                shape: vec![rows, size],
+                data: x_data.clone(),
+            },
+            OrtInput {
+                name: "Weight".into(),
+                shape: vec![size],
+                data: w_data.clone(),
+            },
+            OrtInput {
+                name: "Bias".into(),
+                shape: vec![size],
+                data: b_data.clone(),
+            },
         ],
     )
     .expect("ORT failed");
@@ -228,10 +279,12 @@ fn layernorm_composite_matches_ort() {
         ],
     );
 
-    let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
-    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-        &holo_out, &ort_outputs[0].data, tol,
-    );
+    let tol = Tolerance {
+        atol: 1e-3,
+        rtol: 1e-2,
+    };
+    let cmp =
+        hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_outputs[0].data, tol);
     assert!(cmp.passed, "LayerNorm mismatch: {}", cmp.message);
 }
 
@@ -262,8 +315,16 @@ fn batched_4d_matmul_matches_ort() {
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
         vec![
-            OrtInput { name: "A".into(), shape: vec![batch, heads, seq_q, head_dim], data: a_data.clone() },
-            OrtInput { name: "B".into(), shape: vec![batch, heads, head_dim, seq_k], data: b_data.clone() },
+            OrtInput {
+                name: "A".into(),
+                shape: vec![batch, heads, seq_q, head_dim],
+                data: a_data.clone(),
+            },
+            OrtInput {
+                name: "B".into(),
+                shape: vec![batch, heads, head_dim, seq_k],
+                data: b_data.clone(),
+            },
         ],
     )
     .expect("ORT failed for batched_4d_matmul");
@@ -302,13 +363,23 @@ fn concat_4d_last_axis_matches_ort() {
     let elems_per_half = batch * heads * seq * half_dim;
     // First half: identity pattern, second half: negated offset pattern (like rotate_half)
     let a_data: Vec<f32> = (0..elems_per_half).map(|i| (i as f32) * 0.1).collect();
-    let b_data: Vec<f32> = (0..elems_per_half).map(|i| -(i as f32) * 0.1 - 0.5).collect();
+    let b_data: Vec<f32> = (0..elems_per_half)
+        .map(|i| -(i as f32) * 0.1 - 0.5)
+        .collect();
 
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
         vec![
-            OrtInput { name: "A".into(), shape: vec![batch, heads, seq, half_dim], data: a_data.clone() },
-            OrtInput { name: "B".into(), shape: vec![batch, heads, seq, half_dim], data: b_data.clone() },
+            OrtInput {
+                name: "A".into(),
+                shape: vec![batch, heads, seq, half_dim],
+                data: a_data.clone(),
+            },
+            OrtInput {
+                name: "B".into(),
+                shape: vec![batch, heads, seq, half_dim],
+                data: b_data.clone(),
+            },
         ],
     )
     .expect("ORT failed for concat_4d_last_axis");
@@ -342,8 +413,7 @@ fn scaled_dot_product_attention_matches_ort() {
     let heads = 4;
     let seq = 6;
     let head_dim = 8;
-    let model_bytes =
-        onnx_builder::scaled_dot_product_attention(batch, heads, seq, head_dim);
+    let model_bytes = onnx_builder::scaled_dot_product_attention(batch, heads, seq, head_dim);
 
     let elems = batch * heads * seq * head_dim;
     let q_data: Vec<f32> = (0..elems).map(|i| (i as f32) * 0.02 - 0.5).collect();
@@ -353,9 +423,21 @@ fn scaled_dot_product_attention_matches_ort() {
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
         vec![
-            OrtInput { name: "Q".into(), shape: vec![batch, heads, seq, head_dim], data: q_data.clone() },
-            OrtInput { name: "K".into(), shape: vec![batch, heads, seq, head_dim], data: k_data.clone() },
-            OrtInput { name: "V".into(), shape: vec![batch, heads, seq, head_dim], data: v_data.clone() },
+            OrtInput {
+                name: "Q".into(),
+                shape: vec![batch, heads, seq, head_dim],
+                data: q_data.clone(),
+            },
+            OrtInput {
+                name: "K".into(),
+                shape: vec![batch, heads, seq, head_dim],
+                data: k_data.clone(),
+            },
+            OrtInput {
+                name: "V".into(),
+                shape: vec![batch, heads, seq, head_dim],
+                data: v_data.clone(),
+            },
         ],
     )
     .expect("ORT failed for scaled_dot_product_attention");
@@ -370,13 +452,17 @@ fn scaled_dot_product_attention_matches_ort() {
     );
 
     // Attention involves softmax, so slightly looser tolerance.
-    let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
-    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-        &holo_out,
-        &ort_outputs[0].data,
-        tol,
+    let tol = Tolerance {
+        atol: 1e-3,
+        rtol: 1e-2,
+    };
+    let cmp =
+        hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_outputs[0].data, tol);
+    assert!(
+        cmp.passed,
+        "Scaled dot-product attention mismatch: {}",
+        cmp.message
     );
-    assert!(cmp.passed, "Scaled dot-product attention mismatch: {}", cmp.message);
 }
 
 /// Test: GQA (Grouped Query Attention) with Expand matches ORT.
@@ -398,15 +484,16 @@ fn gqa_expand_attention_matches_ort() {
     let n_kv_heads = 2;
     let seq = 6;
     let head_dim = 8;
-    let model_bytes =
-        onnx_builder::gqa_expand_attention(batch, n_heads, n_kv_heads, seq, head_dim);
+    let model_bytes = onnx_builder::gqa_expand_attention(batch, n_heads, n_kv_heads, seq, head_dim);
 
     let q_elems = batch * n_heads * seq * head_dim;
     let kv_elems = batch * n_kv_heads * seq * head_dim;
 
     let q_data: Vec<f32> = (0..q_elems).map(|i| (i as f32) * 0.02 - 0.5).collect();
     let k_data: Vec<f32> = (0..kv_elems).map(|i| (i as f32) * 0.015 + 0.1).collect();
-    let v_data: Vec<f32> = (0..kv_elems).map(|i| ((i % 16) as f32) * 0.1 - 0.7).collect();
+    let v_data: Vec<f32> = (0..kv_elems)
+        .map(|i| ((i % 16) as f32) * 0.1 - 0.7)
+        .collect();
 
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
@@ -440,12 +527,12 @@ fn gqa_expand_attention_matches_ort() {
     );
 
     // GQA attention: slightly looser tolerance (softmax + multiple matmuls).
-    let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
-    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-        &holo_out,
-        &ort_outputs[0].data,
-        tol,
-    );
+    let tol = Tolerance {
+        atol: 1e-3,
+        rtol: 1e-2,
+    };
+    let cmp =
+        hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_outputs[0].data, tol);
     assert!(cmp.passed, "GQA Expand attention mismatch: {}", cmp.message);
 }
 
@@ -475,16 +562,34 @@ fn gqa_tinyllama_dims_seq1_and_seq2_match_ort() {
         let kv_elems = batch * n_kv_heads * seq * head_dim;
 
         // Use deterministic pseudo-random data scaled to typical activation range.
-        let q_data: Vec<f32> = (0..q_elems).map(|i| ((i * 7 + 3) % 100) as f32 * 0.02 - 1.0).collect();
-        let k_data: Vec<f32> = (0..kv_elems).map(|i| ((i * 13 + 7) % 100) as f32 * 0.015 - 0.5).collect();
-        let v_data: Vec<f32> = (0..kv_elems).map(|i| ((i * 11 + 5) % 100) as f32 * 0.01 - 0.3).collect();
+        let q_data: Vec<f32> = (0..q_elems)
+            .map(|i| ((i * 7 + 3) % 100) as f32 * 0.02 - 1.0)
+            .collect();
+        let k_data: Vec<f32> = (0..kv_elems)
+            .map(|i| ((i * 13 + 7) % 100) as f32 * 0.015 - 0.5)
+            .collect();
+        let v_data: Vec<f32> = (0..kv_elems)
+            .map(|i| ((i * 11 + 5) % 100) as f32 * 0.01 - 0.3)
+            .collect();
 
         let ort_outputs = run_onnx_all_outputs(
             &model_bytes,
             vec![
-                OrtInput { name: "Q".into(), shape: vec![batch, n_heads, seq, head_dim], data: q_data.clone() },
-                OrtInput { name: "K_compact".into(), shape: vec![batch, n_kv_heads, seq, head_dim], data: k_data.clone() },
-                OrtInput { name: "V_compact".into(), shape: vec![batch, n_kv_heads, seq, head_dim], data: v_data.clone() },
+                OrtInput {
+                    name: "Q".into(),
+                    shape: vec![batch, n_heads, seq, head_dim],
+                    data: q_data.clone(),
+                },
+                OrtInput {
+                    name: "K_compact".into(),
+                    shape: vec![batch, n_kv_heads, seq, head_dim],
+                    data: k_data.clone(),
+                },
+                OrtInput {
+                    name: "V_compact".into(),
+                    shape: vec![batch, n_kv_heads, seq, head_dim],
+                    data: v_data.clone(),
+                },
             ],
         )
         .unwrap_or_else(|e| panic!("ORT failed for GQA seq={seq}: {e}"));
@@ -493,12 +598,23 @@ fn gqa_tinyllama_dims_seq1_and_seq2_match_ort() {
             &model_bytes,
             &[
                 ("Q", vec![batch, n_heads, seq, head_dim], q_data.clone()),
-                ("K_compact", vec![batch, n_kv_heads, seq, head_dim], k_data.clone()),
-                ("V_compact", vec![batch, n_kv_heads, seq, head_dim], v_data.clone()),
+                (
+                    "K_compact",
+                    vec![batch, n_kv_heads, seq, head_dim],
+                    k_data.clone(),
+                ),
+                (
+                    "V_compact",
+                    vec![batch, n_kv_heads, seq, head_dim],
+                    v_data.clone(),
+                ),
             ],
         );
 
-        let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
+        let tol = Tolerance {
+            atol: 1e-3,
+            rtol: 1e-2,
+        };
 
         // (intermediate tracing removed — use sub-pattern tests to isolate)
 
@@ -523,9 +639,7 @@ fn gqa_tinyllama_dims_seq1_and_seq2_match_ort() {
 /// Isolates the first 3 ops of the GQA pattern to find where seq>1 diverges.
 #[test]
 fn kv_expand_tinyllama_dims_matches_ort() {
-    use hologram_ai_conformance::ort_runner::onnx_builder::{
-        Node as ONode, Initializer,
-    };
+    use hologram_ai_conformance::ort_runner::onnx_builder::{Initializer, Node as ONode};
 
     let batch = 1;
     let n_heads = 32;
@@ -535,7 +649,11 @@ fn kv_expand_tinyllama_dims_matches_ort() {
     let group_size = n_heads / n_kv_heads;
 
     let expand_shape: Vec<i64> = vec![
-        batch as i64, n_kv_heads as i64, group_size as i64, seq as i64, head_dim as i64,
+        batch as i64,
+        n_kv_heads as i64,
+        group_size as i64,
+        seq as i64,
+        head_dim as i64,
     ];
     let attn_shape: Vec<i64> = vec![batch as i64, n_heads as i64, seq as i64, head_dim as i64];
 
@@ -556,18 +674,37 @@ fn kv_expand_tinyllama_dims_matches_ort() {
 
     let q_elems = batch * n_heads * seq * head_dim;
     let kv_elems = batch * n_kv_heads * seq * head_dim;
-    let q_data: Vec<f32> = (0..q_elems).map(|i| ((i * 7 + 3) % 100) as f32 * 0.02 - 1.0).collect();
-    let k_data: Vec<f32> = (0..kv_elems).map(|i| ((i * 13 + 7) % 100) as f32 * 0.015 - 0.5).collect();
-    let v_data: Vec<f32> = (0..kv_elems).map(|i| ((i * 11 + 5) % 100) as f32 * 0.01 - 0.3).collect();
+    let q_data: Vec<f32> = (0..q_elems)
+        .map(|i| ((i * 7 + 3) % 100) as f32 * 0.02 - 1.0)
+        .collect();
+    let k_data: Vec<f32> = (0..kv_elems)
+        .map(|i| ((i * 13 + 7) % 100) as f32 * 0.015 - 0.5)
+        .collect();
+    let v_data: Vec<f32> = (0..kv_elems)
+        .map(|i| ((i * 11 + 5) % 100) as f32 * 0.01 - 0.3)
+        .collect();
 
     let ort_out = run_onnx_all_outputs(
         &model_bytes,
         vec![
-            OrtInput { name: "Q".into(), shape: vec![batch, n_heads, seq, head_dim], data: q_data.clone() },
-            OrtInput { name: "K_compact".into(), shape: vec![batch, n_kv_heads, seq, head_dim], data: k_data.clone() },
-            OrtInput { name: "V_compact".into(), shape: vec![batch, n_kv_heads, seq, head_dim], data: v_data.clone() },
+            OrtInput {
+                name: "Q".into(),
+                shape: vec![batch, n_heads, seq, head_dim],
+                data: q_data.clone(),
+            },
+            OrtInput {
+                name: "K_compact".into(),
+                shape: vec![batch, n_kv_heads, seq, head_dim],
+                data: k_data.clone(),
+            },
+            OrtInput {
+                name: "V_compact".into(),
+                shape: vec![batch, n_kv_heads, seq, head_dim],
+                data: v_data.clone(),
+            },
         ],
-    ).expect("ORT failed");
+    )
+    .expect("ORT failed");
 
     let holo_out = compile_and_execute(
         &model_bytes,
@@ -578,19 +715,26 @@ fn kv_expand_tinyllama_dims_matches_ort() {
         ],
     );
 
-    eprintln!("[kv-expand] ORT: elems={} hologram: elems={}", ort_out[0].data.len(), holo_out.len());
-
-    let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
-    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-        &holo_out,
-        &ort_out[0].data,
-        tol,
+    eprintln!(
+        "[kv-expand] ORT: elems={} hologram: elems={}",
+        ort_out[0].data.len(),
+        holo_out.len()
     );
+
+    let tol = Tolerance {
+        atol: 1e-3,
+        rtol: 1e-2,
+    };
+    let cmp = hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_out[0].data, tol);
     eprintln!(
         "[kv-expand] max_abs_err={:.6} mismatches={}/{}",
         cmp.max_abs_error, cmp.num_mismatches, cmp.total_elements,
     );
-    assert!(cmp.passed, "KV expand mismatch at seq={seq}: {}", cmp.message);
+    assert!(
+        cmp.passed,
+        "KV expand mismatch at seq={seq}: {}",
+        cmp.message
+    );
 }
 
 /// Test: `Shape` op returns per-axis dimension values (not a scalar element count).
@@ -615,14 +759,15 @@ fn shape_op_returns_correct_dims_matches_ort() {
 
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
-        vec![OrtInput { name: "X".into(), shape: vec![batch, seq, hidden], data: x_data.clone() }],
+        vec![OrtInput {
+            name: "X".into(),
+            shape: vec![batch, seq, hidden],
+            data: x_data.clone(),
+        }],
     )
     .expect("ORT failed for shape_op_returns_correct_dims");
 
-    let holo_out = compile_and_execute(
-        &model_bytes,
-        &[("X", vec![batch, seq, hidden], x_data)],
-    );
+    let holo_out = compile_and_execute(&model_bytes, &[("X", vec![batch, seq, hidden], x_data)]);
 
     // ORT returns [2.0, 6.0, 32.0]; hologram must agree exactly.
     let cmp = hologram_ai_conformance::tolerance::compare_outputs(
@@ -633,8 +778,7 @@ fn shape_op_returns_correct_dims_matches_ort() {
     assert!(
         cmp.passed,
         "Shape op returned wrong dims: expected [{batch}.0, {seq}.0, {hidden}.0], got {:?}. {}",
-        holo_out,
-        cmp.message
+        holo_out, cmp.message
     );
 }
 
@@ -663,21 +807,26 @@ fn expand_with_dynamic_shape_tensor_matches_ort() {
 
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
-        vec![OrtInput { name: "X".into(), shape: vec![batch, seq, hidden], data: x_data.clone() }],
+        vec![OrtInput {
+            name: "X".into(),
+            shape: vec![batch, seq, hidden],
+            data: x_data.clone(),
+        }],
     )
     .expect("ORT failed for expand_with_dynamic_shape_tensor");
 
-    let holo_out = compile_and_execute(
-        &model_bytes,
-        &[("X", vec![batch, seq, hidden], x_data)],
-    );
+    let holo_out = compile_and_execute(&model_bytes, &[("X", vec![batch, seq, hidden], x_data)]);
 
     let cmp = hologram_ai_conformance::tolerance::compare_outputs(
         &holo_out,
         &ort_outputs[0].data,
         exec_tol(),
     );
-    assert!(cmp.passed, "Expand with dynamic shape tensor mismatch: {}", cmp.message);
+    assert!(
+        cmp.passed,
+        "Expand with dynamic shape tensor mismatch: {}",
+        cmp.message
+    );
 }
 
 /// Test: GQA K-expand where Expand and Reshape targets are computed at runtime
@@ -725,12 +874,12 @@ fn gqa_k_expand_with_dynamic_shape_matches_ort() {
     // Output is K_exp [1, 8, 6, 8] = 384 elements.
     // Element count mismatch would panic earlier; value mismatch here means
     // the wrong KV head was used for one or more query heads.
-    let tol = Tolerance { atol: 1e-5, rtol: 1e-4 };
-    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-        &holo_out,
-        &ort_outputs[0].data,
-        tol,
-    );
+    let tol = Tolerance {
+        atol: 1e-5,
+        rtol: 1e-4,
+    };
+    let cmp =
+        hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_outputs[0].data, tol);
     assert!(
         cmp.passed,
         "GQA K-expand with dynamic shape mismatch (TinyLlama regression): {}",
@@ -756,8 +905,7 @@ fn shape_with_start_end_attrs_matches_ort() {
     let n_kv_heads = 2usize;
     let seq = 6usize;
     let head_dim = 8usize;
-    let model_bytes =
-        onnx_builder::shape_with_start_end_attrs(batch, n_kv_heads, seq, head_dim);
+    let model_bytes = onnx_builder::shape_with_start_end_attrs(batch, n_kv_heads, seq, head_dim);
 
     let kv_elems = batch * n_kv_heads * seq * head_dim;
     let k_data: Vec<f32> = (0..kv_elems).map(|i| i as f32 * 0.1).collect();
@@ -811,9 +959,8 @@ fn gqa_k_expand_with_shape_start_end_matches_ort() {
     let n_kv_heads = 2usize;
     let seq = 6usize;
     let head_dim = 8usize;
-    let model_bytes = onnx_builder::gqa_k_expand_with_shape_start_end(
-        batch, n_heads, n_kv_heads, seq, head_dim,
-    );
+    let model_bytes =
+        onnx_builder::gqa_k_expand_with_shape_start_end(batch, n_heads, n_kv_heads, seq, head_dim);
 
     let kv_elems = batch * n_kv_heads * seq * head_dim;
     let k_data: Vec<f32> = (0..kv_elems).map(|i| (i as f32) * 0.015 + 0.1).collect();
@@ -834,12 +981,12 @@ fn gqa_k_expand_with_shape_start_end_matches_ort() {
     );
 
     // Output K_exp is [1, 8, 6, 8] = 384 elements.
-    let tol = Tolerance { atol: 1e-5, rtol: 1e-4 };
-    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-        &holo_out,
-        &ort_outputs[0].data,
-        tol,
-    );
+    let tol = Tolerance {
+        atol: 1e-5,
+        rtol: 1e-4,
+    };
+    let cmp =
+        hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_outputs[0].data, tol);
     assert!(
         cmp.passed,
         "GQA K-expand with Shape(start,end) mismatch — TinyLlama NodeId(336) regression: {}",
@@ -914,15 +1061,26 @@ fn swiglu_matches_ort() {
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
         vec![
-            OrtInput { name: "gate".into(), shape: vec![rows, cols], data: gate.clone() },
-            OrtInput { name: "up".into(), shape: vec![rows, cols], data: up.clone() },
+            OrtInput {
+                name: "gate".into(),
+                shape: vec![rows, cols],
+                data: gate.clone(),
+            },
+            OrtInput {
+                name: "up".into(),
+                shape: vec![rows, cols],
+                data: up.clone(),
+            },
         ],
     )
     .expect("ORT failed for swiglu");
 
     let holo_out = compile_and_execute(
         &model_bytes,
-        &[("gate", vec![rows, cols], gate), ("up", vec![rows, cols], up)],
+        &[
+            ("gate", vec![rows, cols], gate),
+            ("up", vec![rows, cols], up),
+        ],
     );
 
     let cmp = hologram_ai_conformance::tolerance::compare_outputs(
@@ -966,7 +1124,9 @@ fn gqa_flat_single_kv_matches_ort() {
     let kv_elems = seq * head_dim;
     let q_data: Vec<f32> = (0..q_elems).map(|i| (i as f32) * 0.02 - 0.5).collect();
     let k_data: Vec<f32> = (0..kv_elems).map(|i| (i as f32) * 0.015 + 0.1).collect();
-    let v_data: Vec<f32> = (0..kv_elems).map(|i| ((i % 8) as f32) * 0.1 - 0.3).collect();
+    let v_data: Vec<f32> = (0..kv_elems)
+        .map(|i| ((i % 8) as f32) * 0.1 - 0.3)
+        .collect();
 
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
@@ -976,8 +1136,16 @@ fn gqa_flat_single_kv_matches_ort() {
                 shape: vec![seq, n_q_heads * head_dim],
                 data: q_data.clone(),
             },
-            OrtInput { name: "K_flat".into(), shape: vec![seq, head_dim], data: k_data.clone() },
-            OrtInput { name: "V_flat".into(), shape: vec![seq, head_dim], data: v_data.clone() },
+            OrtInput {
+                name: "K_flat".into(),
+                shape: vec![seq, head_dim],
+                data: k_data.clone(),
+            },
+            OrtInput {
+                name: "V_flat".into(),
+                shape: vec![seq, head_dim],
+                data: v_data.clone(),
+            },
         ],
     )
     .expect("ORT failed for gqa_flat_single_kv");
@@ -992,12 +1160,12 @@ fn gqa_flat_single_kv_matches_ort() {
     );
 
     // Multiple matmuls + softmax — slightly looser tolerance.
-    let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
-    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-        &holo_out,
-        &ort_outputs[0].data,
-        tol,
-    );
+    let tol = Tolerance {
+        atol: 1e-3,
+        rtol: 1e-2,
+    };
+    let cmp =
+        hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_outputs[0].data, tol);
     assert!(
         cmp.passed,
         "GQA flat-input single-KV-head mismatch (GGUF attention path regression): {}",
@@ -1021,8 +1189,8 @@ fn range_i64_inputs_matches_ort() {
     let n = 8usize; // small enough to be fast but exercises the bug
     let model_bytes = onnx_builder::range_i64_then_cast(n);
 
-    let ort_outputs = run_onnx_all_outputs(&model_bytes, vec![])
-        .expect("ORT failed for range_i64_inputs");
+    let ort_outputs =
+        run_onnx_all_outputs(&model_bytes, vec![]).expect("ORT failed for range_i64_inputs");
 
     let holo_out = compile_and_execute(&model_bytes, &[]);
 
@@ -1041,7 +1209,10 @@ fn range_i64_inputs_matches_ort() {
     let cmp = hologram_ai_conformance::tolerance::compare_outputs(
         &holo_out,
         &ort_outputs[0].data,
-        Tolerance { atol: 1e-5, rtol: 1e-5 },
+        Tolerance {
+            atol: 1e-5,
+            rtol: 1e-5,
+        },
     );
     assert!(
         cmp.passed,
@@ -1068,8 +1239,8 @@ fn causal_mask_orthogonal_broadcast_matches_ort() {
     let seq = 4usize;
     let model_bytes = onnx_builder::causal_mask_less_equal(seq);
 
-    let ort_outputs = run_onnx_all_outputs(&model_bytes, vec![])
-        .expect("ORT failed for causal_mask_less_equal");
+    let ort_outputs =
+        run_onnx_all_outputs(&model_bytes, vec![]).expect("ORT failed for causal_mask_less_equal");
 
     let holo_out = compile_and_execute(&model_bytes, &[]);
 
@@ -1093,7 +1264,10 @@ fn causal_mask_orthogonal_broadcast_matches_ort() {
     let cmp = hologram_ai_conformance::tolerance::compare_outputs(
         &holo_out,
         &ort_outputs[0].data,
-        Tolerance { atol: 1e-6, rtol: 0.0 },
+        Tolerance {
+            atol: 1e-6,
+            rtol: 0.0,
+        },
     );
     assert!(
         cmp.passed,
@@ -1101,9 +1275,7 @@ fn causal_mask_orthogonal_broadcast_matches_ort() {
          binary_compare_broadcast stale-shape guard regression.\n\
          Expected (upper-triangular): {:?}\n\
          Got: {:?}\n{}",
-        expected,
-        holo_out,
-        cmp.message
+        expected, holo_out, cmp.message
     );
 }
 
@@ -1163,8 +1335,16 @@ fn tinyllama_causal_onnx_top1_matches_ort() {
         let ort1 = run_onnx_file_typed(
             &model_path,
             vec![
-                OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, 1], data: ids1.clone() },
-                OrtInputTyped::I64 { name: "attention_mask".into(), shape: vec![1, 1], data: mask1.clone() },
+                OrtInputTyped::I64 {
+                    name: "input_ids".into(),
+                    shape: vec![1, 1],
+                    data: ids1.clone(),
+                },
+                OrtInputTyped::I64 {
+                    name: "attention_mask".into(),
+                    shape: vec![1, 1],
+                    data: mask1.clone(),
+                },
             ],
         )
         .expect("ORT seq=1 failed");
@@ -1242,17 +1422,31 @@ fn tinyllama_causal_onnx_top1_matches_ort() {
     eprintln!("hologram top-5: {:?}", top5_holo);
 
     // Log actual logit values for the top tokens.
-    eprintln!("ORT logit values:     {:?}",
-        top5_ort.iter().map(|&i| ort_last_pos[i]).collect::<Vec<_>>());
-    eprintln!("hologram logit values: {:?}",
-        top5_holo.iter().map(|&i| holo_last_pos[i]).collect::<Vec<_>>());
+    eprintln!(
+        "ORT logit values:     {:?}",
+        top5_ort
+            .iter()
+            .map(|&i| ort_last_pos[i])
+            .collect::<Vec<_>>()
+    );
+    eprintln!(
+        "hologram logit values: {:?}",
+        top5_holo
+            .iter()
+            .map(|&i| holo_last_pos[i])
+            .collect::<Vec<_>>()
+    );
     // Also show hologram's logit for ORT's top-1.
     let ort_top1 = top5_ort[0];
     eprintln!(
         "hologram logit for ORT's top-1 ({}): {:.4} (hologram rank: {})",
         ort_top1,
         holo_last_pos[ort_top1],
-        top5_holo.iter().position(|&i| i == ort_top1).map(|p| p + 1).unwrap_or(999),
+        top5_holo
+            .iter()
+            .position(|&i| i == ort_top1)
+            .map(|p| p + 1)
+            .unwrap_or(999),
     );
 
     // The top-1 token must match.
@@ -1289,17 +1483,20 @@ fn softmax_dynamic_seq_at_seq2_matches_ort() {
         let x_data: Vec<f32> = (0..seq * hidden).map(|i| (i as f32) * 0.1 - 0.5).collect();
         let ort_out = run_onnx_all_outputs(
             &model_bytes,
-            vec![OrtInput { name: "X".into(), shape: vec![1, seq, hidden], data: x_data.clone() }],
+            vec![OrtInput {
+                name: "X".into(),
+                shape: vec![1, seq, hidden],
+                data: x_data.clone(),
+            }],
         )
         .unwrap_or_else(|e| panic!("ORT failed at seq={seq}: {e}"));
 
-        let holo_out = compile_and_execute(
-            &model_bytes,
-            &[("X", vec![1, seq, hidden], x_data)],
-        );
+        let holo_out = compile_and_execute(&model_bytes, &[("X", vec![1, seq, hidden], x_data)]);
 
         let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-            &holo_out, &ort_out[0].data, exec_tol(),
+            &holo_out,
+            &ort_out[0].data,
+            exec_tol(),
         );
         assert!(cmp.passed, "softmax dyn seq={seq}: {}", cmp.message);
     }
@@ -1319,19 +1516,32 @@ fn matmul_dynamic_seq_at_multiple_seq_matches_ort() {
         let ort_out = run_onnx_all_outputs(
             &model_bytes,
             vec![
-                OrtInput { name: "X".into(), shape: vec![1, seq, k], data: x_data.clone() },
-                OrtInput { name: "W".into(), shape: vec![k, n], data: w_data.clone() },
+                OrtInput {
+                    name: "X".into(),
+                    shape: vec![1, seq, k],
+                    data: x_data.clone(),
+                },
+                OrtInput {
+                    name: "W".into(),
+                    shape: vec![k, n],
+                    data: w_data.clone(),
+                },
             ],
         )
         .unwrap_or_else(|e| panic!("ORT failed at seq={seq}: {e}"));
 
         let holo_out = compile_and_execute(
             &model_bytes,
-            &[("X", vec![1, seq, k], x_data), ("W", vec![k, n], w_data.clone())],
+            &[
+                ("X", vec![1, seq, k], x_data),
+                ("W", vec![k, n], w_data.clone()),
+            ],
         );
 
         let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-            &holo_out, &ort_out[0].data, exec_tol(),
+            &holo_out,
+            &ort_out[0].data,
+            exec_tol(),
         );
         assert!(cmp.passed, "matmul dyn seq={seq}: {}", cmp.message);
     }
@@ -1349,19 +1559,26 @@ fn reshape_unpack_heads_dynamic_seq_at_seq2_matches_ort() {
         let x_data: Vec<f32> = (0..seq * hidden).map(|i| (i as f32) * 0.01).collect();
         let ort_out = run_onnx_all_outputs(
             &model_bytes,
-            vec![OrtInput { name: "X".into(), shape: vec![1, seq, hidden], data: x_data.clone() }],
+            vec![OrtInput {
+                name: "X".into(),
+                shape: vec![1, seq, hidden],
+                data: x_data.clone(),
+            }],
         )
         .unwrap_or_else(|e| panic!("ORT failed at seq={seq}: {e}"));
 
-        let holo_out = compile_and_execute(
-            &model_bytes,
-            &[("X", vec![1, seq, hidden], x_data)],
-        );
+        let holo_out = compile_and_execute(&model_bytes, &[("X", vec![1, seq, hidden], x_data)]);
 
         let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-            &holo_out, &ort_out[0].data, exec_tol(),
+            &holo_out,
+            &ort_out[0].data,
+            exec_tol(),
         );
-        assert!(cmp.passed, "reshape unpack heads seq={seq}: {}", cmp.message);
+        assert!(
+            cmp.passed,
+            "reshape unpack heads seq={seq}: {}",
+            cmp.message
+        );
     }
 }
 
@@ -1381,11 +1598,8 @@ fn walk_shape_context_matmul_projects_output_shape() {
 
     let ctx = shape_ctx.expect("shape context should be present");
     let mut shape_map = std::collections::HashMap::new();
-    let input_shapes: std::collections::HashMap<u32, Vec<usize>> = [
-        (0, vec![m, k]),
-        (1, vec![k, n]),
-    ]
-    .into();
+    let input_shapes: std::collections::HashMap<u32, Vec<usize>> =
+        [(0, vec![m, k]), (1, vec![k, n])].into();
     hologram_ai_common::lower::shape_spec_bridge::walk_shape_context(
         &ctx,
         &input_shapes,
@@ -1394,10 +1608,8 @@ fn walk_shape_context_matmul_projects_output_shape() {
     );
 
     // The output node should have shape [m, n].
-    let output_shapes: Vec<&Vec<usize>> = shape_map
-        .values()
-        .filter(|s| *s == &vec![m, n])
-        .collect();
+    let output_shapes: Vec<&Vec<usize>> =
+        shape_map.values().filter(|s| *s == &vec![m, n]).collect();
     assert!(
         !output_shapes.is_empty(),
         "walk_shape_context should project MatMul output to [{m}, {n}]"
@@ -1418,11 +1630,8 @@ fn walk_shape_context_rmsnorm_same_as_input() {
 
     let ctx = shape_ctx.expect("shape context should be present");
     let mut shape_map = std::collections::HashMap::new();
-    let input_shapes: std::collections::HashMap<u32, Vec<usize>> = [
-        (0, vec![rows, size]),
-        (1, vec![size]),
-    ]
-    .into();
+    let input_shapes: std::collections::HashMap<u32, Vec<usize>> =
+        [(0, vec![rows, size]), (1, vec![size])].into();
     hologram_ai_common::lower::shape_spec_bridge::walk_shape_context(
         &ctx,
         &input_shapes,
@@ -1451,18 +1660,25 @@ const MINI_VOCAB: usize = 32;
 /// This is the fast CI replacement for `tinyllama_causal_onnx_top1_matches_ort`.
 #[test]
 fn mini_transformer_matches_ort() {
-    let model_bytes = onnx_builder::mini_transformer_dyn(MINI_HIDDEN, MINI_HEADS, MINI_FFN, MINI_VOCAB);
+    let model_bytes =
+        onnx_builder::mini_transformer_dyn(MINI_HIDDEN, MINI_HEADS, MINI_FFN, MINI_VOCAB);
 
     let archive = ModelCompiler::default()
         .compile(ModelSource::OnnxBytes(model_bytes.clone()))
         .expect("mini transformer compilation failed");
 
     for seq in [1usize, 7] {
-        let x: Vec<f32> = (0..seq * MINI_HIDDEN).map(|i| (i as f32) * 0.01 - 0.32).collect();
+        let x: Vec<f32> = (0..seq * MINI_HIDDEN)
+            .map(|i| (i as f32) * 0.01 - 0.32)
+            .collect();
 
         let ort_outputs = run_onnx_all_outputs(
             &model_bytes,
-            vec![OrtInput { name: "X".into(), shape: vec![seq, MINI_HIDDEN], data: x.clone() }],
+            vec![OrtInput {
+                name: "X".into(),
+                shape: vec![seq, MINI_HIDDEN],
+                data: x.clone(),
+            }],
         )
         .unwrap_or_else(|e| panic!("ORT failed at seq={seq}: {e}"));
 
@@ -1475,9 +1691,20 @@ fn mini_transformer_matches_ort() {
         let (_, out_bytes) = outputs.get(0).expect("no output");
         let holo_out: Vec<f32> = bytemuck::cast_slice(out_bytes).to_vec();
 
-        let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
-        let cmp = hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_outputs[0].data, tol);
-        assert!(cmp.passed, "mini transformer seq={seq} mismatch: {}", cmp.message);
+        let tol = Tolerance {
+            atol: 1e-3,
+            rtol: 1e-2,
+        };
+        let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+            &holo_out,
+            &ort_outputs[0].data,
+            tol,
+        );
+        assert!(
+            cmp.passed,
+            "mini transformer seq={seq} mismatch: {}",
+            cmp.message
+        );
     }
 }
 
@@ -1525,12 +1752,16 @@ fn multihead_attention_fixture_matches_ort() {
 
         let runner = hologram_ai::HoloRunner::from_bytes(archive.bytes.clone())
             .expect("failed to load HoloRunner for multihead fixture");
-        let outputs = runner.execute(&graph_inputs)
+        let outputs = runner
+            .execute(&graph_inputs)
             .unwrap_or_else(|e| panic!("hologram failed at seq={seq}: {e}"));
         let (_, out_bytes) = outputs.get(0).expect("no output");
         let holo_out: Vec<f32> = bytemuck::cast_slice(out_bytes).to_vec();
 
-        let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
+        let tol = Tolerance {
+            atol: 1e-3,
+            rtol: 1e-2,
+        };
         let cmp = hologram_ai_conformance::tolerance::compare_outputs(
             &holo_out,
             &ort_outputs[0].data,
@@ -1584,7 +1815,10 @@ fn gqa_expand_attention_fixture_matches_ort() {
         let (_, out_bytes) = outputs.get(0).expect("no output");
         let holo_out: Vec<f32> = bytemuck::cast_slice(out_bytes).to_vec();
 
-        let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
+        let tol = Tolerance {
+            atol: 1e-3,
+            rtol: 1e-2,
+        };
         let cmp = hologram_ai_conformance::tolerance::compare_outputs(
             &holo_out,
             &ort_outputs[0].data,
@@ -1617,9 +1851,7 @@ fn slice_shape_to_gather_fixture_matches_ort() {
         .expect("slice_shape_to_gather compilation failed");
 
     for seq in [1usize, 3] {
-        let x: Vec<f32> = (0..seq * hidden)
-            .map(|i| (i as f32) * 0.01)
-            .collect();
+        let x: Vec<f32> = (0..seq * hidden).map(|i| (i as f32) * 0.01).collect();
 
         let ort_outputs = run_onnx_all_outputs(
             &model_bytes,
@@ -1635,17 +1867,22 @@ fn slice_shape_to_gather_fixture_matches_ort() {
         let mut graph_inputs = hologram::GraphInputs::new();
         graph_inputs.set_with_shape(0, x_bytes, vec![1, seq, hidden]);
 
-        let outputs = hologram_ai::run_with_shape_context(&archive, &graph_inputs)
-            .unwrap_or_else(|e| panic!(
-                "hologram failed at seq={seq}: {e}\n\
+        let outputs =
+            hologram_ai::run_with_shape_context(&archive, &graph_inputs).unwrap_or_else(|e| {
+                panic!(
+                    "hologram failed at seq={seq}: {e}\n\
                  This is the TinyLlama NodeId(498) regression: SliceToGather \
                  converts Slice(shape, 2:3) to Gather with dim=1, then \
                  executor bounds-checks index(2) < dim(1) and fails."
-            ));
+                )
+            });
         let (_, out_bytes) = outputs.get(0).expect("no output");
         let holo_out: Vec<f32> = bytemuck::cast_slice(out_bytes).to_vec();
 
-        let tol = Tolerance { atol: 1e-4, rtol: 1e-4 };
+        let tol = Tolerance {
+            atol: 1e-4,
+            rtol: 1e-4,
+        };
         let cmp = hologram_ai_conformance::tolerance::compare_outputs(
             &holo_out,
             &ort_outputs[0].data,
@@ -1654,8 +1891,7 @@ fn slice_shape_to_gather_fixture_matches_ort() {
         assert!(
             cmp.passed,
             "slice_shape_to_gather seq={seq}: expected [{hidden}.0], got {:?}. {}",
-            holo_out,
-            cmp.message
+            holo_out, cmp.message
         );
     }
 }
@@ -1685,11 +1921,13 @@ fn gather_i64_index_gt_dim_fixture_matches_ort() {
     // Use typed runner for i64 input
     let ort_out = hologram_ai_conformance::ort_runner::runner::run_onnx_typed(
         &model_bytes,
-        vec![hologram_ai_conformance::ort_runner::runner::OrtInputTyped::I64 {
-            name: "data".into(),
-            shape: vec![3],
-            data: data_vals,
-        }],
+        vec![
+            hologram_ai_conformance::ort_runner::runner::OrtInputTyped::I64 {
+                name: "data".into(),
+                shape: vec![3],
+                data: data_vals,
+            },
+        ],
     )
     .expect("ORT failed");
     let ort_val = ort_out[0].data[0]; // should be 30.0
@@ -1757,16 +1995,21 @@ fn slice_shape_4d_dynamic_fixture_matches_ort() {
         let mut graph_inputs = hologram::GraphInputs::new();
         graph_inputs.set_with_shape(0, k_bytes, vec![1, n_kv_heads, seq, head_dim]);
 
-        let outputs = hologram_ai::run_with_shape_context(&archive, &graph_inputs)
-            .unwrap_or_else(|e| panic!(
-                "hologram failed at seq={seq}: {e}\n\
+        let outputs =
+            hologram_ai::run_with_shape_context(&archive, &graph_inputs).unwrap_or_else(|e| {
+                panic!(
+                    "hologram failed at seq={seq}: {e}\n\
                  TinyLlama NodeId(498) regression: SliceToGather on 4-D shape \
                  with dynamic seq creates Gather(dim=1) with index >= 2."
-            ));
+                )
+            });
         let (_, out_bytes) = outputs.get(0).expect("no output");
         let holo_out: Vec<f32> = bytemuck::cast_slice(out_bytes).to_vec();
 
-        let tol = Tolerance { atol: 1e-4, rtol: 1e-4 };
+        let tol = Tolerance {
+            atol: 1e-4,
+            rtol: 1e-4,
+        };
         let cmp = hologram_ai_conformance::tolerance::compare_outputs(
             &holo_out,
             &ort_outputs[0].data,
@@ -1816,17 +2059,22 @@ fn slice_shape_dynamic_seq_fixture_matches_ort() {
         let mut graph_inputs = hologram::GraphInputs::new();
         graph_inputs.set_with_shape(0, x_bytes, vec![1, seq, hidden]);
 
-        let outputs = hologram_ai::run_with_shape_context(&archive, &graph_inputs)
-            .unwrap_or_else(|e| panic!(
-                "hologram failed at seq={seq}: {e}\n\
+        let outputs =
+            hologram_ai::run_with_shape_context(&archive, &graph_inputs).unwrap_or_else(|e| {
+                panic!(
+                    "hologram failed at seq={seq}: {e}\n\
                  TinyLlama regression: SliceToGather creates Gather with dim=1 \
                  on a 1-D i64 shape tensor. Executor bounds-checks index < dim \
                  instead of index < num_rows."
-            ));
+                )
+            });
         let (_, out_bytes) = outputs.get(0).expect("no output");
         let holo_out: Vec<f32> = bytemuck::cast_slice(out_bytes).to_vec();
 
-        let tol = Tolerance { atol: 1e-4, rtol: 1e-3 };
+        let tol = Tolerance {
+            atol: 1e-4,
+            rtol: 1e-3,
+        };
         let cmp = hologram_ai_conformance::tolerance::compare_outputs(
             &holo_out,
             &ort_outputs[0].data,
@@ -1881,7 +2129,10 @@ fn gather_shape_i64_fixture_matches_ort() {
         let (_, out_bytes) = outputs.get(0).expect("no output");
         let holo_out: Vec<f32> = bytemuck::cast_slice(out_bytes).to_vec();
 
-        let tol = Tolerance { atol: 1e-4, rtol: 1e-4 };
+        let tol = Tolerance {
+            atol: 1e-4,
+            rtol: 1e-4,
+        };
         let cmp = hologram_ai_conformance::tolerance::compare_outputs(
             &holo_out,
             &ort_outputs[0].data,
@@ -1890,8 +2141,7 @@ fn gather_shape_i64_fixture_matches_ort() {
         assert!(
             cmp.passed,
             "gather_shape_i64 seq={seq}: expected {hidden}.0, got {:?}. {}",
-            holo_out,
-            cmp.message
+            holo_out, cmp.message
         );
     }
 }
@@ -1924,8 +2174,8 @@ fn compile_and_execute_aigraph(
         graph_inputs.set_with_shape(i as u32, bytes, shape.clone());
     }
 
-    let runner = hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes)
-        .expect("loading runner");
+    let runner =
+        hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes).expect("loading runner");
     let outputs = runner.execute(&graph_inputs).expect("execution failed");
 
     let (_, out_bytes) = outputs.get(0).expect("no outputs");
@@ -1943,9 +2193,7 @@ fn build_gqa_aigraph(
     seq: usize,
     causal: bool,
 ) -> hologram_ai_common::AiGraph {
-    use hologram_ai_common::{
-        AiGraph, AiNode, AiOp, DType, TensorInfo, shape_from_concrete,
-    };
+    use hologram_ai_common::{shape_from_concrete, AiGraph, AiNode, AiOp, DType, TensorInfo};
     use std::collections::HashMap;
 
     let q_dim = (n_q_heads * head_dim) as usize;
@@ -1953,10 +2201,28 @@ fn build_gqa_aigraph(
 
     // TensorIds: 0=Q, 1=K, 2=V, 3=output
     let mut tensor_info = HashMap::new();
-    tensor_info.insert(0u32, TensorInfo::new(DType::F32, shape_from_concrete(&[seq as u64, q_dim as u64])));
-    tensor_info.insert(1u32, TensorInfo::new(DType::F32, shape_from_concrete(&[seq as u64, kv_dim as u64])));
-    tensor_info.insert(2u32, TensorInfo::new(DType::F32, shape_from_concrete(&[seq as u64, kv_dim as u64])));
-    tensor_info.insert(3u32, TensorInfo::new(DType::F32, shape_from_concrete(&[seq as u64, q_dim as u64])));
+    tensor_info.insert(
+        0u32,
+        TensorInfo::new(DType::F32, shape_from_concrete(&[seq as u64, q_dim as u64])),
+    );
+    tensor_info.insert(
+        1u32,
+        TensorInfo::new(
+            DType::F32,
+            shape_from_concrete(&[seq as u64, kv_dim as u64]),
+        ),
+    );
+    tensor_info.insert(
+        2u32,
+        TensorInfo::new(
+            DType::F32,
+            shape_from_concrete(&[seq as u64, kv_dim as u64]),
+        ),
+    );
+    tensor_info.insert(
+        3u32,
+        TensorInfo::new(DType::F32, shape_from_concrete(&[seq as u64, q_dim as u64])),
+    );
 
     AiGraph {
         name: "gqa_fused_fixture".into(),
@@ -1988,7 +2254,7 @@ fn build_gqa_aigraph(
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
         tensor_names: HashMap::new(),
-            topo_cache: Default::default(),
+        topo_cache: Default::default(),
     }
 }
 
@@ -2011,8 +2277,12 @@ fn gqa_fused_kernel_matches_decomposed() {
 
     // Generate deterministic test data.
     let q_data: Vec<f32> = (0..seq * q_dim).map(|i| (i as f32) * 0.02 - 0.5).collect();
-    let k_data: Vec<f32> = (0..seq * kv_dim).map(|i| (i as f32) * 0.015 + 0.1).collect();
-    let v_data: Vec<f32> = (0..seq * kv_dim).map(|i| ((i % 16) as f32) * 0.1 - 0.7).collect();
+    let k_data: Vec<f32> = (0..seq * kv_dim)
+        .map(|i| (i as f32) * 0.015 + 0.1)
+        .collect();
+    let v_data: Vec<f32> = (0..seq * kv_dim)
+        .map(|i| ((i % 16) as f32) * 0.1 - 0.7)
+        .collect();
 
     // Reference: decomposed ONNX fixture loaded from file (generated by generate.py).
     let onnx_bytes = hologram_ai_conformance::ort_runner::fixtures::load("gqa_fused_reference")
@@ -2020,9 +2290,21 @@ fn gqa_fused_kernel_matches_decomposed() {
     let ort_outputs = run_onnx_all_outputs(
         &onnx_bytes,
         vec![
-            OrtInput { name: "Q_flat".into(), shape: vec![seq, q_dim], data: q_data.clone() },
-            OrtInput { name: "K_flat".into(), shape: vec![seq, kv_dim], data: k_data.clone() },
-            OrtInput { name: "V_flat".into(), shape: vec![seq, kv_dim], data: v_data.clone() },
+            OrtInput {
+                name: "Q_flat".into(),
+                shape: vec![seq, q_dim],
+                data: q_data.clone(),
+            },
+            OrtInput {
+                name: "K_flat".into(),
+                shape: vec![seq, kv_dim],
+                data: k_data.clone(),
+            },
+            OrtInput {
+                name: "V_flat".into(),
+                shape: vec![seq, kv_dim],
+                data: v_data.clone(),
+            },
         ],
     )
     .expect("ORT failed for gqa_flat_multi_kv reference");
@@ -2045,12 +2327,12 @@ fn gqa_fused_kernel_matches_decomposed() {
     );
 
     // GQA attention: looser tolerance due to softmax + multiple matmuls.
-    let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
-    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-        &holo_out,
-        &ort_outputs[0].data,
-        tol,
-    );
+    let tol = Tolerance {
+        atol: 1e-3,
+        rtol: 1e-2,
+    };
+    let cmp =
+        hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_outputs[0].data, tol);
     assert!(
         cmp.passed,
         "Fused GQA kernel mismatch vs decomposed ORT reference: {}",
@@ -2063,25 +2345,27 @@ fn gqa_fused_kernel_matches_decomposed() {
 /// Inputs: gate [rows, cols], up [rows, cols]
 /// Output: [rows, cols]
 fn build_swiglu_aigraph(rows: usize, cols: usize) -> hologram_ai_common::AiGraph {
-    use hologram_ai_common::{
-        AiGraph, AiNode, AiOp, DType, TensorInfo, shape_from_concrete,
-    };
+    use hologram_ai_common::{shape_from_concrete, AiGraph, AiNode, AiOp, DType, TensorInfo};
     use std::collections::HashMap;
 
     // TensorIds: 0=gate, 1=up, 2=output
     let mut tensor_info = HashMap::new();
-    tensor_info.insert(0u32, TensorInfo::new(DType::F32, shape_from_concrete(&[rows as u64, cols as u64])));
-    tensor_info.insert(1u32, TensorInfo::new(DType::F32, shape_from_concrete(&[rows as u64, cols as u64])));
-    tensor_info.insert(2u32, TensorInfo::new(DType::F32, shape_from_concrete(&[rows as u64, cols as u64])));
+    tensor_info.insert(
+        0u32,
+        TensorInfo::new(DType::F32, shape_from_concrete(&[rows as u64, cols as u64])),
+    );
+    tensor_info.insert(
+        1u32,
+        TensorInfo::new(DType::F32, shape_from_concrete(&[rows as u64, cols as u64])),
+    );
+    tensor_info.insert(
+        2u32,
+        TensorInfo::new(DType::F32, shape_from_concrete(&[rows as u64, cols as u64])),
+    );
 
     AiGraph {
         name: "swiglu_fused_fixture".into(),
-        nodes: vec![AiNode::new(
-            0,
-            AiOp::FusedSwiGLU,
-            vec![0, 1],
-            vec![2],
-        )],
+        nodes: vec![AiNode::new(0, AiOp::FusedSwiGLU, vec![0, 1], vec![2])],
         inputs: vec![0, 1],
         outputs: vec![2],
         input_names: vec!["gate".into(), "up".into()],
@@ -2094,7 +2378,7 @@ fn build_swiglu_aigraph(rows: usize, cols: usize) -> hologram_ai_common::AiGraph
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
         tensor_names: HashMap::new(),
-            topo_cache: Default::default(),
+        topo_cache: Default::default(),
     }
 }
 
@@ -2112,7 +2396,9 @@ fn swiglu_fused_kernel_matches_decomposed() {
     let cols = 16;
 
     let gate: Vec<f32> = (0..rows * cols).map(|i| (i as f32) * 0.05 - 1.5).collect();
-    let up: Vec<f32> = (0..rows * cols).map(|i| ((i % 8) as f32) * 0.2 - 0.7).collect();
+    let up: Vec<f32> = (0..rows * cols)
+        .map(|i| ((i % 8) as f32) * 0.2 - 0.7)
+        .collect();
 
     // Reference: decomposed ONNX fixture loaded from file (generated by generate.py).
     let onnx_bytes = hologram_ai_conformance::ort_runner::fixtures::load("swiglu_fused_reference")
@@ -2120,8 +2406,16 @@ fn swiglu_fused_kernel_matches_decomposed() {
     let ort_outputs = run_onnx_all_outputs(
         &onnx_bytes,
         vec![
-            OrtInput { name: "gate".into(), shape: vec![rows, cols], data: gate.clone() },
-            OrtInput { name: "up".into(), shape: vec![rows, cols], data: up.clone() },
+            OrtInput {
+                name: "gate".into(),
+                shape: vec![rows, cols],
+                data: gate.clone(),
+            },
+            OrtInput {
+                name: "up".into(),
+                shape: vec![rows, cols],
+                data: up.clone(),
+            },
         ],
     )
     .expect("ORT failed for swiglu reference");
@@ -2136,12 +2430,12 @@ fn swiglu_fused_kernel_matches_decomposed() {
         ],
     );
 
-    let tol = Tolerance { atol: 1e-5, rtol: 1e-4 };
-    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-        &holo_out,
-        &ort_outputs[0].data,
-        tol,
-    );
+    let tol = Tolerance {
+        atol: 1e-5,
+        rtol: 1e-4,
+    };
+    let cmp =
+        hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_outputs[0].data, tol);
     assert!(
         cmp.passed,
         "Fused SwiGLU kernel mismatch vs decomposed ORT reference: {}",
@@ -2165,19 +2459,22 @@ fn conv2d_matches_ort() {
 
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
-        vec![OrtInput { name: "X".into(), shape: vec![n, ic, h, w], data: input_data.clone() }],
+        vec![OrtInput {
+            name: "X".into(),
+            shape: vec![n, ic, h, w],
+            data: input_data.clone(),
+        }],
     )
     .expect("ORT failed");
 
-    let holo_out = compile_and_execute(
-        &model_bytes,
-        &[("X", vec![n, ic, h, w], input_data)],
-    );
+    let holo_out = compile_and_execute(&model_bytes, &[("X", vec![n, ic, h, w], input_data)]);
 
-    let tol = Tolerance { atol: 1e-4, rtol: 1e-3 };
-    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-        &holo_out, &ort_outputs[0].data, tol,
-    );
+    let tol = Tolerance {
+        atol: 1e-4,
+        rtol: 1e-3,
+    };
+    let cmp =
+        hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_outputs[0].data, tol);
     assert!(cmp.passed, "Conv2d mismatch: {}", cmp.message);
 }
 
@@ -2195,19 +2492,22 @@ fn conv2d_stride2_matches_ort() {
 
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
-        vec![OrtInput { name: "X".into(), shape: vec![n, ic, h, w], data: input_data.clone() }],
+        vec![OrtInput {
+            name: "X".into(),
+            shape: vec![n, ic, h, w],
+            data: input_data.clone(),
+        }],
     )
     .expect("ORT failed");
 
-    let holo_out = compile_and_execute(
-        &model_bytes,
-        &[("X", vec![n, ic, h, w], input_data)],
-    );
+    let holo_out = compile_and_execute(&model_bytes, &[("X", vec![n, ic, h, w], input_data)]);
 
-    let tol = Tolerance { atol: 1e-4, rtol: 1e-3 };
-    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-        &holo_out, &ort_outputs[0].data, tol,
-    );
+    let tol = Tolerance {
+        atol: 1e-4,
+        rtol: 1e-3,
+    };
+    let cmp =
+        hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_outputs[0].data, tol);
     assert!(cmp.passed, "Conv2d stride=2 mismatch: {}", cmp.message);
 }
 
@@ -2224,14 +2524,15 @@ fn conv_relu_gap_matches_ort() {
 
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
-        vec![OrtInput { name: "X".into(), shape: vec![1, ic, h, w], data: input_data.clone() }],
+        vec![OrtInput {
+            name: "X".into(),
+            shape: vec![1, ic, h, w],
+            data: input_data.clone(),
+        }],
     )
     .expect("ORT failed");
 
-    let holo_out = compile_and_execute(
-        &model_bytes,
-        &[("X", vec![1, ic, h, w], input_data)],
-    );
+    let holo_out = compile_and_execute(&model_bytes, &[("X", vec![1, ic, h, w], input_data)]);
 
     assert!(
         !holo_out.is_empty(),
@@ -2239,10 +2540,12 @@ fn conv_relu_gap_matches_ort() {
         ort_outputs[0].data.len()
     );
 
-    let tol = Tolerance { atol: 1e-4, rtol: 1e-3 };
-    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-        &holo_out, &ort_outputs[0].data, tol,
-    );
+    let tol = Tolerance {
+        atol: 1e-4,
+        rtol: 1e-3,
+    };
+    let cmp =
+        hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_outputs[0].data, tol);
     assert!(cmp.passed, "Conv+Relu+GAP mismatch: {}", cmp.message);
 }
 
@@ -2260,25 +2563,32 @@ fn mini_vision_classifier_matches_ort() {
 
     let ort_outputs = run_onnx_all_outputs(
         &model_bytes,
-        vec![OrtInput { name: "X".into(), shape: vec![1, ic, h, w], data: input_data.clone() }],
+        vec![OrtInput {
+            name: "X".into(),
+            shape: vec![1, ic, h, w],
+            data: input_data.clone(),
+        }],
     )
     .expect("ORT failed");
 
-    let holo_out = compile_and_execute(
-        &model_bytes,
-        &[("X", vec![1, ic, h, w], input_data)],
-    );
+    let holo_out = compile_and_execute(&model_bytes, &[("X", vec![1, ic, h, w], input_data)]);
 
     assert!(
         !holo_out.is_empty(),
         "hologram produced empty output for mini vision classifier"
     );
 
-    let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
-    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-        &holo_out, &ort_outputs[0].data, tol,
+    let tol = Tolerance {
+        atol: 1e-3,
+        rtol: 1e-2,
+    };
+    let cmp =
+        hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_outputs[0].data, tol);
+    assert!(
+        cmp.passed,
+        "Mini vision classifier mismatch: {}",
+        cmp.message
     );
-    assert!(cmp.passed, "Mini vision classifier mismatch: {}", cmp.message);
 }
 
 // ── TinyLlama logit conformance ─────────────────────────────────────────────
@@ -2339,18 +2649,23 @@ fn tinyllama_logit_conformance() {
         .compile(ModelSource::OnnxPath(model_path))
         .expect("hologram compilation failed");
 
-    let runner = hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes)
-        .expect("loading runner");
+    let runner =
+        hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes).expect("loading runner");
 
     let position_ids: Vec<i64> = (0..seq as i64).collect();
 
     let mut inputs = hologram::GraphInputs::new();
     inputs.set_with_shape(0, bytemuck::cast_slice(&input_ids).to_vec(), vec![1, seq]);
-    inputs.set_with_shape(1, bytemuck::cast_slice(&attention_mask).to_vec(), vec![1, seq]);
+    inputs.set_with_shape(
+        1,
+        bytemuck::cast_slice(&attention_mask).to_vec(),
+        vec![1, seq],
+    );
     inputs.set_with_shape(2, bytemuck::cast_slice(&position_ids).to_vec(), vec![seq]);
 
     let mut kv_state = hologram::KvCacheState::new(22, 4, 64, 2048 + 16);
-    let holo_outputs = runner.execute_with_kv(&inputs, &mut kv_state)
+    let holo_outputs = runner
+        .execute_with_kv(&inputs, &mut kv_state)
         .expect("hologram execution failed");
     let (_, holo_bytes) = holo_outputs.get(0).expect("no hologram output");
     let holo_logits: Vec<f32> = holo_bytes
@@ -2362,7 +2677,10 @@ fn tinyllama_logit_conformance() {
         "Hologram: {} floats, range=[{:.4}, {:.4}]",
         holo_logits.len(),
         holo_logits.iter().cloned().fold(f32::INFINITY, f32::min),
-        holo_logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+        holo_logits
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max),
     );
 
     let nan_count = holo_logits.iter().filter(|v| v.is_nan()).count();
@@ -2398,10 +2716,21 @@ fn tinyllama_logit_conformance() {
     eprintln!("Holo top-1: id={} val={:.4}", holo_top1.0, holo_top1.1);
 
     // Compute cosine similarity between logit vectors.
-    let dot: f64 = ort_last_pos.iter().zip(holo_last_pos.iter())
-        .map(|(a, b)| *a as f64 * *b as f64).sum();
-    let norm_ort: f64 = ort_last_pos.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
-    let norm_holo: f64 = holo_last_pos.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+    let dot: f64 = ort_last_pos
+        .iter()
+        .zip(holo_last_pos.iter())
+        .map(|(a, b)| *a as f64 * *b as f64)
+        .sum();
+    let norm_ort: f64 = ort_last_pos
+        .iter()
+        .map(|v| (*v as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let norm_holo: f64 = holo_last_pos
+        .iter()
+        .map(|v| (*v as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
     let cosine = if norm_ort > 0.0 && norm_holo > 0.0 {
         dot / (norm_ort * norm_holo)
     } else {
@@ -2450,67 +2779,126 @@ fn tinyllama_decode_conformance() {
     let ort_prefill = run_onnx_file_typed(
         &model_path,
         vec![
-            OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, prefill_seq], data: prefill_ids.clone() },
-            OrtInputTyped::I64 { name: "attention_mask".into(), shape: vec![1, prefill_seq], data: vec![1; prefill_seq] },
+            OrtInputTyped::I64 {
+                name: "input_ids".into(),
+                shape: vec![1, prefill_seq],
+                data: prefill_ids.clone(),
+            },
+            OrtInputTyped::I64 {
+                name: "attention_mask".into(),
+                shape: vec![1, prefill_seq],
+                data: vec![1; prefill_seq],
+            },
         ],
-    ).expect("ORT prefill failed");
+    )
+    .expect("ORT prefill failed");
     let ort_logits_prefill = &ort_prefill[0].data;
     let vocab = 32000;
     let ort_last = &ort_logits_prefill[(prefill_seq - 1) * vocab..prefill_seq * vocab];
-    let ort_top1_prefill = ort_last.iter().enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
+    let ort_top1_prefill = ort_last
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .unwrap()
+        .0;
     eprintln!("ORT prefill top-1: id={ort_top1_prefill}");
 
     // Now run ORT with 6 tokens (prefill + predicted token) to get decode reference.
     let decode_token = ort_top1_prefill as i64;
-    let full_ids: Vec<i64> = prefill_ids.iter().copied().chain(std::iter::once(decode_token)).collect();
+    let full_ids: Vec<i64> = prefill_ids
+        .iter()
+        .copied()
+        .chain(std::iter::once(decode_token))
+        .collect();
     let full_seq = full_ids.len();
     let ort_full = run_onnx_file_typed(
         &model_path,
         vec![
-            OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, full_seq], data: full_ids },
-            OrtInputTyped::I64 { name: "attention_mask".into(), shape: vec![1, full_seq], data: vec![1; full_seq] },
+            OrtInputTyped::I64 {
+                name: "input_ids".into(),
+                shape: vec![1, full_seq],
+                data: full_ids,
+            },
+            OrtInputTyped::I64 {
+                name: "attention_mask".into(),
+                shape: vec![1, full_seq],
+                data: vec![1; full_seq],
+            },
         ],
-    ).expect("ORT full failed");
+    )
+    .expect("ORT full failed");
     let ort_logits_full = &ort_full[0].data;
     let ort_decode_pos = &ort_logits_full[(full_seq - 1) * vocab..full_seq * vocab];
-    let ort_decode_top1 = ort_decode_pos.iter().enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap();
-    eprintln!("ORT decode reference: top-1={} val={:.4} range=[{:.4}, {:.4}]",
-        ort_decode_top1.0, ort_decode_top1.1,
+    let ort_decode_top1 = ort_decode_pos
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .unwrap();
+    eprintln!(
+        "ORT decode reference: top-1={} val={:.4} range=[{:.4}, {:.4}]",
+        ort_decode_top1.0,
+        ort_decode_top1.1,
         ort_decode_pos.iter().cloned().fold(f32::INFINITY, f32::min),
-        ort_decode_pos.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+        ort_decode_pos
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max)
+    );
 
     // Hologram: compile as pipeline (prefill + decode), run with KV cache.
     let compiler = ModelCompiler::default();
-    let archive = compiler.compile(ModelSource::OnnxPath(model_path))
+    let archive = compiler
+        .compile(ModelSource::OnnxPath(model_path))
         .expect("compilation failed");
 
-    let runner = hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes)
-        .expect("loading runner");
+    let runner =
+        hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes).expect("loading runner");
 
     // Prefill step.
     let position_ids: Vec<i64> = (0..prefill_seq as i64).collect();
     let mut prefill_inputs = hologram::GraphInputs::new();
-    prefill_inputs.set_with_shape(0, bytemuck::cast_slice(&prefill_ids).to_vec(), vec![1, prefill_seq]);
-    prefill_inputs.set_with_shape(1, bytemuck::cast_slice(&vec![1i64; prefill_seq]).to_vec(), vec![1, prefill_seq]);
-    prefill_inputs.set_with_shape(2, bytemuck::cast_slice(&position_ids).to_vec(), vec![prefill_seq]);
+    prefill_inputs.set_with_shape(
+        0,
+        bytemuck::cast_slice(&prefill_ids).to_vec(),
+        vec![1, prefill_seq],
+    );
+    prefill_inputs.set_with_shape(
+        1,
+        bytemuck::cast_slice(&vec![1i64; prefill_seq]).to_vec(),
+        vec![1, prefill_seq],
+    );
+    prefill_inputs.set_with_shape(
+        2,
+        bytemuck::cast_slice(&position_ids).to_vec(),
+        vec![prefill_seq],
+    );
 
     let mut kv = hologram::KvCacheState::new(22, 4, 64, 2048 + 16);
-    let prefill_out = runner.execute_with_kv(&prefill_inputs, &mut kv)
+    let prefill_out = runner
+        .execute_with_kv(&prefill_inputs, &mut kv)
         .expect("hologram prefill failed");
 
     // Verify prefill matches.
     let (_, prefill_bytes) = prefill_out.get(0).expect("no prefill output");
-    let holo_prefill_logits: Vec<f32> = prefill_bytes.chunks_exact(4)
+    let holo_prefill_logits: Vec<f32> = prefill_bytes
+        .chunks_exact(4)
         .map(|c| f32::from_le_bytes(c.try_into().expect("4")))
         .collect();
     // Prefill outputs at compiled seq (2048), extract at position (prefill_seq - 1).
     let holo_prefill_last = &holo_prefill_logits[(prefill_seq - 1) * vocab..prefill_seq * vocab];
-    let holo_prefill_top1 = holo_prefill_last.iter().enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap();
-    eprintln!("Hologram prefill: top-1={} val={:.4}", holo_prefill_top1.0, holo_prefill_top1.1);
-    assert_eq!(ort_top1_prefill, holo_prefill_top1.0, "prefill top-1 mismatch");
+    let holo_prefill_top1 = holo_prefill_last
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .unwrap();
+    eprintln!(
+        "Hologram prefill: top-1={} val={:.4}",
+        holo_prefill_top1.0, holo_prefill_top1.1
+    );
+    assert_eq!(
+        ort_top1_prefill, holo_prefill_top1.0,
+        "prefill top-1 mismatch"
+    );
 
     // Decode step: single token with KV cache via pipeline decode model.
     let decode_ids = vec![decode_token];
@@ -2520,28 +2908,57 @@ fn tinyllama_decode_conformance() {
     decode_inputs.set_with_shape(1, bytemuck::cast_slice(&[1i64]).to_vec(), vec![1, 1]);
     decode_inputs.set_with_shape(2, bytemuck::cast_slice(&decode_pos).to_vec(), vec![1]);
 
-    let decode_out = runner.execute_with_kv(&decode_inputs, &mut kv)
+    let decode_out = runner
+        .execute_with_kv(&decode_inputs, &mut kv)
         .expect("hologram decode failed");
     let (_, decode_bytes) = decode_out.get(0).expect("no decode output");
-    let holo_decode_logits: Vec<f32> = decode_bytes.chunks_exact(4)
+    let holo_decode_logits: Vec<f32> = decode_bytes
+        .chunks_exact(4)
         .map(|c| f32::from_le_bytes(c.try_into().expect("4")))
         .collect();
 
     // Decode model output is [1, 1, vocab]. Logits at position 0.
     let holo_decode_pos = &holo_decode_logits[..vocab];
-    let holo_decode_top1 = holo_decode_pos.iter().enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap();
-    eprintln!("Hologram decode: top-1={} val={:.4} range=[{:.4}, {:.4}]",
-        holo_decode_top1.0, holo_decode_top1.1,
-        holo_decode_pos.iter().cloned().fold(f32::INFINITY, f32::min),
-        holo_decode_pos.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+    let holo_decode_top1 = holo_decode_pos
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .unwrap();
+    eprintln!(
+        "Hologram decode: top-1={} val={:.4} range=[{:.4}, {:.4}]",
+        holo_decode_top1.0,
+        holo_decode_top1.1,
+        holo_decode_pos
+            .iter()
+            .cloned()
+            .fold(f32::INFINITY, f32::min),
+        holo_decode_pos
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max)
+    );
 
     // Cosine similarity between decode logits.
-    let dot: f64 = ort_decode_pos.iter().zip(holo_decode_pos.iter())
-        .map(|(a, b)| *a as f64 * *b as f64).sum();
-    let n_ort: f64 = ort_decode_pos.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
-    let n_holo: f64 = holo_decode_pos.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
-    let cosine = if n_ort > 0.0 && n_holo > 0.0 { dot / (n_ort * n_holo) } else { 0.0 };
+    let dot: f64 = ort_decode_pos
+        .iter()
+        .zip(holo_decode_pos.iter())
+        .map(|(a, b)| *a as f64 * *b as f64)
+        .sum();
+    let n_ort: f64 = ort_decode_pos
+        .iter()
+        .map(|v| (*v as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let n_holo: f64 = holo_decode_pos
+        .iter()
+        .map(|v| (*v as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let cosine = if n_ort > 0.0 && n_holo > 0.0 {
+        dot / (n_ort * n_holo)
+    } else {
+        0.0
+    };
     eprintln!("Decode cosine: {cosine:.6}");
 
     assert!(cosine > 0.95, "Decode logits diverge: cosine={cosine:.6}");
@@ -2558,7 +2975,8 @@ fn tinyllama_decode_conformance() {
 fn tinyllama_layer0_conformance() {
     use hologram_ai_conformance::ort_runner::runner::{run_onnx_file_typed, OrtInputTyped};
 
-    let model_path = workspace_path("crates/hologram-ai-conformance/fixtures/tinyllama_layer0.onnx");
+    let model_path =
+        workspace_path("crates/hologram-ai-conformance/fixtures/tinyllama_layer0.onnx");
     if !model_path.exists() {
         eprintln!("SKIP: run python3 scripts/extract_tinyllama_probes.py first");
         return;
@@ -2572,19 +2990,29 @@ fn tinyllama_layer0_conformance() {
     let ort_outputs = run_onnx_file_typed(
         &model_path,
         vec![
-            OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, seq], data: input_ids.clone() },
-            OrtInputTyped::I64 { name: "attention_mask".into(), shape: vec![1, seq], data: attention_mask.clone() },
+            OrtInputTyped::I64 {
+                name: "input_ids".into(),
+                shape: vec![1, seq],
+                data: input_ids.clone(),
+            },
+            OrtInputTyped::I64 {
+                name: "attention_mask".into(),
+                shape: vec![1, seq],
+                data: attention_mask.clone(),
+            },
         ],
-    ).expect("ORT failed");
+    )
+    .expect("ORT failed");
     let ort_out = &ort_outputs[0].data;
-    eprintln!("ORT layer 0: {} floats, range=[{:.6}, {:.6}]",
+    eprintln!(
+        "ORT layer 0: {} floats, range=[{:.6}, {:.6}]",
         ort_out.len(),
         ort_out.iter().cloned().fold(f32::INFINITY, f32::min),
-        ort_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+        ort_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+    );
 
     // Hologram
     let compiler = ModelCompiler {
-        
         ..Default::default()
     };
     let archive = compiler
@@ -2596,22 +3024,30 @@ fn tinyllama_layer0_conformance() {
     let position_ids: Vec<i64> = (0..seq as i64).collect();
     let mut inputs = hologram::GraphInputs::new();
     inputs.set_with_shape(0, bytemuck::cast_slice(&input_ids).to_vec(), vec![1, seq]);
-    inputs.set_with_shape(1, bytemuck::cast_slice(&attention_mask).to_vec(), vec![1, seq]);
+    inputs.set_with_shape(
+        1,
+        bytemuck::cast_slice(&attention_mask).to_vec(),
+        vec![1, seq],
+    );
     inputs.set_with_shape(2, bytemuck::cast_slice(&position_ids).to_vec(), vec![seq]);
 
     // Use KV state (model has KvWrite ops from attention fusion)
     let mut kv = hologram::KvCacheState::new(1, 4, 64, seq + 8);
-    let holo_outputs = runner.execute_with_kv(&inputs, &mut kv)
+    let holo_outputs = runner
+        .execute_with_kv(&inputs, &mut kv)
         .expect("hologram execution failed");
     let (_, holo_bytes) = holo_outputs.get(0).expect("no output");
-    let holo_out: Vec<f32> = holo_bytes.chunks_exact(4)
+    let holo_out: Vec<f32> = holo_bytes
+        .chunks_exact(4)
         .map(|c| f32::from_le_bytes(c.try_into().expect("4")))
         .collect();
 
-    eprintln!("Holo layer 0: {} floats, range=[{:.6}, {:.6}]",
+    eprintln!(
+        "Holo layer 0: {} floats, range=[{:.6}, {:.6}]",
         holo_out.len(),
         holo_out.iter().cloned().fold(f32::INFINITY, f32::min),
-        holo_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+        holo_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+    );
 
     // Compare at position seq-1
     let hidden = 2048;
@@ -2620,21 +3056,43 @@ fn tinyllama_layer0_conformance() {
     let holo_slice = if holo_out.len() >= (target + 1) * hidden {
         &holo_out[target * hidden..(target + 1) * hidden]
     } else {
-        eprintln!("Hologram output too small: {} < {}", holo_out.len(), (target + 1) * hidden);
+        eprintln!(
+            "Hologram output too small: {} < {}",
+            holo_out.len(),
+            (target + 1) * hidden
+        );
         &holo_out[..hidden.min(holo_out.len())]
     };
 
     // Cosine similarity
-    let dot: f64 = ort_slice.iter().zip(holo_slice.iter())
-        .map(|(a, b)| *a as f64 * *b as f64).sum();
-    let n_ort: f64 = ort_slice.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
-    let n_holo: f64 = holo_slice.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
-    let cosine = if n_ort > 0.0 && n_holo > 0.0 { dot / (n_ort * n_holo) } else { 0.0 };
+    let dot: f64 = ort_slice
+        .iter()
+        .zip(holo_slice.iter())
+        .map(|(a, b)| *a as f64 * *b as f64)
+        .sum();
+    let n_ort: f64 = ort_slice
+        .iter()
+        .map(|v| (*v as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let n_holo: f64 = holo_slice
+        .iter()
+        .map(|v| (*v as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let cosine = if n_ort > 0.0 && n_holo > 0.0 {
+        dot / (n_ort * n_holo)
+    } else {
+        0.0
+    };
     eprintln!("Layer 0 cosine similarity: {cosine:.6}");
 
     // Max abs diff
-    let max_diff: f32 = ort_slice.iter().zip(holo_slice.iter())
-        .map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    let max_diff: f32 = ort_slice
+        .iter()
+        .zip(holo_slice.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
     eprintln!("Layer 0 max abs diff: {max_diff:.6}");
 
     assert!(cosine > 0.99, "Layer 0 diverges: cosine={cosine:.6}");
@@ -2658,8 +3116,13 @@ fn tinyllama_rmsnorm0_conformance() {
 
     let ort_outputs = run_onnx_file_typed(
         &model_path,
-        vec![OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, seq], data: input_ids.clone() }],
-    ).expect("ORT failed");
+        vec![OrtInputTyped::I64 {
+            name: "input_ids".into(),
+            shape: vec![1, seq],
+            data: input_ids.clone(),
+        }],
+    )
+    .expect("ORT failed");
     let ort_out = &ort_outputs[0].data;
 
     let compiler = ModelCompiler::default();
@@ -2671,23 +3134,32 @@ fn tinyllama_rmsnorm0_conformance() {
     let mut inputs = hologram::GraphInputs::new();
     inputs.set_with_shape(0, bytemuck::cast_slice(&input_ids).to_vec(), vec![1, seq]);
 
-    let holo_outputs = runner.execute(&inputs)
-        .expect("execution failed");
+    let holo_outputs = runner.execute(&inputs).expect("execution failed");
     let (_, holo_bytes) = holo_outputs.get(0).expect("no output");
-    let holo_out: Vec<f32> = holo_bytes.chunks_exact(4)
+    let holo_out: Vec<f32> = holo_bytes
+        .chunks_exact(4)
         .map(|c| f32::from_le_bytes(c.try_into().expect("4")))
         .collect();
 
-    eprintln!("ORT  norm0: {} floats, range=[{:.6}, {:.6}]", ort_out.len(),
+    eprintln!(
+        "ORT  norm0: {} floats, range=[{:.6}, {:.6}]",
+        ort_out.len(),
         ort_out.iter().cloned().fold(f32::INFINITY, f32::min),
-        ort_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
-    eprintln!("Holo norm0: {} floats, range=[{:.6}, {:.6}]", holo_out.len(),
+        ort_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+    );
+    eprintln!(
+        "Holo norm0: {} floats, range=[{:.6}, {:.6}]",
+        holo_out.len(),
         holo_out.iter().cloned().fold(f32::INFINITY, f32::min),
-        holo_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+        holo_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+    );
 
     let min_len = ort_out.len().min(holo_out.len());
-    let max_diff: f32 = ort_out[..min_len].iter().zip(holo_out[..min_len].iter())
-        .map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    let max_diff: f32 = ort_out[..min_len]
+        .iter()
+        .zip(holo_out[..min_len].iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
     eprintln!("RmsNorm0 max abs diff: {max_diff:.8}");
 
     assert!(max_diff < 1e-3, "RmsNorm0 diverges: max_diff={max_diff}");
@@ -2710,8 +3182,13 @@ fn tinyllama_embedding_conformance() {
 
     let ort_outputs = run_onnx_file_typed(
         &model_path,
-        vec![OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, seq], data: input_ids.clone() }],
-    ).expect("ORT failed");
+        vec![OrtInputTyped::I64 {
+            name: "input_ids".into(),
+            shape: vec![1, seq],
+            data: input_ids.clone(),
+        }],
+    )
+    .expect("ORT failed");
     let ort_out = &ort_outputs[0].data;
 
     let compiler = ModelCompiler::default();
@@ -2724,23 +3201,32 @@ fn tinyllama_embedding_conformance() {
     let mut inputs = hologram::GraphInputs::new();
     inputs.set_with_shape(0, bytemuck::cast_slice(&input_ids).to_vec(), vec![1, seq]);
 
-    let holo_outputs = runner.execute(&inputs)
-        .expect("execution failed");
+    let holo_outputs = runner.execute(&inputs).expect("execution failed");
     let (_, holo_bytes) = holo_outputs.get(0).expect("no output");
-    let holo_out: Vec<f32> = holo_bytes.chunks_exact(4)
+    let holo_out: Vec<f32> = holo_bytes
+        .chunks_exact(4)
         .map(|c| f32::from_le_bytes(c.try_into().expect("4")))
         .collect();
 
-    eprintln!("ORT  embed: {} floats, range=[{:.6}, {:.6}]", ort_out.len(),
+    eprintln!(
+        "ORT  embed: {} floats, range=[{:.6}, {:.6}]",
+        ort_out.len(),
         ort_out.iter().cloned().fold(f32::INFINITY, f32::min),
-        ort_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
-    eprintln!("Holo embed: {} floats, range=[{:.6}, {:.6}]", holo_out.len(),
+        ort_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+    );
+    eprintln!(
+        "Holo embed: {} floats, range=[{:.6}, {:.6}]",
+        holo_out.len(),
         holo_out.iter().cloned().fold(f32::INFINITY, f32::min),
-        holo_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+        holo_out.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+    );
 
     let min_len = ort_out.len().min(holo_out.len());
-    let max_diff: f32 = ort_out[..min_len].iter().zip(holo_out[..min_len].iter())
-        .map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    let max_diff: f32 = ort_out[..min_len]
+        .iter()
+        .zip(holo_out[..min_len].iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
     eprintln!("Max abs diff: {max_diff:.8}");
 
     assert!(max_diff < 1e-4, "Embedding diverges: max_diff={max_diff}");
@@ -2751,7 +3237,9 @@ fn tinyllama_embedding_conformance() {
 fn tinyllama_probe_compare(fixture: &str, needs_mask: bool, needs_kv: bool) -> (f64, f32) {
     use hologram_ai_conformance::ort_runner::runner::{run_onnx_file_typed, OrtInputTyped};
 
-    let model_path = workspace_path(&format!("crates/hologram-ai-conformance/fixtures/{fixture}"));
+    let model_path = workspace_path(&format!(
+        "crates/hologram-ai-conformance/fixtures/{fixture}"
+    ));
     if !model_path.exists() {
         eprintln!("SKIP: run python3 scripts/extract_tinyllama_probes.py first");
         return (1.0, 0.0); // skip = pass
@@ -2761,12 +3249,16 @@ fn tinyllama_probe_compare(fixture: &str, needs_mask: bool, needs_kv: bool) -> (
     let input_ids: Vec<i64> = (1..=seq as i64).collect();
     let attention_mask: Vec<i64> = vec![1; seq];
 
-    let mut ort_inputs = vec![
-        OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, seq], data: input_ids.clone() },
-    ];
+    let mut ort_inputs = vec![OrtInputTyped::I64 {
+        name: "input_ids".into(),
+        shape: vec![1, seq],
+        data: input_ids.clone(),
+    }];
     if needs_mask {
         ort_inputs.push(OrtInputTyped::I64 {
-            name: "attention_mask".into(), shape: vec![1, seq], data: attention_mask.clone(),
+            name: "attention_mask".into(),
+            shape: vec![1, seq],
+            data: attention_mask.clone(),
         });
     }
 
@@ -2774,18 +3266,23 @@ fn tinyllama_probe_compare(fixture: &str, needs_mask: bool, needs_kv: bool) -> (
     let ort_out = &ort_outputs[0].data;
 
     let compiler = ModelCompiler {
-        
         seq_len_override: Some(seq as u64),
         ..Default::default()
     };
-    let archive = compiler.compile(ModelSource::OnnxPath(model_path)).expect("compile failed");
+    let archive = compiler
+        .compile(ModelSource::OnnxPath(model_path))
+        .expect("compile failed");
     let runner = hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes).expect("runner");
 
     let position_ids: Vec<i64> = (0..seq as i64).collect();
     let mut inputs = hologram::GraphInputs::new();
     inputs.set_with_shape(0, bytemuck::cast_slice(&input_ids).to_vec(), vec![1, seq]);
     if needs_mask {
-        inputs.set_with_shape(1, bytemuck::cast_slice(&attention_mask).to_vec(), vec![1, seq]);
+        inputs.set_with_shape(
+            1,
+            bytemuck::cast_slice(&attention_mask).to_vec(),
+            vec![1, seq],
+        );
         inputs.set_with_shape(2, bytemuck::cast_slice(&position_ids).to_vec(), vec![seq]);
     }
 
@@ -2794,25 +3291,48 @@ fn tinyllama_probe_compare(fixture: &str, needs_mask: bool, needs_kv: bool) -> (
         runner.execute_with_kv(&inputs, &mut kv)
     } else {
         runner.execute(&inputs)
-    }.expect("execution failed");
+    }
+    .expect("execution failed");
 
     let (_, holo_bytes) = holo_outputs.get(0).expect("no output");
-    let holo_out: Vec<f32> = holo_bytes.chunks_exact(4)
+    let holo_out: Vec<f32> = holo_bytes
+        .chunks_exact(4)
         .map(|c| f32::from_le_bytes(c.try_into().expect("4")))
         .collect();
 
     // Compare first min(ort, holo) elements
     let n = ort_out.len().min(holo_out.len());
-    let dot: f64 = ort_out[..n].iter().zip(holo_out[..n].iter())
-        .map(|(a, b)| *a as f64 * *b as f64).sum();
-    let n_ort: f64 = ort_out[..n].iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
-    let n_holo: f64 = holo_out[..n].iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
-    let cosine = if n_ort > 0.0 && n_holo > 0.0 { dot / (n_ort * n_holo) } else { 0.0 };
-    let max_diff: f32 = ort_out[..n].iter().zip(holo_out[..n].iter())
-        .map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    let dot: f64 = ort_out[..n]
+        .iter()
+        .zip(holo_out[..n].iter())
+        .map(|(a, b)| *a as f64 * *b as f64)
+        .sum();
+    let n_ort: f64 = ort_out[..n]
+        .iter()
+        .map(|v| (*v as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let n_holo: f64 = holo_out[..n]
+        .iter()
+        .map(|v| (*v as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let cosine = if n_ort > 0.0 && n_holo > 0.0 {
+        dot / (n_ort * n_holo)
+    } else {
+        0.0
+    };
+    let max_diff: f32 = ort_out[..n]
+        .iter()
+        .zip(holo_out[..n].iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
 
-    eprintln!("{fixture}: ort={} holo={} cosine={cosine:.6} max_diff={max_diff:.6}",
-        ort_out.len(), holo_out.len());
+    eprintln!(
+        "{fixture}: ort={} holo={} cosine={cosine:.6} max_diff={max_diff:.6}",
+        ort_out.len(),
+        holo_out.len()
+    );
     (cosine, max_diff)
 }
 
@@ -2821,7 +3341,10 @@ fn tinyllama_probe_compare(fixture: &str, needs_mask: bool, needs_kv: bool) -> (
 #[ignore]
 fn tinyllama_qview0_conformance() {
     let (cosine, diff) = tinyllama_probe_compare("tinyllama_qview0.onnx", true, false);
-    assert!(cosine > 0.999, "Q Reshape diverges: cosine={cosine:.6} diff={diff}");
+    assert!(
+        cosine > 0.999,
+        "Q Reshape diverges: cosine={cosine:.6} diff={diff}"
+    );
 }
 
 /// Q MatMul only (before reshape/transpose).
@@ -2829,7 +3352,10 @@ fn tinyllama_qview0_conformance() {
 #[ignore]
 fn tinyllama_qmatmul0_conformance() {
     let (cosine, diff) = tinyllama_probe_compare("tinyllama_qmatmul0.onnx", false, false);
-    assert!(cosine > 0.999, "Q MatMul diverges: cosine={cosine:.6} diff={diff}");
+    assert!(
+        cosine > 0.999,
+        "Q MatMul diverges: cosine={cosine:.6} diff={diff}"
+    );
 }
 
 /// Q-projection (MatMul + Reshape + Transpose, before RoPE).
@@ -2837,7 +3363,10 @@ fn tinyllama_qmatmul0_conformance() {
 #[ignore]
 fn tinyllama_qproj0_conformance() {
     let (cosine, diff) = tinyllama_probe_compare("tinyllama_qproj0.onnx", true, false);
-    assert!(cosine > 0.999, "Q-proj diverges: cosine={cosine:.6} diff={diff}");
+    assert!(
+        cosine > 0.999,
+        "Q-proj diverges: cosine={cosine:.6} diff={diff}"
+    );
 }
 
 /// Q after RoPE application.
@@ -2845,7 +3374,10 @@ fn tinyllama_qproj0_conformance() {
 #[ignore]
 fn tinyllama_qrope0_conformance() {
     let (cosine, diff) = tinyllama_probe_compare("tinyllama_qrope0.onnx", true, false);
-    assert!(cosine > 0.999, "Q+RoPE diverges: cosine={cosine:.6} diff={diff}");
+    assert!(
+        cosine > 0.999,
+        "Q+RoPE diverges: cosine={cosine:.6} diff={diff}"
+    );
 }
 
 /// Output projection (full attention path, before residual add).
@@ -2853,7 +3385,10 @@ fn tinyllama_qrope0_conformance() {
 #[ignore]
 fn tinyllama_oproj0_conformance() {
     let (cosine, diff) = tinyllama_probe_compare("tinyllama_oproj0.onnx", true, true);
-    assert!(cosine > 0.99, "O-proj diverges: cosine={cosine:.6} diff={diff}");
+    assert!(
+        cosine > 0.99,
+        "O-proj diverges: cosine={cosine:.6} diff={diff}"
+    );
 }
 
 fn workspace_path(rel: &str) -> std::path::PathBuf {
@@ -2924,14 +3459,25 @@ fn resnet50_matches_ort() {
 
     // Hologram.
     let mut inputs = hologram::GraphInputs::new();
-    inputs.set_with_shape(0, bytemuck::cast_slice(&input_data).to_vec(), vec![1, 3, 224, 224]);
+    inputs.set_with_shape(
+        0,
+        bytemuck::cast_slice(&input_data).to_vec(),
+        vec![1, 3, 224, 224],
+    );
     let holo_out = compile_and_execute_file(&model, &inputs, None);
 
     // Compare.
-    let tol = Tolerance { atol: 1e-3, rtol: 5e-3 }; // vision models accumulate error
+    let tol = Tolerance {
+        atol: 1e-3,
+        rtol: 5e-3,
+    }; // vision models accumulate error
     let cmp = hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_out[0].data, tol);
     assert!(cmp.passed, "ResNet-50 mismatch: {}", cmp.message);
-    eprintln!("ResNet-50 conformance PASSED: {} outputs, max_diff={:.6}", holo_out.len(), cmp.max_abs_error);
+    eprintln!(
+        "ResNet-50 conformance PASSED: {} outputs, max_diff={:.6}",
+        holo_out.len(),
+        cmp.max_abs_error
+    );
 }
 
 /// BERT-base conformance: hologram output matches ORT on synthetic token IDs.
@@ -2957,9 +3503,21 @@ fn bert_matches_ort() {
     let ort_out = run_onnx_file_typed(
         &model,
         vec![
-            OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, seq_len], data: input_ids.clone() },
-            OrtInputTyped::I64 { name: "attention_mask".into(), shape: vec![1, seq_len], data: attention_mask.clone() },
-            OrtInputTyped::I64 { name: "token_type_ids".into(), shape: vec![1, seq_len], data: token_type_ids.clone() },
+            OrtInputTyped::I64 {
+                name: "input_ids".into(),
+                shape: vec![1, seq_len],
+                data: input_ids.clone(),
+            },
+            OrtInputTyped::I64 {
+                name: "attention_mask".into(),
+                shape: vec![1, seq_len],
+                data: attention_mask.clone(),
+            },
+            OrtInputTyped::I64 {
+                name: "token_type_ids".into(),
+                shape: vec![1, seq_len],
+                data: token_type_ids.clone(),
+            },
         ],
     )
     .expect("ORT failed");
@@ -2967,27 +3525,48 @@ fn bert_matches_ort() {
 
     // Hologram.
     let mut inputs = hologram::GraphInputs::new();
-    inputs.set_with_shape(0, bytemuck::cast_slice(&input_ids).to_vec(), vec![1, seq_len]);
-    inputs.set_with_shape(1, bytemuck::cast_slice(&attention_mask).to_vec(), vec![1, seq_len]);
-    inputs.set_with_shape(2, bytemuck::cast_slice(&token_type_ids).to_vec(), vec![1, seq_len]);
+    inputs.set_with_shape(
+        0,
+        bytemuck::cast_slice(&input_ids).to_vec(),
+        vec![1, seq_len],
+    );
+    inputs.set_with_shape(
+        1,
+        bytemuck::cast_slice(&attention_mask).to_vec(),
+        vec![1, seq_len],
+    );
+    inputs.set_with_shape(
+        2,
+        bytemuck::cast_slice(&token_type_ids).to_vec(),
+        vec![1, seq_len],
+    );
     let holo_out = compile_and_execute_file(&model, &inputs, Some(seq_len as u64));
 
     // BERT-base hidden_dim = 768. Output: [1, seq_len, 768].
     let expected_len = seq_len * 768;
     assert!(
         holo_out.len() >= expected_len,
-        "BERT output too small: {} < {expected_len}", holo_out.len()
+        "BERT output too small: {} < {expected_len}",
+        holo_out.len()
     );
 
     // Compare first output (last_hidden_state). Truncate to matching length.
     let ort_data = &ort_out[0].data;
     let compare_len = holo_out.len().min(ort_data.len());
-    let tol = Tolerance { atol: 1e-3, rtol: 5e-3 };
+    let tol = Tolerance {
+        atol: 1e-3,
+        rtol: 5e-3,
+    };
     let cmp = hologram_ai_conformance::tolerance::compare_outputs(
-        &holo_out[..compare_len], &ort_data[..compare_len], tol,
+        &holo_out[..compare_len],
+        &ort_data[..compare_len],
+        tol,
     );
     assert!(cmp.passed, "BERT mismatch: {}", cmp.message);
-    eprintln!("BERT conformance PASSED: {} outputs, max_diff={:.6}", compare_len, cmp.max_abs_error);
+    eprintln!(
+        "BERT conformance PASSED: {} outputs, max_diff={:.6}",
+        compare_len, cmp.max_abs_error
+    );
 }
 
 /// TinyLlama prefill conformance: logits at last position match ORT.
@@ -3012,8 +3591,16 @@ fn tinyllama_prefill_matches_ort() {
     let ort_out = run_onnx_file_typed(
         &model,
         vec![
-            OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, seq_len], data: input_ids.clone() },
-            OrtInputTyped::I64 { name: "attention_mask".into(), shape: vec![1, seq_len], data: attention_mask.clone() },
+            OrtInputTyped::I64 {
+                name: "input_ids".into(),
+                shape: vec![1, seq_len],
+                data: input_ids.clone(),
+            },
+            OrtInputTyped::I64 {
+                name: "attention_mask".into(),
+                shape: vec![1, seq_len],
+                data: attention_mask.clone(),
+            },
         ],
     )
     .expect("ORT failed");
@@ -3023,9 +3610,21 @@ fn tinyllama_prefill_matches_ort() {
     // and requires KV cache for LLM execution.
     let position_ids: Vec<i64> = (0..seq_len as i64).collect();
     let mut inputs = hologram::GraphInputs::new();
-    inputs.set_with_shape(0, bytemuck::cast_slice(&input_ids).to_vec(), vec![1, seq_len]);
-    inputs.set_with_shape(1, bytemuck::cast_slice(&attention_mask).to_vec(), vec![1, seq_len]);
-    inputs.set_with_shape(2, bytemuck::cast_slice(&position_ids).to_vec(), vec![1, seq_len]);
+    inputs.set_with_shape(
+        0,
+        bytemuck::cast_slice(&input_ids).to_vec(),
+        vec![1, seq_len],
+    );
+    inputs.set_with_shape(
+        1,
+        bytemuck::cast_slice(&attention_mask).to_vec(),
+        vec![1, seq_len],
+    );
+    inputs.set_with_shape(
+        2,
+        bytemuck::cast_slice(&position_ids).to_vec(),
+        vec![1, seq_len],
+    );
 
     // Compile and execute with KV cache (required for LLM models).
     let compiler = ModelCompiler {
@@ -3041,12 +3640,18 @@ fn tinyllama_prefill_matches_ort() {
     // Read n_layers, n_kv_heads, head_dim from model metadata.
     let meta = &archive.metadata;
     let n_layers = if meta.n_layers > 0 { meta.n_layers } else { 22 };
-    let n_kv_heads = if meta.n_kv_heads > 0 { meta.n_kv_heads } else { 4 };
+    let n_kv_heads = if meta.n_kv_heads > 0 {
+        meta.n_kv_heads
+    } else {
+        4
+    };
     let head_dim = if meta.head_dim > 0 { meta.head_dim } else { 64 };
     let max_seq = 2048usize;
 
     let mut kv = hologram::KvCacheState::new(n_layers, n_kv_heads, head_dim, max_seq);
-    let outputs = runner.execute_with_kv(&inputs, &mut kv).expect("execution failed");
+    let outputs = runner
+        .execute_with_kv(&inputs, &mut kv)
+        .expect("execution failed");
     let (_, out_bytes) = outputs.get(0).expect("no output");
     let holo_out: Vec<f32> = out_bytes
         .chunks_exact(4)
@@ -3058,7 +3663,8 @@ fn tinyllama_prefill_matches_ort() {
     let expected_len = seq_len * vocab;
     assert!(
         holo_out.len() >= expected_len,
-        "TinyLlama output too small: {} < {expected_len}", holo_out.len()
+        "TinyLlama output too small: {} < {expected_len}",
+        holo_out.len()
     );
 
     // Compare logits at last position (most meaningful for autoregressive).
@@ -3067,16 +3673,45 @@ fn tinyllama_prefill_matches_ort() {
     let ort_logits = &ort_out[0].data[last_pos * vocab..(last_pos + 1) * vocab];
 
     // Cosine similarity — more robust than element-wise for high-dimensional logits.
-    let dot: f64 = holo_logits.iter().zip(ort_logits).map(|(&a, &b)| a as f64 * b as f64).sum();
-    let norm_h: f64 = holo_logits.iter().map(|&v| (v as f64).powi(2)).sum::<f64>().sqrt();
-    let norm_o: f64 = ort_logits.iter().map(|&v| (v as f64).powi(2)).sum::<f64>().sqrt();
-    let cosine = if norm_h > 0.0 && norm_o > 0.0 { dot / (norm_h * norm_o) } else { 0.0 };
+    let dot: f64 = holo_logits
+        .iter()
+        .zip(ort_logits)
+        .map(|(&a, &b)| a as f64 * b as f64)
+        .sum();
+    let norm_h: f64 = holo_logits
+        .iter()
+        .map(|&v| (v as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let norm_o: f64 = ort_logits
+        .iter()
+        .map(|&v| (v as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let cosine = if norm_h > 0.0 && norm_o > 0.0 {
+        dot / (norm_h * norm_o)
+    } else {
+        0.0
+    };
 
     // Also check argmax (top prediction).
-    let holo_argmax = holo_logits.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i, _)| i).unwrap_or(0);
-    let ort_argmax = ort_logits.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i, _)| i).unwrap_or(0);
+    let holo_argmax = holo_logits
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let ort_argmax = ort_logits
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .map(|(i, _)| i)
+        .unwrap_or(0);
 
     eprintln!("TinyLlama prefill conformance: cosine={cosine:.6}, holo_argmax={holo_argmax}, ort_argmax={ort_argmax}");
     assert!(cosine > 0.99, "TinyLlama logit cosine too low: {cosine:.6}");
-    assert_eq!(holo_argmax, ort_argmax, "TinyLlama top prediction differs: holo={holo_argmax} ort={ort_argmax}");
+    assert_eq!(
+        holo_argmax, ort_argmax,
+        "TinyLlama top prediction differs: holo={holo_argmax} ort={ort_argmax}"
+    );
 }

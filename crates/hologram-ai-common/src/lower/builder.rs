@@ -154,7 +154,13 @@ pub fn lower(
     let mut _hidden_size: usize = 0;
     if do_early_quant {
         for n in &ai_graph.nodes {
-            if let AiOp::GroupedQueryAttention { num_heads, num_kv_heads, head_dim, .. } = &n.op {
+            if let AiOp::GroupedQueryAttention {
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                ..
+            } = &n.op
+            {
                 let q_dim = *num_heads as usize * *head_dim as usize;
                 let kv_dim = *num_kv_heads as usize * *head_dim as usize;
                 attn_n_dims.extend_from_slice(&[q_dim, kv_dim, q_dim + 2 * kv_dim]);
@@ -186,7 +192,9 @@ pub fn lower(
                         // Must be input[1] of MatMul/Gemm/FusedNormProjection
                         match &n.op {
                             AiOp::MatMul | AiOp::Gemm { .. } => pos == 1,
-                            AiOp::FusedNormProjection { has_residual_add, .. } => {
+                            AiOp::FusedNormProjection {
+                                has_residual_add, ..
+                            } => {
                                 let w_start = if *has_residual_add { 3 } else { 2 };
                                 pos >= w_start
                             }
@@ -226,7 +234,8 @@ pub fn lower(
                                 // in early_quant_bytes, used by matmul_lut_4bit().
                                 // The placeholder constant takes no archive space.
                                 let placeholder = ConstantData::Bytes(vec![]);
-                                builder = builder.constant_with_shape(placeholder, vec![dims[0], dims[1]]);
+                                builder = builder
+                                    .constant_with_shape(placeholder, vec![dims[0], dims[1]]);
                                 let builder_idx = builder.len() - 1;
                                 tid_to_idx.insert(tid, builder_idx);
                                 continue;
@@ -266,19 +275,25 @@ pub fn lower(
                 crate::ir::AiParam::Mmap { info, .. } => info,
             };
             // Use tensor_info shape with 0-sentinels for symbolic dims (same as output_shape).
-            let shape_from_info = output_shape(Some(&tid), &ai_graph.tensor_info)
-                .or_else(|| {
-                    if !info.shape.is_empty() {
-                        Some(info.shape.iter().map(|d| match d {
-                            Dim::Concrete(n) => *n as usize,
-                            _ => 0,
-                        }).collect())
-                    } else {
-                        None
-                    }
-                });
+            let shape_from_info = output_shape(Some(&tid), &ai_graph.tensor_info).or_else(|| {
+                if !info.shape.is_empty() {
+                    Some(
+                        info.shape
+                            .iter()
+                            .map(|d| match d {
+                                Dim::Concrete(n) => *n as usize,
+                                _ => 0,
+                            })
+                            .collect(),
+                    )
+                } else {
+                    None
+                }
+            });
             if let Some(shape) = shape_from_info {
-                tracing::warn!("param_shape failed for T{tid}, using output_shape with sentinels: {shape:?}");
+                tracing::warn!(
+                    "param_shape failed for T{tid}, using output_shape with sentinels: {shape:?}"
+                );
                 builder = builder.constant_with_shape(constant, shape);
             } else {
                 // Last resort: 1-D shape from byte size / dtype elem size.
@@ -346,18 +361,17 @@ pub fn lower(
             .inputs
             .iter()
             .map(|tid| {
-                tid_to_idx
-                    .get(tid)
-                    .copied()
-                    .with_context(|| {
-                        let tensor_name = ai_graph.tensor_names.get(tid)
-                            .map(|s| s.as_str())
-                            .unwrap_or("?");
-                        format!(
-                            "missing builder index for tensor {} '{}' (referenced by node id={})",
-                            tid, tensor_name, node.id,
-                        )
-                    })
+                tid_to_idx.get(tid).copied().with_context(|| {
+                    let tensor_name = ai_graph
+                        .tensor_names
+                        .get(tid)
+                        .map(|s| s.as_str())
+                        .unwrap_or("?");
+                    format!(
+                        "missing builder index for tensor {} '{}' (referenced by node id={})",
+                        tid, tensor_name, node.id,
+                    )
+                })
             })
             .collect::<anyhow::Result<_>>()?;
 
@@ -423,7 +437,11 @@ pub fn lower(
                     if let Some(ref s) = shape {
                         builder = builder.set_node_shape(idx, s.clone());
                     } else {
-                        tracing::warn!("no shape for GraphOp node {} (AiOp {:?}, T{tid}, idx={idx})", node.id, node.op);
+                        tracing::warn!(
+                            "no shape for GraphOp node {} (AiOp {:?}, T{tid}, idx={idx})",
+                            node.id,
+                            node.op
+                        );
                     }
                     let dtype = input_float_dtype(Some(&tid), &ai_graph.tensor_info);
                     builder = builder.set_node_dtype(idx, dtype);
@@ -478,11 +496,8 @@ pub fn lower(
                 // If the strategy produced a Gemm with quant_b=1 (Q4_0),
                 // convert to MatMulLut4 using the hologram LUT-GEMM kernel.
                 if let GraphOp::Float(FloatOp::Gemm { quant_b: 1, .. }) = &result.graph_op {
-                    if let Some(lut_result) = try_convert_q4_0_to_lut4(
-                        node,
-                        ai_graph,
-                        &input_idxs,
-                    )? {
+                    if let Some(lut_result) = try_convert_q4_0_to_lut4(node, ai_graph, &input_idxs)?
+                    {
                         builder = builder.matmul_lut_4bit(
                             ConstantData::Bytes(lut_result.serialized_weights),
                             &[input_idxs[0]], // activation input only
@@ -545,7 +560,10 @@ pub fn lower(
                 // ── Early-quant interception in FloatNeedsShape ──────────
                 // If this node's weight was early-quantized, emit MatMulLut4.
                 // This catches MatMuls that the top-level interception missed.
-                if matches!(result.graph_op, GraphOp::Float(FloatOp::MatMul { .. }) | GraphOp::Float(FloatOp::Gemm { .. })) {
+                if matches!(
+                    result.graph_op,
+                    GraphOp::Float(FloatOp::MatMul { .. }) | GraphOp::Float(FloatOp::Gemm { .. })
+                ) {
                     let weight_tid = node.inputs.get(1).copied();
                     if let Some(wt) = weight_tid {
                         if let Some(q4_bytes) = early_quant_bytes.get(&wt) {
@@ -574,7 +592,13 @@ pub fn lower(
                 let mut attn_dims: Vec<usize> = Vec::new();
                 let mut hidden_size: Option<usize> = None;
                 for n in &ai_graph.nodes {
-                    if let AiOp::GroupedQueryAttention { num_heads, num_kv_heads, head_dim, .. } = &n.op {
+                    if let AiOp::GroupedQueryAttention {
+                        num_heads,
+                        num_kv_heads,
+                        head_dim,
+                        ..
+                    } = &n.op
+                    {
                         let q_dim = *num_heads as usize * *head_dim as usize;
                         let kv_dim = *num_kv_heads as usize * *head_dim as usize;
                         attn_dims.extend_from_slice(&[q_dim, kv_dim, q_dim + 2 * kv_dim]);
@@ -582,20 +606,18 @@ pub fn lower(
                     }
                 }
                 let h = hidden_size.unwrap_or(0);
-                let feeds_attention = if let GraphOp::Float(FloatOp::MatMul { k, n, .. }) = &result.graph_op {
-                    attn_dims.contains(&(*n as usize)) && (*k as usize == h || *k == 0)
-                } else {
-                    false
-                };
+                let feeds_attention =
+                    if let GraphOp::Float(FloatOp::MatMul { k, n, .. }) = &result.graph_op {
+                        attn_dims.contains(&(*n as usize)) && (*k as usize == h || *k == 0)
+                    } else {
+                        false
+                    };
                 if matches!(opts.quant_strategy, QuantStrategy::Q4_0)
                     && matches!(result.graph_op, GraphOp::Float(FloatOp::MatMul { .. }))
                     && !feeds_attention
                 {
-                    if let Some(lut_result) = try_convert_f32_to_lut4(
-                        node,
-                        ai_graph,
-                        &input_idxs,
-                    )? {
+                    if let Some(lut_result) = try_convert_f32_to_lut4(node, ai_graph, &input_idxs)?
+                    {
                         builder = builder.matmul_lut_4bit(
                             ConstantData::Bytes(lut_result.serialized_weights),
                             &[input_idxs[0]],
@@ -620,11 +642,8 @@ pub fn lower(
                     && matches!(result.graph_op, GraphOp::Float(FloatOp::MatMul { .. }))
                     && !feeds_attention
                 {
-                    if let Some(lut_result) = try_convert_f32_to_lut2(
-                        node,
-                        ai_graph,
-                        &input_idxs,
-                    )? {
+                    if let Some(lut_result) = try_convert_f32_to_lut2(node, ai_graph, &input_idxs)?
+                    {
                         builder = builder.matmul_lut_2bit(
                             ConstantData::Bytes(lut_result.serialized_weights),
                             &[input_idxs[0]],
@@ -654,11 +673,8 @@ pub fn lower(
                     && matches!(result.graph_op, GraphOp::Float(FloatOp::MatMul { .. }))
                     && !feeds_attention
                 {
-                    if let Some(lut_result) = try_convert_f32_to_lut8(
-                        node,
-                        ai_graph,
-                        &input_idxs,
-                    )? {
+                    if let Some(lut_result) = try_convert_f32_to_lut8(node, ai_graph, &input_idxs)?
+                    {
                         builder = builder.matmul_lut_8bit(
                             ConstantData::Bytes(lut_result.serialized_weights),
                             &[input_idxs[0]],
@@ -686,22 +702,36 @@ pub fn lower(
                 // ── Conv2d LUT-GEMM interception ─────────────────────────────
                 // Pre-quantize Conv2d weights at compile time for zero runtime overhead.
                 if let GraphOp::Float(FloatOp::Conv2d {
-                    kernel_h, kernel_w, stride_h, stride_w,
-                    pad_h, pad_w, dilation_h, dilation_w,
-                    group, input_h, input_w,
+                    kernel_h,
+                    kernel_w,
+                    stride_h,
+                    stride_w,
+                    pad_h,
+                    pad_w,
+                    dilation_h,
+                    dilation_w,
+                    group,
+                    input_h,
+                    input_w,
                 }) = &result.graph_op
                 {
-                    if let Some(lut_result) = try_convert_conv2d_to_lut4(
-                        node, ai_graph, *kernel_h, *kernel_w, *group,
-                    )? {
+                    if let Some(lut_result) =
+                        try_convert_conv2d_to_lut4(node, ai_graph, *kernel_h, *kernel_w, *group)?
+                    {
                         builder = builder.conv2d_lut_4bit(
                             ConstantData::Bytes(lut_result.serialized_weights),
                             &input_idxs,
-                            *kernel_h, *kernel_w,
-                            *stride_h, *stride_w,
-                            *pad_h, *pad_w,
-                            *dilation_h, *dilation_w,
-                            *group, *input_h, *input_w,
+                            *kernel_h,
+                            *kernel_w,
+                            *stride_h,
+                            *stride_w,
+                            *pad_h,
+                            *pad_w,
+                            *dilation_h,
+                            *dilation_w,
+                            *group,
+                            *input_h,
+                            *input_w,
                         );
                         let idx = builder.len() - 1;
                         if let Some(&tid) = node.outputs.first() {
@@ -728,9 +758,11 @@ pub fn lower(
                 // base op's shape semantics (e.g., MatMul for FusedMatMulActivation).
                 let float_op_for_spec: Option<FloatOp> = match &result.graph_op {
                     GraphOp::Float(fop) => Some(*fop),
-                    GraphOp::FusedMatMulActivation { m, k, n, .. } => {
-                        Some(FloatOp::MatMul { m: *m, k: *k, n: *n })
-                    }
+                    GraphOp::FusedMatMulActivation { m, k, n, .. } => Some(FloatOp::MatMul {
+                        m: *m,
+                        k: *k,
+                        n: *n,
+                    }),
                     _ => None,
                 };
 
@@ -782,10 +814,8 @@ pub fn lower(
                             // Shape-changing identity op (Unsqueeze, Squeeze, etc.):
                             // emit a Reshape node so the ShapeContextGraph has full
                             // coverage and the walker can propagate shapes through.
-                            builder = builder.node_with_inputs(
-                                GraphOp::Float(FloatOp::Reshape),
-                                &[in_idx],
-                            );
+                            builder = builder
+                                .node_with_inputs(GraphOp::Float(FloatOp::Reshape), &[in_idx]);
                             let idx = builder.len() - 1;
                             if let Some(ref s) = out_shape_val {
                                 builder = builder.set_node_shape(idx, s.clone());
@@ -816,7 +846,12 @@ pub fn lower(
                 // FusedNormProjection → 1 norm node + N MatMul nodes.
                 // Each projection weight is a separate input; the norm output
                 // lives in the arena and is shared by all N projections.
-                if let AiOp::FusedNormProjection { epsilon, split_sizes, has_residual_add } = &node.op {
+                if let AiOp::FusedNormProjection {
+                    epsilon,
+                    split_sizes,
+                    has_residual_add,
+                } = &node.op
+                {
                     let eps_bits = hologram::f32_to_bits(*epsilon as f32);
 
                     // Input layout:
@@ -826,16 +861,24 @@ pub fn lower(
                     let n_projections = split_sizes.len();
 
                     // Step 1: Emit the norm node.
-                    let norm_size = node.inputs.first()
+                    let norm_size = node
+                        .inputs
+                        .first()
                         .and_then(|tid| ai_graph.tensor_info.get(tid))
                         .and_then(|info| info.shape.last())
                         .and_then(|d| d.evaluate())
                         .unwrap_or(0) as u32;
 
                     let norm_op = if *has_residual_add {
-                        GraphOp::Float(FloatOp::AddRmsNorm { size: norm_size, epsilon: eps_bits })
+                        GraphOp::Float(FloatOp::AddRmsNorm {
+                            size: norm_size,
+                            epsilon: eps_bits,
+                        })
                     } else {
-                        GraphOp::Float(FloatOp::RmsNorm { size: norm_size, epsilon: eps_bits })
+                        GraphOp::Float(FloatOp::RmsNorm {
+                            size: norm_size,
+                            epsilon: eps_bits,
+                        })
                     };
                     let norm_inputs: Vec<usize> = if *has_residual_add {
                         // [x, residual, norm_weight]
@@ -848,16 +891,24 @@ pub fn lower(
                     let norm_idx = builder.len() - 1;
 
                     // Set norm output shape (same as x).
-                    if let Some(x_shape) = output_shape(node.inputs.first(), &ai_graph.tensor_info) {
+                    if let Some(x_shape) = output_shape(node.inputs.first(), &ai_graph.tensor_info)
+                    {
                         builder = builder.set_node_shape(norm_idx, x_shape);
                     }
                     let norm_dtype = input_float_dtype(node.inputs.first(), &ai_graph.tensor_info);
                     builder = builder.set_node_dtype(norm_idx, norm_dtype);
 
                     // Collect attention dims for Q4 eligibility (same as FloatNeedsShape path).
-                    let _proj_attn_dims: Vec<usize> = ai_graph.nodes.iter()
+                    let _proj_attn_dims: Vec<usize> = ai_graph
+                        .nodes
+                        .iter()
                         .filter_map(|n| match &n.op {
-                            AiOp::GroupedQueryAttention { num_heads, num_kv_heads, head_dim, .. } => {
+                            AiOp::GroupedQueryAttention {
+                                num_heads,
+                                num_kv_heads,
+                                head_dim,
+                                ..
+                            } => {
                                 let q_dim = *num_heads as usize * *head_dim as usize;
                                 let kv_dim = *num_kv_heads as usize * *head_dim as usize;
                                 Some(vec![q_dim, kv_dim, q_dim + 2 * kv_dim])
@@ -871,9 +922,13 @@ pub fn lower(
                     // Each projection may be Q4-quantized if eligible.
                     // Skip Q4 for attention projections (Q/K/V) — quality-sensitive.
                     for (i, &out_tid) in node.outputs.iter().enumerate() {
-                        if i >= n_projections { break; }
+                        if i >= n_projections {
+                            break;
+                        }
                         let weight_input_pos = weight_start + i;
-                        if weight_input_pos >= input_idxs.len() { break; }
+                        if weight_input_pos >= input_idxs.len() {
+                            break;
+                        }
                         let weight_tid = node.inputs[weight_input_pos];
 
                         // Check if this weight was early-quantized at registration.
@@ -935,13 +990,21 @@ pub fn lower(
                     );
                     let in_idx = input_idxs[0];
                     // Normalize axis: get input ndim from tensor_info.
-                    let ndim = node.inputs.first()
+                    let ndim = node
+                        .inputs
+                        .first()
                         .and_then(|tid| ai_graph.tensor_info.get(tid))
                         .map(|info| info.shape.len())
                         .unwrap_or(4);
-                    let norm_axis = if *axis < 0 { (ndim as i64 + *axis) as usize } else { *axis as usize };
+                    let norm_axis = if *axis < 0 {
+                        (ndim as i64 + *axis) as usize
+                    } else {
+                        *axis as usize
+                    };
                     // Get the axis size from tensor_info for axis_size param.
-                    let full_axis_size = node.inputs.first()
+                    let full_axis_size = node
+                        .inputs
+                        .first()
                         .and_then(|tid| ai_graph.tensor_info.get(tid))
                         .and_then(|info| info.shape.get(norm_axis))
                         .and_then(|d| d.evaluate())
@@ -972,10 +1035,7 @@ pub fn lower(
                             end,
                             axis_size: full_axis_size,
                         };
-                        builder = builder.node_with_inputs(
-                            GraphOp::Float(slice_op),
-                            &[in_idx],
-                        );
+                        builder = builder.node_with_inputs(GraphOp::Float(slice_op), &[in_idx]);
                         let idx = builder.len() - 1;
                         if let Some(&out_tid) = node.outputs.get(i) {
                             let out_shape = output_shape(Some(&out_tid), &ai_graph.tensor_info);
@@ -1077,7 +1137,13 @@ fn lower_subgraph_op(
         AiOp::If {
             then_branch,
             else_branch,
-        } => lower_if_op(node, input_idxs, then_branch, else_branch.as_deref(), &mut ctx),
+        } => lower_if_op(
+            node,
+            input_idxs,
+            then_branch,
+            else_branch.as_deref(),
+            &mut ctx,
+        ),
         AiOp::Loop {
             body,
             max_trip_count,
@@ -1092,9 +1158,9 @@ fn lower_subgraph_op(
                 .get(body)
                 .with_context(|| format!("Scan body subgraph '{body}' not found"))?;
             let lowered = lower(child, ctx.kv_layout, ctx.opts, ctx.phase)?;
-            let sub_id =
-                ctx.builder
-                    .subgraph_with_id(SubgraphDef::new(body.clone(), lowered.graph));
+            let sub_id = ctx
+                .builder
+                .subgraph_with_id(SubgraphDef::new(body.clone(), lowered.graph));
             *ctx.builder = std::mem::take(ctx.builder).node_with_inputs(
                 GraphOp::CallSubgraph(sub_id),
                 &input_idxs[..1.min(input_idxs.len())],
@@ -1110,7 +1176,10 @@ fn lower_subgraph_op(
             );
             Ok(())
         }
-        _ => anyhow::bail!("lower_subgraph_op called with non-subgraph op: {:?}", node.op),
+        _ => anyhow::bail!(
+            "lower_subgraph_op called with non-subgraph op: {:?}",
+            node.op
+        ),
     }
 }
 
@@ -1135,9 +1204,10 @@ fn lower_if_op(
         .get(then_branch)
         .with_context(|| format!("If then_branch subgraph '{then_branch}' not found"))?;
     let then_lowered = lower(then_child, ctx.kv_layout, ctx.opts, ctx.phase)?;
-    let then_sub_id = ctx
-        .builder
-        .subgraph_with_id(SubgraphDef::new(then_branch.to_string(), then_lowered.graph));
+    let then_sub_id = ctx.builder.subgraph_with_id(SubgraphDef::new(
+        then_branch.to_string(),
+        then_lowered.graph,
+    ));
     let bindings: Vec<(u32, usize)> = feed_idxs
         .iter()
         .enumerate()
@@ -1294,7 +1364,9 @@ fn lower_loop_op(
             *ctx.builder = std::mem::take(ctx.builder).set_node_dtype(idx, dtype);
             ctx.tid_to_idx.insert(tid, idx);
         }
-        tracing::warn!("Loop with dynamic trip count lowered to CallSubgraph — requires runtime dispatch");
+        tracing::warn!(
+            "Loop with dynamic trip count lowered to CallSubgraph — requires runtime dispatch"
+        );
     }
 
     Ok(())
@@ -1657,10 +1729,14 @@ fn try_convert_q4_0_to_lut4(
     // For trans_b=true Gemm, weight shape is [n, k] (transposed).
     let trans_b = matches!(node.op, AiOp::Gemm { trans_b: true, .. });
     let (rows, cols) = {
-        let dims: Vec<usize> = info.shape.iter().filter_map(|d| match d {
-            Dim::Concrete(n) => Some(*n as usize),
-            _ => None,
-        }).collect();
+        let dims: Vec<usize> = info
+            .shape
+            .iter()
+            .filter_map(|d| match d {
+                Dim::Concrete(n) => Some(*n as usize),
+                _ => None,
+            })
+            .collect();
         if dims.len() >= 2 {
             if trans_b {
                 // Weight stored as [n, k]; we need [k, n] for LUT-GEMM.
@@ -1690,11 +1766,11 @@ fn try_convert_q4_0_to_lut4(
     let f32_for_kmeans = if trans_b {
         let n = cols; // after our swap: cols = original dim[0]
         let k = rows; // rows = original dim[1]
-        // Original layout: [cols_orig, rows_orig] = [n, k] (since we swapped above)
-        // Wait — let's be precise. Original dims[0]=n_orig, dims[1]=k_orig.
-        // trans_b means weight is [n, k]. We set rows=k, cols=n.
-        // f32_weights is in row-major [n, k] order (n_orig rows of k_orig cols).
-        // quantize_4bit expects [rows, cols] = [k, n], so transpose.
+                      // Original layout: [cols_orig, rows_orig] = [n, k] (since we swapped above)
+                      // Wait — let's be precise. Original dims[0]=n_orig, dims[1]=k_orig.
+                      // trans_b means weight is [n, k]. We set rows=k, cols=n.
+                      // f32_weights is in row-major [n, k] order (n_orig rows of k_orig cols).
+                      // quantize_4bit expects [rows, cols] = [k, n], so transpose.
         let mut transposed = vec![0.0f32; k * n];
         for i in 0..n {
             for j in 0..k {

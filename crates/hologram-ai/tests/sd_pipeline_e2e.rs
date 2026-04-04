@@ -92,12 +92,14 @@ fn ensure_compiled_full(
 
 fn load_model(
     holo_path: &std::path::Path,
-) -> (hologram::HoloLoader, hologram::LoadedPlan, hologram::hologram_exec::tape::EnumTape) {
+) -> (
+    hologram::HoloLoader,
+    hologram::LoadedPlan,
+    hologram::hologram_exec::tape::EnumTape,
+) {
     let loader = hologram::HoloLoader::open(holo_path).expect("mmap open failed");
-    let pipeline = unsafe {
-        hologram::LoadedPipeline::from_bytes_zero_copy(loader.as_bytes())
-    }
-    .expect("loading pipeline failed");
+    let pipeline = unsafe { hologram::LoadedPipeline::from_bytes_zero_copy(loader.as_bytes()) }
+        .expect("loading pipeline failed");
     let plan = pipeline.into_first_model().expect("no model in pipeline");
     let tape = hologram::build_tape_from_plan(&plan).expect("building tape");
     (loader, plan, tape)
@@ -153,12 +155,7 @@ fn ddpm_timesteps(n_steps: usize) -> Vec<usize> {
 /// Given x_t at timestep t and noise prediction eps:
 ///   x0_pred = (x_t - sqrt(1 - alpha_bar_t) * eps) / sqrt(alpha_bar_t)
 ///   x_{t-1} = sqrt(alpha_bar_{t-1}) * x0_pred + sqrt(1 - alpha_bar_{t-1}) * eps
-fn ddim_step(
-    latent: &mut [f32],
-    noise_pred: &[f32],
-    alpha_bar_t: f32,
-    alpha_bar_prev: f32,
-) {
+fn ddim_step(latent: &mut [f32], noise_pred: &[f32], alpha_bar_t: f32, alpha_bar_prev: f32) {
     let sqrt_ab = alpha_bar_t.sqrt();
     let sqrt_1m_ab = (1.0 - alpha_bar_t).sqrt();
     let sqrt_ab_prev = alpha_bar_prev.sqrt();
@@ -182,8 +179,8 @@ fn tokenize_clip(prompt: &str) -> Vec<i64> {
     use hologram_ai_tokenizer::{NativeTokenizer, Tokenizer};
 
     let tokenizer_path = workspace_path("models/stable-diffusion-v1-5/tokenizer.json");
-    let tokenizer = NativeTokenizer::from_tokenizer_json(&tokenizer_path)
-        .expect("loading CLIP tokenizer");
+    let tokenizer =
+        NativeTokenizer::from_tokenizer_json(&tokenizer_path).expect("loading CLIP tokenizer");
 
     let mut ids: Vec<u32> = tokenizer.encode(prompt);
 
@@ -248,7 +245,12 @@ fn sd_pipeline_generates_image() {
     );
     assert!(ensure_compiled(&unet_onnx(), &unet_holo()));
     // VAE at spatial_scale=2: 256×256 output, ~3GB peak memory.
-    assert!(ensure_compiled_with(&vae_onnx(), &vae_holo(), None, Some(2)));
+    assert!(ensure_compiled_with(
+        &vae_onnx(),
+        &vae_holo(),
+        None,
+        Some(2)
+    ));
     eprintln!("all 3 components compiled");
 
     let total_start = std::time::Instant::now();
@@ -284,7 +286,11 @@ fn sd_pipeline_generates_image() {
     let hs_min = hidden_77_768.iter().cloned().fold(f32::MAX, f32::min);
     let hs_max = hidden_77_768.iter().cloned().fold(f32::MIN, f32::max);
     let hs_mean = hidden_77_768.iter().sum::<f32>() / hidden_77_768.len() as f32;
-    eprintln!("hidden states: {} floats (using {} for UNet)", hidden_states.len(), clip_len);
+    eprintln!(
+        "hidden states: {} floats (using {} for UNet)",
+        hidden_states.len(),
+        clip_len
+    );
     eprintln!("  min={hs_min:.4} max={hs_max:.4} mean={hs_mean:.6}");
 
     // ── Step 3: UNet Denoising Loop ───────────────────────────────────────
@@ -299,7 +305,9 @@ fn sd_pipeline_generates_image() {
     let mut latent: Vec<f32> = (0..latent_len)
         .map(|i| {
             // Simple LCG PRNG → approximate Gaussian via Box-Muller.
-            let s1 = (i as u64).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let s1 = (i as u64)
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let s2 = s1.wrapping_mul(6364136223846793005).wrapping_add(1);
             let u1 = (s1 >> 11) as f32 / (1u64 << 53) as f32 + 1e-10;
             let u2 = (s2 >> 11) as f32 / (1u64 << 53) as f32;
@@ -360,7 +368,12 @@ fn sd_pipeline_generates_image() {
         let step_time = step_start.elapsed();
 
         if noise_pred.len() >= latent_len {
-            ddim_step(&mut latent, &noise_pred[..latent_len], alpha_bar_t, alpha_bar_prev);
+            ddim_step(
+                &mut latent,
+                &noise_pred[..latent_len],
+                alpha_bar_t,
+                alpha_bar_prev,
+            );
         }
 
         if step_idx < 3 || step_idx == n_steps - 1 {
@@ -417,6 +430,10 @@ fn sd_pipeline_generates_image() {
 
     // Verify output exists and is reasonable size.
     let meta = std::fs::metadata(&output_path()).expect("output file missing");
-    assert!(meta.len() > 1000, "output file too small: {} bytes", meta.len());
+    assert!(
+        meta.len() > 1000,
+        "output file too small: {} bytes",
+        meta.len()
+    );
     eprintln!("SD pipeline complete: {} bytes", meta.len());
 }

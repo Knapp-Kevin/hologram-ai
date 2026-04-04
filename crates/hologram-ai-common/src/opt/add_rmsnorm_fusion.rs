@@ -216,7 +216,11 @@ mod tests {
         ];
 
         let result = AddRmsNormFusion.run(g).expect("pass should succeed");
-        assert_eq!(result.nodes.len(), 3, "no fusion when Add has multiple consumers");
+        assert_eq!(
+            result.nodes.len(),
+            3,
+            "no fusion when Add has multiple consumers"
+        );
     }
 
     #[test]
@@ -251,7 +255,13 @@ mod tests {
 
         let result = AddRmsNormFusion.run(g).expect("pass should succeed");
         assert_eq!(result.nodes.len(), 2, "both layers should be fused");
-        assert!(matches!(result.nodes[0].op, AiOp::FusedLayerNormResidual { .. }));
-        assert!(matches!(result.nodes[1].op, AiOp::FusedLayerNormResidual { .. }));
+        assert!(matches!(
+            result.nodes[0].op,
+            AiOp::FusedLayerNormResidual { .. }
+        ));
+        assert!(matches!(
+            result.nodes[1].op,
+            AiOp::FusedLayerNormResidual { .. }
+        ));
     }
 }

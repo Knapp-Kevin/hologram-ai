@@ -63,7 +63,9 @@ fn mini_transformer_variable_seq_len_runs() {
             .compile(hologram_ai::ModelSource::OnnxBytes(model_bytes.clone()))
             .unwrap_or_else(|e| panic!("mini transformer compilation for seq={seq} failed: {e}"));
 
-        let x: Vec<f32> = (0..seq * MINI_HIDDEN).map(|i| (i as f32) * 0.01 - 0.32).collect();
+        let x: Vec<f32> = (0..seq * MINI_HIDDEN)
+            .map(|i| (i as f32) * 0.01 - 0.32)
+            .collect();
         let x_bytes: Vec<u8> = bytemuck::cast_slice(&x).to_vec();
 
         let mut graph_inputs = hologram::GraphInputs::new();
@@ -99,9 +101,8 @@ fn mini_transformer_variable_seq_len_runs() {
 #[test]
 #[cfg(feature = "e2e")]
 fn gguf_causal_logit_consistency() {
-    let model = workspace_path(
-        "models/TinyLlama-1.1B-Chat-v1.0-GGUF/tinyllama-1.1b-chat-v1.0.Q4_0.gguf",
-    );
+    let model =
+        workspace_path("models/TinyLlama-1.1B-Chat-v1.0-GGUF/tinyllama-1.1b-chat-v1.0.Q4_0.gguf");
     if !model.exists() {
         eprintln!("SKIP: {} not found", model.display());
         return;
@@ -167,15 +168,11 @@ fn gguf_causal_logit_consistency() {
         offset_7 + bytes_per_pos
     );
 
-    let logits_6: &[f32] =
-        bytemuck::cast_slice(&logit_data_6[offset_6..offset_6 + bytes_per_pos]);
-    let logits_7: &[f32] =
-        bytemuck::cast_slice(&logit_data_7[offset_7..offset_7 + bytes_per_pos]);
+    let logits_6: &[f32] = bytemuck::cast_slice(&logit_data_6[offset_6..offset_6 + bytes_per_pos]);
+    let logits_7: &[f32] = bytemuck::cast_slice(&logit_data_7[offset_7..offset_7 + bytes_per_pos]);
 
     let cos_sim = cosine_similarity(logits_6, logits_7);
-    eprintln!(
-        "causal consistency: cos_sim(seq=6[pos=5], seq=7[pos=5]) = {cos_sim:.6}"
-    );
+    eprintln!("causal consistency: cos_sim(seq=6[pos=5], seq=7[pos=5]) = {cos_sim:.6}");
 
     // Also compare top-1 tokens.
     let top1_6 = logits_6
@@ -212,9 +209,7 @@ fn gguf_causal_logit_consistency() {
     let logits_far: &[f32] =
         bytemuck::cast_slice(&logit_data_far[offset_far..offset_far + bytes_per_pos]);
     let cos_sim_far = cosine_similarity(logits_6, logits_far);
-    eprintln!(
-        "far causal consistency: cos_sim(seq=6[pos=5], seq=46[pos=5]) = {cos_sim_far:.6}"
-    );
+    eprintln!("far causal consistency: cos_sim(seq=6[pos=5], seq=46[pos=5]) = {cos_sim_far:.6}");
     assert!(
         cos_sim_far > 0.99,
         "far causal invariant violated: cos_sim={cos_sim_far:.6}"
@@ -261,16 +256,33 @@ fn onnx_kv_decode_matches_full_prefill() {
         .unwrap_or_else(|e| panic!("HoloRunner creation failed: {e}"));
 
     let graph = runner.plan().graph();
-    let input_slot = graph.input_names.iter().position(|n| n == "input_ids").unwrap_or(0) as u32;
-    let mask_slot = graph.input_names.iter().position(|n| n == "attention_mask").map(|i| i as u32);
-    let pos_slot = graph.input_names.iter().position(|n| n == "position_ids").map(|i| i as u32);
+    let input_slot = graph
+        .input_names
+        .iter()
+        .position(|n| n == "input_ids")
+        .unwrap_or(0) as u32;
+    let mask_slot = graph
+        .input_names
+        .iter()
+        .position(|n| n == "attention_mask")
+        .map(|i| i as u32);
+    let pos_slot = graph
+        .input_names
+        .iter()
+        .position(|n| n == "position_ids")
+        .map(|i| i as u32);
 
     // Read KV metadata — embedded by compile() in the pipeline wrapper.
     let meta = {
-        use hologram::hologram_archive::section::model_meta::{ModelMetaSection, SECTION_MODEL_META};
+        use hologram::hologram_archive::section::model_meta::{
+            ModelMetaSection, SECTION_MODEL_META,
+        };
         let bytes = runner.archive_bytes();
         // Try runner's plan first, then re-parse full archive (pipeline wrapper).
-        runner.plan().sections().find(SECTION_MODEL_META)
+        runner
+            .plan()
+            .sections()
+            .find(SECTION_MODEL_META)
             .and_then(|entry| {
                 let s = entry.offset as usize;
                 let e = s + entry.size as usize;
@@ -316,7 +328,10 @@ fn onnx_kv_decode_matches_full_prefill() {
         if let Some(slot) = pos_slot {
             inputs.set_with_shape(
                 slot,
-                (0..seq as i64).map(|i| pos_offset as i64 + i).flat_map(|v| v.to_le_bytes()).collect(),
+                (0..seq as i64)
+                    .map(|i| pos_offset as i64 + i)
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect(),
                 vec![1, seq],
             );
         }
@@ -326,23 +341,34 @@ fn onnx_kv_decode_matches_full_prefill() {
     // ── Scenario 1: Full prefill (7 tokens) ─────────────────────────────
     let inputs_7 = build_inputs(&tokens_7, 0);
     let mut kv_ref = hologram::KvCacheState::new(n_layers, n_kv_heads, head_dim, max_seq);
-    let out_ref = runner.execute_with_kv(&inputs_7, &mut kv_ref)
+    let out_ref = runner
+        .execute_with_kv(&inputs_7, &mut kv_ref)
         .unwrap_or_else(|e| panic!("prefill-7 failed: {e}"));
     let (_, ref_bytes) = out_ref.get(0).expect("no prefill output");
 
     let pos6_offset = 6 * bytes_per_pos;
-    assert!(ref_bytes.len() >= pos6_offset + bytes_per_pos, "prefill output too short");
-    let ref_logits: &[f32] = bytemuck::cast_slice(&ref_bytes[pos6_offset..pos6_offset + bytes_per_pos]);
+    assert!(
+        ref_bytes.len() >= pos6_offset + bytes_per_pos,
+        "prefill output too short"
+    );
+    let ref_logits: &[f32] =
+        bytemuck::cast_slice(&ref_bytes[pos6_offset..pos6_offset + bytes_per_pos]);
 
     // ── Scenario 2: 6-token prefill + 1-token KV decode ────────────────
     let inputs_6 = build_inputs(&tokens_6, 0);
     let mut kv_dec = hologram::KvCacheState::new(n_layers, n_kv_heads, head_dim, max_seq);
-    let _out_6 = runner.execute_with_kv(&inputs_6, &mut kv_dec)
+    let _out_6 = runner
+        .execute_with_kv(&inputs_6, &mut kv_dec)
         .unwrap_or_else(|e| panic!("prefill-6 failed: {e}"));
-    assert_eq!(kv_dec.write_pos(), 6, "KV write_pos should be 6 after prefill");
+    assert_eq!(
+        kv_dec.write_pos(),
+        6,
+        "KV write_pos should be 6 after prefill"
+    );
 
     let inputs_dec = build_inputs(&[decode_token], kv_dec.write_pos());
-    let out_dec = runner.execute_with_kv(&inputs_dec, &mut kv_dec)
+    let out_dec = runner
+        .execute_with_kv(&inputs_dec, &mut kv_dec)
         .unwrap_or_else(|e| panic!("decode step failed: {e}"));
     let (_, dec_bytes) = out_dec.get(0).expect("no decode output");
     assert!(dec_bytes.len() >= bytes_per_pos, "decode output too short");
@@ -352,7 +378,9 @@ fn onnx_kv_decode_matches_full_prefill() {
     let cos = cosine_similarity(ref_logits, dec_logits);
 
     let top1 = |logits: &[f32]| -> (usize, f32) {
-        logits.iter().enumerate()
+        logits
+            .iter()
+            .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, &v)| (i, v))
             .unwrap_or((0, 0.0))
@@ -408,9 +436,21 @@ fn onnx_kv_decode_variable_length() {
         .unwrap_or_else(|e| panic!("HoloRunner creation failed: {e}"));
 
     let graph = runner.plan().graph();
-    let input_slot = graph.input_names.iter().position(|n| n == "input_ids").unwrap_or(0) as u32;
-    let mask_slot = graph.input_names.iter().position(|n| n == "attention_mask").map(|i| i as u32);
-    let pos_slot = graph.input_names.iter().position(|n| n == "position_ids").map(|i| i as u32);
+    let input_slot = graph
+        .input_names
+        .iter()
+        .position(|n| n == "input_ids")
+        .unwrap_or(0) as u32;
+    let mask_slot = graph
+        .input_names
+        .iter()
+        .position(|n| n == "attention_mask")
+        .map(|i| i as u32);
+    let pos_slot = graph
+        .input_names
+        .iter()
+        .position(|n| n == "position_ids")
+        .map(|i| i as u32);
 
     let (n_layers, n_kv_heads, head_dim, max_seq) = (22u32, 4u32, 64u32, 2048usize);
 
@@ -432,7 +472,10 @@ fn onnx_kv_decode_variable_length() {
         if let Some(slot) = pos_slot {
             inputs.set_with_shape(
                 slot,
-                (0..seq as i64).map(|i| pos_offset as i64 + i).flat_map(|v| v.to_le_bytes()).collect(),
+                (0..seq as i64)
+                    .map(|i| pos_offset as i64 + i)
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect(),
                 vec![1, seq],
             );
         }
@@ -442,22 +485,29 @@ fn onnx_kv_decode_variable_length() {
     // Reference: 7-token prefill at seq=32 (variable-length).
     let inputs_7 = build_inputs(&tokens_7, 0);
     let mut kv_ref = hologram::KvCacheState::new(n_layers, n_kv_heads, head_dim, max_seq);
-    let out_ref = runner.execute_with_kv(&inputs_7, &mut kv_ref)
+    let out_ref = runner
+        .execute_with_kv(&inputs_7, &mut kv_ref)
         .unwrap_or_else(|e| panic!("prefill-7 failed: {e}"));
     let (_, ref_bytes) = out_ref.get(0).expect("no prefill output");
     let pos6_offset = 6 * bytes_per_pos;
-    assert!(ref_bytes.len() >= pos6_offset + bytes_per_pos, "prefill output too short");
-    let ref_logits: &[f32] = bytemuck::cast_slice(&ref_bytes[pos6_offset..pos6_offset + bytes_per_pos]);
+    assert!(
+        ref_bytes.len() >= pos6_offset + bytes_per_pos,
+        "prefill output too short"
+    );
+    let ref_logits: &[f32] =
+        bytemuck::cast_slice(&ref_bytes[pos6_offset..pos6_offset + bytes_per_pos]);
 
     // Decode: 6-token prefill + 1-token decode at seq=32.
     let inputs_6 = build_inputs(&tokens_6, 0);
     let mut kv_dec = hologram::KvCacheState::new(n_layers, n_kv_heads, head_dim, max_seq);
-    let _out_6 = runner.execute_with_kv(&inputs_6, &mut kv_dec)
+    let _out_6 = runner
+        .execute_with_kv(&inputs_6, &mut kv_dec)
         .unwrap_or_else(|e| panic!("prefill-6 failed: {e}"));
     assert_eq!(kv_dec.write_pos(), 6);
 
     let inputs_dec = build_inputs(&[decode_token], kv_dec.write_pos());
-    let out_dec = runner.execute_with_kv(&inputs_dec, &mut kv_dec)
+    let out_dec = runner
+        .execute_with_kv(&inputs_dec, &mut kv_dec)
         .unwrap_or_else(|e| panic!("decode step failed: {e}"));
     let (_, dec_bytes) = out_dec.get(0).expect("no decode output");
     assert!(dec_bytes.len() >= bytes_per_pos, "decode output too short");
@@ -465,7 +515,9 @@ fn onnx_kv_decode_variable_length() {
 
     let cos = cosine_similarity(ref_logits, dec_logits);
     let top1 = |logits: &[f32]| -> (usize, f32) {
-        logits.iter().enumerate()
+        logits
+            .iter()
+            .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, &v)| (i, v))
             .unwrap_or((0, 0.0))

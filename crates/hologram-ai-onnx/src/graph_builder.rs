@@ -287,7 +287,10 @@ pub fn build_ai_graph(
             dim_vars,
             shape_constraints: Default::default(),
             subgraphs,
-            tensor_names: name_to_tid.into_iter().map(|(name, tid)| (tid, name)).collect(),
+            tensor_names: name_to_tid
+                .into_iter()
+                .map(|(name, tid)| (tid, name))
+                .collect(),
             topo_cache: Default::default(),
         },
         oracle,
@@ -312,8 +315,16 @@ fn resolve_attention_head_dims(
 ) {
     for node in nodes.iter_mut() {
         let (num_heads, head_dim) = match &node.op {
-            AiOp::MultiHeadAttention { num_heads, head_dim, .. } => (*num_heads, *head_dim),
-            AiOp::GroupedQueryAttention { num_heads, head_dim, .. } => (*num_heads, *head_dim),
+            AiOp::MultiHeadAttention {
+                num_heads,
+                head_dim,
+                ..
+            } => (*num_heads, *head_dim),
+            AiOp::GroupedQueryAttention {
+                num_heads,
+                head_dim,
+                ..
+            } => (*num_heads, *head_dim),
             _ => continue,
         };
 
@@ -425,10 +436,7 @@ fn resolve_dynamic_op_params(
     for node in nodes.iter_mut() {
         match &node.op {
             AiOp::Slice {
-                axes,
-                starts,
-                ends,
-                ..
+                axes, starts, ends, ..
             } if axes.is_empty() && starts.is_empty() && ends.is_empty() => {
                 // ONNX opset 10+: Slice(data, starts, ends, [axes], [steps])
                 // inputs[0] = data, inputs[1] = starts, inputs[2] = ends,
@@ -503,7 +511,10 @@ fn resolve_dynamic_op_params(
                 if node.inputs.len() >= 2 {
                     if let Some(axes_vals) = extract_i64_const(node.inputs[1], params, tensor_info)
                     {
-                        node.op = AiOp::ReduceMean { axes: axes_vals, keepdims: kd };
+                        node.op = AiOp::ReduceMean {
+                            axes: axes_vals,
+                            keepdims: kd,
+                        };
                         node.inputs.truncate(1);
                     }
                 }
@@ -513,7 +524,10 @@ fn resolve_dynamic_op_params(
                 if node.inputs.len() >= 2 {
                     if let Some(axes_vals) = extract_i64_const(node.inputs[1], params, tensor_info)
                     {
-                        node.op = AiOp::ReduceSum { axes: axes_vals, keepdims: kd };
+                        node.op = AiOp::ReduceSum {
+                            axes: axes_vals,
+                            keepdims: kd,
+                        };
                         node.inputs.truncate(1);
                     }
                 }
@@ -523,7 +537,10 @@ fn resolve_dynamic_op_params(
                 if node.inputs.len() >= 2 {
                     if let Some(axes_vals) = extract_i64_const(node.inputs[1], params, tensor_info)
                     {
-                        node.op = AiOp::ReduceMax { axes: axes_vals, keepdims: kd };
+                        node.op = AiOp::ReduceMax {
+                            axes: axes_vals,
+                            keepdims: kd,
+                        };
                         node.inputs.truncate(1);
                     }
                 }
@@ -533,7 +550,10 @@ fn resolve_dynamic_op_params(
                 if node.inputs.len() >= 2 {
                     if let Some(axes_vals) = extract_i64_const(node.inputs[1], params, tensor_info)
                     {
-                        node.op = AiOp::ReduceMin { axes: axes_vals, keepdims: kd };
+                        node.op = AiOp::ReduceMin {
+                            axes: axes_vals,
+                            keepdims: kd,
+                        };
                         node.inputs.truncate(1);
                     }
                 }
@@ -610,12 +630,8 @@ fn extract_f32_scalar(
     };
 
     match info.logical_dtype {
-        DType::F32 if data.len() == 4 => {
-            Some(f32::from_le_bytes(data.try_into().unwrap()))
-        }
-        DType::F64 if data.len() == 8 => {
-            Some(f64::from_le_bytes(data.try_into().unwrap()) as f32)
-        }
+        DType::F32 if data.len() == 4 => Some(f32::from_le_bytes(data.try_into().unwrap())),
+        DType::F64 if data.len() == 8 => Some(f64::from_le_bytes(data.try_into().unwrap()) as f32),
         _ => None,
     }
 }
@@ -658,8 +674,6 @@ fn extract_i64_const(
     }
 }
 
-
-
 /// Rewrite placeholder branch names in control flow AiOps to the actual
 /// subgraph keys (e.g., "then_branch" → "then_branch_42").
 fn rewrite_subgraph_keys(op: &mut AiOp, node_id: u32) {
@@ -694,7 +708,10 @@ fn import_subgraph_attrs(
     model_dir: Option<&Path>,
 ) {
     let branch_attrs: Vec<(&str, &str)> = match op_type {
-        "If" => vec![("then_branch", "then_branch"), ("else_branch", "else_branch")],
+        "If" => vec![
+            ("then_branch", "then_branch"),
+            ("else_branch", "else_branch"),
+        ],
         "Loop" => vec![("body", "body")],
         "Scan" => vec![("body", "body")],
         _ => return,

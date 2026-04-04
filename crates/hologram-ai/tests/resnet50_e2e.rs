@@ -66,14 +66,11 @@ fn resnet50_onnx_executes() {
         .expect("compilation failed");
 
     // Load plan directly from archive bytes.
-    let plan = hologram::load_auto(&archive.bytes)
-        .expect("loading plan failed");
+    let plan = hologram::load_auto(&archive.bytes).expect("loading plan failed");
 
     // Build input: [1, 3, 224, 224] of deterministic f32
     let input_len = 1 * 3 * 224 * 224; // 150528 floats
-    let input_data: Vec<f32> = (0..input_len)
-        .map(|i| ((i as f32) * 0.001).sin())
-        .collect();
+    let input_data: Vec<f32> = (0..input_len).map(|i| ((i as f32) * 0.001).sin()).collect();
     let input_bytes: Vec<u8> = bytemuck::cast_slice(&input_data).to_vec();
 
     let mut inputs = hologram::GraphInputs::new();

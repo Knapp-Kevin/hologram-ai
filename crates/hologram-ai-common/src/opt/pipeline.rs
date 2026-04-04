@@ -20,21 +20,18 @@ impl OptPipeline {
     /// Standard optimization pipeline.
     pub fn mvp() -> Self {
         use super::{
-            add_rmsnorm_fusion::AddRmsNormFusion,
-            attention_fusion::AttentionFusion, const_dedup::ConstantDeduplication,
-            const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
-            data_prop::DataPropagation, dead_node::DeadNodeElimination,
-            decompose::OpDecomposition, kv_slot_injection::KvSlotInjection,
-            matmul_activation_fusion::MatMulActivationFusion,
+            add_rmsnorm_fusion::AddRmsNormFusion, attention_fusion::AttentionFusion,
+            const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,
+            constant_fold::ConstantFolding, data_prop::DataPropagation,
+            dead_node::DeadNodeElimination, decompose::OpDecomposition,
+            kv_slot_injection::KvSlotInjection, matmul_activation_fusion::MatMulActivationFusion,
             norm_projection_fusion::NormProjectionFusion,
-            scalar_absorption::ScalarAbsorption,
+            position_ids_injection::PositionIdsInjection, resolve_slice_params::ResolveSliceParams,
+            rmsnorm_fusion::RmsNormFusion, scalar_absorption::ScalarAbsorption,
+            semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
             shared_input_projection_fusion::SharedInputProjectionFusion,
-            swiglu_projection_fusion::SwiGluProjectionFusion,
+            swiglu_fusion::SwiGluFusion, swiglu_projection_fusion::SwiGluProjectionFusion,
             transpose_matmul_fusion::TransposeMatMulFusion,
-            position_ids_injection::PositionIdsInjection,
-            resolve_slice_params::ResolveSliceParams,
-            rmsnorm_fusion::RmsNormFusion, semantic_prop::SemanticPropagation,
-            shape_prop::ShapePropagation, swiglu_fusion::SwiGluFusion,
         };
         Self::new(vec![
             // Resolve ONNX opset 10+ Slice params from constant inputs
@@ -117,8 +114,8 @@ impl OptPipeline {
             const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,
             constant_fold::ConstantFolding, data_prop::DataPropagation,
             dead_node::DeadNodeElimination, decompose::OpDecomposition,
-            resolve_slice_params::ResolveSliceParams,
-            semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
+            resolve_slice_params::ResolveSliceParams, semantic_prop::SemanticPropagation,
+            shape_prop::ShapePropagation,
         };
         Self::new(vec![
             Box::new(ResolveSliceParams),

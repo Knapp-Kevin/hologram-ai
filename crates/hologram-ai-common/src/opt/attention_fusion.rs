@@ -73,16 +73,11 @@ impl Pass for AttentionFusion {
 
             // Try to match the SDPA chain starting from this MatMul.
             tracing::trace!(node_idx, qkt_out, "AttentionFusion: trying MatMul");
-            if let Some(chain) = match_sdpa_chain(
-                qkt_out,
-                &tid_to_node,
-                &consumers,
-                &graph,
-            ) {
+            if let Some(chain) = match_sdpa_chain(qkt_out, &tid_to_node, &consumers, &graph) {
                 // Extract Q, K, V tensor IDs from the SDPA chain.
                 let q_tid = node.inputs[0]; // Q: [batch, heads, seq, dim]
                 let k_tid = node.inputs[1]; // K^T: [batch, heads, dim, seq] (pre-multiplied with scale)
-                let v_tid = chain.v_tid;    // V: [batch, heads, seq, dim] (expanded to num_q_heads)
+                let v_tid = chain.v_tid; // V: [batch, heads, seq, dim] (expanded to num_q_heads)
 
                 // Infer head dimensions from Q's and K's shapes.
                 let (num_heads, num_kv_heads_inferred, head_dim) = {
@@ -97,7 +92,12 @@ impl Pass for AttentionFusion {
                 };
 
                 if num_heads == 0 || head_dim == 0 {
-                    tracing::trace!(q_tid, num_heads, head_dim, "SDPA: skipping — can't infer head params");
+                    tracing::trace!(
+                        q_tid,
+                        num_heads,
+                        head_dim,
+                        "SDPA: skipping — can't infer head params"
+                    );
                     continue;
                 }
 
@@ -164,7 +164,9 @@ impl Pass for AttentionFusion {
                 // downstream Transpose/Reshape nodes operate correctly.
                 {
                     let q_shape = graph.tensor_info.get(&q_tid).cloned();
-                    if let (Some(qs), Some(out_info)) = (q_shape, graph.tensor_info.get_mut(&chain.output_tid)) {
+                    if let (Some(qs), Some(out_info)) =
+                        (q_shape, graph.tensor_info.get_mut(&chain.output_tid))
+                    {
                         out_info.shape = qs.shape;
                     }
                 }
@@ -237,7 +239,11 @@ fn match_sdpa_chain(
     // The Q@K^T MatMul output may have multiple consumers (e.g., Add + shape subgraph).
     let all_consumers: Vec<(usize, &AiOp)> = consumers
         .get(&scores_tid)
-        .map(|c| c.iter().map(|&(idx, _)| (idx, &graph.nodes[idx].op)).collect())
+        .map(|c| {
+            c.iter()
+                .map(|&(idx, _)| (idx, &graph.nodes[idx].op))
+                .collect()
+        })
         .unwrap_or_default();
     tracing::trace!(
         scores_tid,
@@ -246,7 +252,9 @@ fn match_sdpa_chain(
     );
 
     // Optional: Mul(scores, scale_constant) — scale the attention scores.
-    if let Some(next) = find_consumer_by_op(current_tid, consumers, graph, |op| matches!(op, AiOp::Mul)) {
+    if let Some(next) =
+        find_consumer_by_op(current_tid, consumers, graph, |op| matches!(op, AiOp::Mul))
+    {
         let n = &graph.nodes[next];
         if matches!(n.op, AiOp::Mul) && n.inputs.len() >= 2 {
             // Check if one input is a scalar param (the scale factor).
@@ -270,7 +278,9 @@ fn match_sdpa_chain(
     // The mask tensor is passed as a 4th input to the fused Attention op,
     // which applies it as an additive mask before Softmax.
     let mut mask_tid: Option<TensorId> = None;
-    if let Some(next) = find_consumer_by_op(current_tid, consumers, graph, |op| matches!(op, AiOp::Add)) {
+    if let Some(next) =
+        find_consumer_by_op(current_tid, consumers, graph, |op| matches!(op, AiOp::Add))
+    {
         let n = &graph.nodes[next];
         if n.inputs.len() >= 2 && (n.inputs[0] == current_tid || n.inputs[1] == current_tid) {
             has_mask = true;
@@ -295,7 +305,9 @@ fn match_sdpa_chain(
     tracing::trace!(current_tid, "SDPA: after softmax");
 
     // Optional: IsNaN → Where (NaN guard, common in PyTorch SDPA export).
-    if let Some(next) = find_consumer_by_op(current_tid, consumers, graph, |op| matches!(op, AiOp::IsNaN)) {
+    if let Some(next) = find_consumer_by_op(current_tid, consumers, graph, |op| {
+        matches!(op, AiOp::IsNaN)
+    }) {
         let n = &graph.nodes[next];
         if matches!(n.op, AiOp::IsNaN) {
             // IsNaN feeds into Where.
@@ -314,7 +326,9 @@ fn match_sdpa_chain(
     tracing::trace!(current_tid, "SDPA: looking for output MatMul");
 
     // Required: MatMul(weights, V) — the output attention multiplication.
-    let out_matmul = find_consumer_by_op(current_tid, consumers, graph, |op| matches!(op, AiOp::MatMul))?;
+    let out_matmul = find_consumer_by_op(current_tid, consumers, graph, |op| {
+        matches!(op, AiOp::MatMul)
+    })?;
     let out_node = &graph.nodes[out_matmul];
     if !matches!(out_node.op, AiOp::MatMul) || out_node.inputs.len() < 2 {
         return None;
@@ -589,9 +603,13 @@ mod tests {
         let scale_val = alloc_tid(&mut next_tid); // 4
 
         graph.tensor_info.insert(q, f32_info(shape_4d(1, 4, 8, 16)));
-        graph.tensor_info.insert(k_t, f32_info(shape_4d(1, 4, 16, 8)));
+        graph
+            .tensor_info
+            .insert(k_t, f32_info(shape_4d(1, 4, 16, 8)));
         graph.tensor_info.insert(v, f32_info(shape_4d(1, 4, 8, 16)));
-        graph.tensor_info.insert(mask, f32_info(shape_4d(1, 1, 8, 8)));
+        graph
+            .tensor_info
+            .insert(mask, f32_info(shape_4d(1, 1, 8, 8)));
 
         // Scale = 0.25 (1/sqrt(16))
         graph.params.insert(
@@ -604,9 +622,15 @@ mod tests {
 
         // MatMul(Q, K^T) → scores
         let scores = alloc_tid(&mut next_tid);
-        graph.tensor_info.insert(scores, f32_info(shape_4d(1, 4, 8, 8)));
+        graph
+            .tensor_info
+            .insert(scores, f32_info(shape_4d(1, 4, 8, 8)));
         graph.nodes.push(AiNode::new(
-            { let n = next_nid; next_nid += 1; n },
+            {
+                let n = next_nid;
+                next_nid += 1;
+                n
+            },
             AiOp::MatMul,
             vec![q, k_t],
             vec![scores],
@@ -614,9 +638,15 @@ mod tests {
 
         // Mul(scores, scale) → scaled
         let scaled = alloc_tid(&mut next_tid);
-        graph.tensor_info.insert(scaled, f32_info(shape_4d(1, 4, 8, 8)));
+        graph
+            .tensor_info
+            .insert(scaled, f32_info(shape_4d(1, 4, 8, 8)));
         graph.nodes.push(AiNode::new(
-            { let n = next_nid; next_nid += 1; n },
+            {
+                let n = next_nid;
+                next_nid += 1;
+                n
+            },
             AiOp::Mul,
             vec![scores, scale_val],
             vec![scaled],
@@ -624,9 +654,15 @@ mod tests {
 
         // Add(scaled, mask) → masked
         let masked = alloc_tid(&mut next_tid);
-        graph.tensor_info.insert(masked, f32_info(shape_4d(1, 4, 8, 8)));
+        graph
+            .tensor_info
+            .insert(masked, f32_info(shape_4d(1, 4, 8, 8)));
         graph.nodes.push(AiNode::new(
-            { let n = next_nid; next_nid += 1; n },
+            {
+                let n = next_nid;
+                next_nid += 1;
+                n
+            },
             AiOp::Add,
             vec![scaled, mask],
             vec![masked],
@@ -634,9 +670,15 @@ mod tests {
 
         // Softmax(masked) → weights
         let weights = alloc_tid(&mut next_tid);
-        graph.tensor_info.insert(weights, f32_info(shape_4d(1, 4, 8, 8)));
+        graph
+            .tensor_info
+            .insert(weights, f32_info(shape_4d(1, 4, 8, 8)));
         graph.nodes.push(AiNode::new(
-            { let n = next_nid; next_nid += 1; n },
+            {
+                let n = next_nid;
+                next_nid += 1;
+                n
+            },
             AiOp::Softmax { axis: -1 },
             vec![masked],
             vec![weights],
@@ -644,9 +686,15 @@ mod tests {
 
         // MatMul(weights, V) → output
         let output = alloc_tid(&mut next_tid);
-        graph.tensor_info.insert(output, f32_info(shape_4d(1, 4, 8, 16)));
+        graph
+            .tensor_info
+            .insert(output, f32_info(shape_4d(1, 4, 8, 16)));
         graph.nodes.push(AiNode::new(
-            { let _n = next_nid; next_nid += 1; _n },
+            {
+                let _n = next_nid;
+                next_nid += 1;
+                _n
+            },
             AiOp::MatMul,
             vec![weights, v],
             vec![output],

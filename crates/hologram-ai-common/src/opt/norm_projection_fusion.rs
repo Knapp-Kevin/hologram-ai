@@ -312,7 +312,13 @@ mod tests {
             known_i64_values: None,
             semantic: SemanticHint::Unknown,
         };
-        (AiParam::Inline { data, info: info.clone() }, info)
+        (
+            AiParam::Inline {
+                data,
+                info: info.clone(),
+            },
+            info,
+        )
     }
 
     #[test]
@@ -332,14 +338,17 @@ mod tests {
         g.tensor_info.insert(12, info_a);
         g.tensor_info.insert(13, info_b);
 
-        g.tensor_info.insert(10, TensorInfo {
-            shape: crate::ir::shape_from_concrete(&[1, 512]),
-            logical_dtype: DType::F32,
-            storage_dtype: DType::F32,
-            quant: hologram_ai_quant::QuantDescriptor::none(),
-            known_i64_values: None,
-            semantic: SemanticHint::Unknown,
-        });
+        g.tensor_info.insert(
+            10,
+            TensorInfo {
+                shape: crate::ir::shape_from_concrete(&[1, 512]),
+                logical_dtype: DType::F32,
+                storage_dtype: DType::F32,
+                quant: hologram_ai_quant::QuantDescriptor::none(),
+                known_i64_values: None,
+                semantic: SemanticHint::Unknown,
+            },
+        );
 
         g.nodes = vec![
             AiNode::new(0, AiOp::RmsNorm { epsilon: 1e-5 }, vec![10, 11], vec![20]),

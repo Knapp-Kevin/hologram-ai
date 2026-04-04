@@ -17,7 +17,9 @@ use hologram::FloatOp;
 
 use crate::ir::AiOp;
 
-pub use crate::exec_context::{ShapeContextGraph, ShapeDimRepr, ShapeProjectionEntry, ShapeSpecRepr};
+pub use crate::exec_context::{
+    ShapeContextGraph, ShapeDimRepr, ShapeProjectionEntry, ShapeSpecRepr,
+};
 
 // ── ShapeProjection trait ────────────────────────────────────────────────────
 
@@ -121,15 +123,24 @@ impl ShapeProjection for FloatOp {
             FloatOp::Reshape => (ShapeSpecRepr::Reshape, Some(1)),
 
             // ── Transpose — permute dims ─────────────────────────────────────
-            FloatOp::Transpose { perm, ndim } => {
-                (ShapeSpecRepr::Transpose { perm: *perm, ndim: *ndim }, None)
-            }
+            FloatOp::Transpose { perm, ndim } => (
+                ShapeSpecRepr::Transpose {
+                    perm: *perm,
+                    ndim: *ndim,
+                },
+                None,
+            ),
 
             // ── Concat — merge along last axis ────────────────────────────────
             FloatOp::Concat { .. } => (ShapeSpecRepr::Concat, None),
 
             // ── Slice — one-axis contiguous slice ─────────────────────────────
-            FloatOp::Slice { axis_from_end, start, end, .. } => (
+            FloatOp::Slice {
+                axis_from_end,
+                start,
+                end,
+                ..
+            } => (
                 ShapeSpecRepr::Slice {
                     axis_from_end: *axis_from_end,
                     start: *start,
@@ -236,11 +247,9 @@ impl ShapeProjection for AiOp {
             | AiOp::Xor => (ShapeSpecRepr::Broadcast(0, 1), None),
 
             // ── Binary comparison → Broadcast(0, 1) ──────────────────────
-            AiOp::Equal
-            | AiOp::Less
-            | AiOp::LessOrEqual
-            | AiOp::Greater
-            | AiOp::GreaterOrEqual => (ShapeSpecRepr::Broadcast(0, 1), None),
+            AiOp::Equal | AiOp::Less | AiOp::LessOrEqual | AiOp::Greater | AiOp::GreaterOrEqual => {
+                (ShapeSpecRepr::Broadcast(0, 1), None)
+            }
 
             // ── Shape-preserving (output = input[0] shape) ────────────────
             AiOp::Softmax { .. }
@@ -270,17 +279,20 @@ impl ShapeProjection for AiOp {
             | AiOp::MatMulRelu
             | AiOp::MatMulGelu
             | AiOp::MatMulSilu
-            | AiOp::ConcatMatMul { .. } => {
-                (ShapeSpecRepr::MatMul { k_hint: 0 }, None)
-            }
+            | AiOp::ConcatMatMul { .. } => (ShapeSpecRepr::MatMul { k_hint: 0 }, None),
             AiOp::Gemm { .. } => (ShapeSpecRepr::Gemm { k: 0 }, None),
 
             // ── Attention (output = Q input shape) ─────────────────────────
             // At AiOp level, Q's shape should be correct ([batch, heads, seq, dim]),
             // so SameAs(0) is fine. The FloatOp level uses explicit Dims.
-            AiOp::MultiHeadAttention { .. }
-            | AiOp::FlashAttentionHint => (ShapeSpecRepr::SameAs(0), None),
-            AiOp::GroupedQueryAttention { num_heads, head_dim, .. } => {
+            AiOp::MultiHeadAttention { .. } | AiOp::FlashAttentionHint => {
+                (ShapeSpecRepr::SameAs(0), None)
+            }
+            AiOp::GroupedQueryAttention {
+                num_heads,
+                head_dim,
+                ..
+            } => {
                 let dims = vec![
                     ShapeDimRepr::Fixed(*num_heads),
                     ShapeDimRepr::Inferred,
@@ -290,9 +302,7 @@ impl ShapeProjection for AiOp {
             }
 
             // ── Shape manipulation ─────────────────────────────────────────
-            AiOp::Reshape { .. } | AiOp::Flatten { .. } => {
-                (ShapeSpecRepr::Reshape, Some(1))
-            }
+            AiOp::Reshape { .. } | AiOp::Flatten { .. } => (ShapeSpecRepr::Reshape, Some(1)),
             AiOp::Transpose { perm } => {
                 let mut arr = [0u8; 8];
                 let ndim = perm.len().min(8) as u8;
@@ -328,9 +338,9 @@ impl ShapeProjection for AiOp {
             AiOp::Range => (ShapeSpecRepr::Unknown, None),
 
             // ── Gather/Embed (dim=0 at AiOp level; concrete in FloatOp) ──
-            AiOp::Gather { .. }
-            | AiOp::GatherElements { .. }
-            | AiOp::Embed => (ShapeSpecRepr::GatherEmbed { dim: 0 }, None),
+            AiOp::Gather { .. } | AiOp::GatherElements { .. } | AiOp::Embed => {
+                (ShapeSpecRepr::GatherEmbed { dim: 0 }, None)
+            }
 
             // ── Reductions ─────────────────────────────────────────────────
             AiOp::ReduceSum { .. }
@@ -361,14 +371,10 @@ impl ShapeProjection for AiOp {
             | AiOp::SpaceToDepth { .. } => (ShapeSpecRepr::Unknown, None),
 
             // ── Quantized matmul ───────────────────────────────────────────
-            AiOp::QuantizedMatMul { .. } => {
-                (ShapeSpecRepr::MatMul { k_hint: 0 }, None)
-            }
+            AiOp::QuantizedMatMul { .. } => (ShapeSpecRepr::MatMul { k_hint: 0 }, None),
 
             // ── Positional / mask ──────────────────────────────────────────
-            AiOp::AlibiSlope | AiOp::CausalMask => {
-                (ShapeSpecRepr::Unknown, None)
-            }
+            AiOp::AlibiSlope | AiOp::CausalMask => (ShapeSpecRepr::Unknown, None),
 
             // ── Einsum (equation-dependent) ────────────────────────────────
             AiOp::Einsum { .. } => (ShapeSpecRepr::Unknown, None),
@@ -379,8 +385,9 @@ impl ShapeProjection for AiOp {
             }
 
             // ── Deep decode fusions (Plan 054) ─────────────────────────────
-            AiOp::FusedNormProjection { .. }
-            | AiOp::FusedSwiGluProjection => (ShapeSpecRepr::Unknown, None),
+            AiOp::FusedNormProjection { .. } | AiOp::FusedSwiGluProjection => {
+                (ShapeSpecRepr::Unknown, None)
+            }
 
             // ── Constant / Opaque (seeded directly, not projected) ────────
             AiOp::Constant { .. } | AiOp::Opaque { .. } => return None,
@@ -505,7 +512,11 @@ pub fn resolve_spec(
             Some(out)
         }
 
-        ShapeSpecRepr::Slice { axis_from_end, start, end } => {
+        ShapeSpecRepr::Slice {
+            axis_from_end,
+            start,
+            end,
+        } => {
             let in_shape = input_shapes.first()?.clone();
             let ndim = in_shape.len();
             let afe = *axis_from_end as usize;
@@ -595,8 +606,16 @@ fn broadcast_shapes(a: &[usize], b: &[usize]) -> Vec<usize> {
     let max_len = a.len().max(b.len());
     let mut result = Vec::with_capacity(max_len);
     for i in 0..max_len {
-        let da = if i < max_len - a.len() { 1 } else { a[i - (max_len - a.len())] };
-        let db = if i < max_len - b.len() { 1 } else { b[i - (max_len - b.len())] };
+        let da = if i < max_len - a.len() {
+            1
+        } else {
+            a[i - (max_len - a.len())]
+        };
+        let db = if i < max_len - b.len() {
+            1
+        } else {
+            b[i - (max_len - b.len())]
+        };
         result.push(da.max(db));
     }
     result
@@ -755,11 +774,7 @@ fn resolve_reshape(
         // Single-zero resolution.
         let zeros = parsed.iter().filter(|&&d| d == 0).count();
         if zeros == 1 {
-            let known: usize = parsed
-                .iter()
-                .filter(|&&d| d > 0)
-                .product::<usize>()
-                .max(1);
+            let known: usize = parsed.iter().filter(|&&d| d > 0).product::<usize>().max(1);
             if effective_elems >= known && effective_elems.is_multiple_of(known) {
                 return Some(
                     parsed
@@ -799,11 +814,7 @@ fn parse_shape_i64(bytes: &[u8], n_elems: usize) -> Option<Vec<usize>> {
         .collect();
     let zeros = shape.iter().filter(|&&d| d == 0).count();
     if zeros == 1 {
-        let known: usize = shape
-            .iter()
-            .filter(|&&d| d > 0)
-            .product::<usize>()
-            .max(1);
+        let known: usize = shape.iter().filter(|&&d| d > 0).product::<usize>().max(1);
         let unknown = if known > 0 { n_elems / known } else { n_elems };
         Some(
             shape
@@ -1081,7 +1092,11 @@ mod tests {
 
     #[test]
     fn trait_float_op_matmul() {
-        let op = FloatOp::MatMul { m: 0, k: 2048, n: 4096 };
+        let op = FloatOp::MatMul {
+            m: 0,
+            k: 2048,
+            n: 4096,
+        };
         let (spec, sv) = op.shape_spec().expect("should have spec");
         assert!(matches!(spec, ShapeSpecRepr::MatMul { k_hint: 2048 }));
         assert!(sv.is_none());
@@ -1093,7 +1108,11 @@ mod tests {
         let ops: Vec<FloatOp> = vec![
             FloatOp::Relu,
             FloatOp::Add,
-            FloatOp::MatMul { m: 1, k: 64, n: 128 },
+            FloatOp::MatMul {
+                m: 1,
+                k: 64,
+                n: 128,
+            },
             FloatOp::Reshape,
             FloatOp::Softmax { size: 32 },
         ];
@@ -1124,7 +1143,9 @@ mod tests {
 
     #[test]
     fn trait_ai_op_tile() {
-        let op = AiOp::Tile { repeats: vec![2, 3] };
+        let op = AiOp::Tile {
+            repeats: vec![2, 3],
+        };
         let (spec, sv) = op.shape_spec().expect("should have spec");
         assert!(matches!(spec, ShapeSpecRepr::Tile { .. }));
         assert!(sv.is_none());
@@ -1132,11 +1153,20 @@ mod tests {
 
     #[test]
     fn trait_ai_op_returns_none_for_control_flow() {
-        assert!(AiOp::If { then_branch: "t".into(), else_branch: None }.shape_spec().is_none());
-        assert!(AiOp::Constant { value: crate::ir::AiParam::Inline {
-            data: vec![],
-            info: crate::ir::TensorInfo::new(crate::ir::DType::F32, smallvec::smallvec![]),
-        }}.shape_spec().is_none());
+        assert!(AiOp::If {
+            then_branch: "t".into(),
+            else_branch: None
+        }
+        .shape_spec()
+        .is_none());
+        assert!(AiOp::Constant {
+            value: crate::ir::AiParam::Inline {
+                data: vec![],
+                info: crate::ir::TensorInfo::new(crate::ir::DType::F32, smallvec::smallvec![]),
+            }
+        }
+        .shape_spec()
+        .is_none());
     }
 
     // ── Backward compat tests ────────────────────────────────────────────
@@ -1164,8 +1194,11 @@ mod tests {
 
     #[test]
     fn matmul_k_hint() {
-        let (spec, sv) =
-            float_op_to_shape_spec_repr(&FloatOp::MatMul { m: 0, k: 2048, n: 4096 });
+        let (spec, sv) = float_op_to_shape_spec_repr(&FloatOp::MatMul {
+            m: 0,
+            k: 2048,
+            n: 4096,
+        });
         assert!(matches!(spec, ShapeSpecRepr::MatMul { k_hint: 2048 }));
         assert!(sv.is_none());
     }
@@ -1236,7 +1269,12 @@ mod tests {
         let mut perm = [0u8; 8];
         perm[..3].copy_from_slice(&[1, 2, 0]);
         let shapes = vec![vec![2, 3, 4]];
-        let result = resolve_spec(&ShapeSpecRepr::Transpose { perm, ndim: 3 }, &shapes, None, 0);
+        let result = resolve_spec(
+            &ShapeSpecRepr::Transpose { perm, ndim: 3 },
+            &shapes,
+            None,
+            0,
+        );
         assert_eq!(result, Some(vec![3, 4, 2]));
     }
 
@@ -1253,8 +1291,12 @@ mod tests {
         let shape_bytes: Vec<u8> = shape_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
         let input_elems = 7 * 32 * 64;
         let shapes = vec![vec![input_elems]];
-        let result =
-            resolve_spec(&ShapeSpecRepr::Reshape, &shapes, Some(&shape_bytes), input_elems);
+        let result = resolve_spec(
+            &ShapeSpecRepr::Reshape,
+            &shapes,
+            Some(&shape_bytes),
+            input_elems,
+        );
         assert_eq!(result, Some(vec![1, 7, 32, 64]));
     }
 
@@ -1303,7 +1345,9 @@ mod tests {
     #[test]
     fn resolve_tile() {
         let shapes = vec![vec![2, 3]];
-        let spec = ShapeSpecRepr::Tile { repeats: vec![3, 2] };
+        let spec = ShapeSpecRepr::Tile {
+            repeats: vec![3, 2],
+        };
         let result = resolve_spec(&spec, &shapes, None, 0);
         assert_eq!(result, Some(vec![6, 6]));
     }

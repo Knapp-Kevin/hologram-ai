@@ -211,14 +211,13 @@ fn match_rmsnorm_inner(
     }
     consumed.push(add_idx);
 
-    let (mean_tid, epsilon) =
-        if let Some(eps) = scalar_f32_param(add_node.inputs[0], graph) {
-            (add_node.inputs[1], eps)
-        } else if let Some(eps) = scalar_f32_param(add_node.inputs[1], graph) {
-            (add_node.inputs[0], eps)
-        } else {
-            return None;
-        };
+    let (mean_tid, epsilon) = if let Some(eps) = scalar_f32_param(add_node.inputs[0], graph) {
+        (add_node.inputs[1], eps)
+    } else if let Some(eps) = scalar_f32_param(add_node.inputs[1], graph) {
+        (add_node.inputs[0], eps)
+    } else {
+        return None;
+    };
 
     // mean_tid ← ReduceMean(pow2).
     let reduce_idx = *tid_to_node.get(&mean_tid)?;
@@ -339,11 +338,23 @@ mod tests {
         tensor_info.insert(x_tid, TensorInfo::new(DType::F32, x_shape.clone()));
         tensor_info.insert(two_tid, TensorInfo::new(DType::F32, scalar_shape.clone()));
         tensor_info.insert(pow2_tid, TensorInfo::new(DType::F32, x_shape.clone()));
-        tensor_info.insert(mean_tid, TensorInfo::new(DType::F32, shape_from_concrete(&[1, 16, 1])));
+        tensor_info.insert(
+            mean_tid,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[1, 16, 1])),
+        );
         tensor_info.insert(eps_tid, TensorInfo::new(DType::F32, scalar_shape.clone()));
-        tensor_info.insert(biased_tid, TensorInfo::new(DType::F32, shape_from_concrete(&[1, 16, 1])));
-        tensor_info.insert(rms_tid, TensorInfo::new(DType::F32, shape_from_concrete(&[1, 16, 1])));
-        tensor_info.insert(recip_tid, TensorInfo::new(DType::F32, shape_from_concrete(&[1, 16, 1])));
+        tensor_info.insert(
+            biased_tid,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[1, 16, 1])),
+        );
+        tensor_info.insert(
+            rms_tid,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[1, 16, 1])),
+        );
+        tensor_info.insert(
+            recip_tid,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[1, 16, 1])),
+        );
         tensor_info.insert(normed_tid, TensorInfo::new(DType::F32, x_shape.clone()));
         tensor_info.insert(w_tid, TensorInfo::new(DType::F32, hidden_shape));
         tensor_info.insert(out_tid, TensorInfo::new(DType::F32, x_shape));
@@ -351,14 +362,19 @@ mod tests {
         let mut params: HashMap<TensorId, AiParam> = HashMap::new();
         params.insert(two_tid, f32_param(2.0));
         params.insert(eps_tid, f32_param(1e-5));
-        params.insert(
-            w_tid,
-            vec_param(&vec![1.0f32; hidden as usize]),
-        );
+        params.insert(w_tid, vec_param(&vec![1.0f32; hidden as usize]));
 
         let nodes = vec![
             AiNode::new(0, AiOp::Pow, vec![x_tid, two_tid], vec![pow2_tid]),
-            AiNode::new(1, AiOp::ReduceMean { axes: vec![-1], keepdims: true }, vec![pow2_tid], vec![mean_tid]),
+            AiNode::new(
+                1,
+                AiOp::ReduceMean {
+                    axes: vec![-1],
+                    keepdims: true,
+                },
+                vec![pow2_tid],
+                vec![mean_tid],
+            ),
             AiNode::new(2, AiOp::Add, vec![mean_tid, eps_tid], vec![biased_tid]),
             AiNode::new(3, AiOp::Sqrt, vec![biased_tid], vec![rms_tid]),
             AiNode::new(4, AiOp::Reciprocal, vec![rms_tid], vec![recip_tid]),
@@ -392,7 +408,12 @@ mod tests {
         let graph = pass.run(graph).unwrap();
 
         // Should have exactly 1 node: RmsNorm.
-        assert_eq!(graph.nodes.len(), 1, "expected 1 node after fusion, got {}", graph.nodes.len());
+        assert_eq!(
+            graph.nodes.len(),
+            1,
+            "expected 1 node after fusion, got {}",
+            graph.nodes.len()
+        );
         let node = &graph.nodes[0];
         assert!(matches!(node.op, AiOp::RmsNorm { epsilon } if (epsilon - 1e-5).abs() < 1e-8));
         // inputs: [x=0, weight=9], output: [10]
@@ -426,7 +447,10 @@ mod tests {
         tensor_info.insert(pow2_tid, TensorInfo::new(DType::F32, x_shape.clone()));
         tensor_info.insert(mean_tid, TensorInfo::new(DType::F32, reduced_shape.clone()));
         tensor_info.insert(eps_tid, TensorInfo::new(DType::F32, scalar_shape));
-        tensor_info.insert(biased_tid, TensorInfo::new(DType::F32, reduced_shape.clone()));
+        tensor_info.insert(
+            biased_tid,
+            TensorInfo::new(DType::F32, reduced_shape.clone()),
+        );
         tensor_info.insert(rms_tid, TensorInfo::new(DType::F32, reduced_shape));
         tensor_info.insert(normed_tid, TensorInfo::new(DType::F32, x_shape.clone()));
         tensor_info.insert(w_tid, TensorInfo::new(DType::F32, hidden_shape));
@@ -439,7 +463,15 @@ mod tests {
 
         let nodes = vec![
             AiNode::new(0, AiOp::Pow, vec![x_tid, two_tid], vec![pow2_tid]),
-            AiNode::new(1, AiOp::ReduceMean { axes: vec![-1], keepdims: true }, vec![pow2_tid], vec![mean_tid]),
+            AiNode::new(
+                1,
+                AiOp::ReduceMean {
+                    axes: vec![-1],
+                    keepdims: true,
+                },
+                vec![pow2_tid],
+                vec![mean_tid],
+            ),
             AiNode::new(2, AiOp::Add, vec![mean_tid, eps_tid], vec![biased_tid]),
             AiNode::new(3, AiOp::Sqrt, vec![biased_tid], vec![rms_tid]),
             AiNode::new(4, AiOp::Div, vec![x_tid, rms_tid], vec![normed_tid]),
@@ -471,8 +503,13 @@ mod tests {
         let pass = RmsNormFusion;
         let graph = pass.run(graph).unwrap();
 
-        assert_eq!(graph.nodes.len(), 1, "expected 1 node after fusion, got {}: {:?}",
-            graph.nodes.len(), graph.nodes.iter().map(|n| &n.op).collect::<Vec<_>>());
+        assert_eq!(
+            graph.nodes.len(),
+            1,
+            "expected 1 node after fusion, got {}: {:?}",
+            graph.nodes.len(),
+            graph.nodes.iter().map(|n| &n.op).collect::<Vec<_>>()
+        );
         let node = &graph.nodes[0];
         assert!(matches!(node.op, AiOp::RmsNorm { epsilon } if (epsilon - 1e-6).abs() < 1e-10));
         assert_eq!(node.inputs[0], 0); // x
@@ -488,9 +525,18 @@ mod tests {
         let graph = pipeline.run(graph).unwrap();
 
         // After the full pipeline, the RmsNorm should still be fused.
-        let rmsnorm_nodes: Vec<_> = graph.nodes.iter().filter(|n| matches!(n.op, AiOp::RmsNorm { .. })).collect();
-        assert_eq!(rmsnorm_nodes.len(), 1, "expected 1 RmsNorm after pipeline, got {}: {:?}",
-            graph.nodes.len(), graph.nodes.iter().map(|n| &n.op).collect::<Vec<_>>());
+        let rmsnorm_nodes: Vec<_> = graph
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.op, AiOp::RmsNorm { .. }))
+            .collect();
+        assert_eq!(
+            rmsnorm_nodes.len(),
+            1,
+            "expected 1 RmsNorm after pipeline, got {}: {:?}",
+            graph.nodes.len(),
+            graph.nodes.iter().map(|n| &n.op).collect::<Vec<_>>()
+        );
     }
 
     #[test]

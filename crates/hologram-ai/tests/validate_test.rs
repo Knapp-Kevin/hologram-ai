@@ -18,7 +18,10 @@ fn fixture_path(name: &str) -> PathBuf {
 fn validate_identity_onnx() {
     let path = fixture_path("identity.onnx");
     if !path.exists() {
-        eprintln!("skipping: {} not found (run scripts/gen-fixtures.py)", path.display());
+        eprintln!(
+            "skipping: {} not found (run scripts/gen-fixtures.py)",
+            path.display()
+        );
         return;
     }
     let report = validate_model(&path);
@@ -34,7 +37,10 @@ fn validate_identity_onnx() {
 fn validate_tiny_mlp_onnx() {
     let path = fixture_path("tiny-mlp.onnx");
     if !path.exists() {
-        eprintln!("skipping: {} not found (run scripts/gen-fixtures.py)", path.display());
+        eprintln!(
+            "skipping: {} not found (run scripts/gen-fixtures.py)",
+            path.display()
+        );
         return;
     }
     let report = validate_model(&path);
@@ -43,8 +49,14 @@ fn validate_tiny_mlp_onnx() {
         "tiny-mlp.onnx should compile: {:?}",
         report.error
     );
-    assert!(report.total_nodes >= 2, "expected at least 2 nodes (Gather + MatMul)");
-    assert!(report.total_params >= 2, "expected at least 2 params (embed + linear weights)");
+    assert!(
+        report.total_nodes >= 2,
+        "expected at least 2 nodes (Gather + MatMul)"
+    );
+    assert!(
+        report.total_params >= 2,
+        "expected at least 2 params (embed + linear weights)"
+    );
     // Note: compiled_node_count is currently 0 because the compiler doesn't
     // populate it yet (TODO in compiler.rs). Test compilation_ok instead.
 }

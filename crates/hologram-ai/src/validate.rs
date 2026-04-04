@@ -205,17 +205,13 @@ pub fn validate_graph(graph: hologram_ai_common::AiGraph) -> ValidationReport {
     }
 }
 
-fn import_model(
-    path: &Path,
-    ext: &str,
-) -> anyhow::Result<hologram_ai_common::AiGraph> {
+fn import_model(path: &Path, ext: &str) -> anyhow::Result<hologram_ai_common::AiGraph> {
     match ext {
-        "onnx" => {
-            Ok(hologram_ai_onnx::import_onnx_path(path, Default::default())?)
-        }
-        "gguf" => {
-            Ok(hologram_ai_gguf::import_gguf(path, Default::default())?)
-        }
+        "onnx" => Ok(hologram_ai_onnx::import_onnx_path(
+            path,
+            Default::default(),
+        )?),
+        "gguf" => Ok(hologram_ai_gguf::import_gguf(path, Default::default())?),
         other => anyhow::bail!("unsupported: .{other}"),
     }
 }

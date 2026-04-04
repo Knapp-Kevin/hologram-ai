@@ -182,9 +182,9 @@ fn try_find_silu(
                 let mul_b = node.inputs[1];
                 // Check if one input is Sigmoid and the other is the same
                 // tensor that Sigmoid consumes (i.e., Mul(x, sigmoid(x))).
-                if let Some(result) = try_match_decomposed_silu(
-                    tid_to_node, graph, idx, mul_a, mul_b, other,
-                ) {
+                if let Some(result) =
+                    try_match_decomposed_silu(tid_to_node, graph, idx, mul_a, mul_b, other)
+                {
                     return Some(result);
                 }
             }

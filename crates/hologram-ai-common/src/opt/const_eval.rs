@@ -55,7 +55,9 @@ impl Pass for ConstantEvaluation {
                 let n_dims = bytes.len() / 8;
                 let out_shape = shape_from_concrete(&[n_dims as u64]);
                 let info = TensorInfo::new(DType::INT64, out_shape);
-                graph.params.insert(out_tid, AiParam::inline(bytes, info.clone()));
+                graph
+                    .params
+                    .insert(out_tid, AiParam::inline(bytes, info.clone()));
                 graph.tensor_info.insert(out_tid, info);
                 materialized += 1;
                 continue;
@@ -134,7 +136,6 @@ impl Pass for ConstantEvaluation {
     }
 }
 
-
 /// Evaluate an `AiOp::Shape` node when the input has a fully-concrete shape.
 /// Returns the shape values serialized as little-endian INT64 bytes, or None
 /// if the op is not Shape or the input shape is not fully concrete.
@@ -197,9 +198,17 @@ fn eval_node(
         AiOp::Add => eval_binary_f32(inputs, input_shapes, |a, b| a + b),
         AiOp::Sub => eval_binary_f32(inputs, input_shapes, |a, b| a - b),
         AiOp::Mul => eval_binary_f32(inputs, input_shapes, |a, b| a * b),
-        AiOp::Div => eval_binary_f32(inputs, input_shapes, |a, b| {
-            if b != 0.0 { a / b } else { 0.0 }
-        }),
+        AiOp::Div => eval_binary_f32(
+            inputs,
+            input_shapes,
+            |a, b| {
+                if b != 0.0 {
+                    a / b
+                } else {
+                    0.0
+                }
+            },
+        ),
         AiOp::Pow => eval_binary_f32(inputs, input_shapes, |a, b| a.powf(b)),
 
         // Comparisons with N-D broadcast (output: INT64, 0 or 1).
@@ -248,9 +257,12 @@ fn eval_node(
         }
         AiOp::Reshape { .. } => eval_reshape(inputs, input_shapes),
         AiOp::Transpose { perm } => eval_transpose(inputs, input_shapes, perm),
-        AiOp::Slice { axes, starts, ends, steps } => {
-            eval_slice(inputs, input_shapes, axes, starts, ends, steps)
-        }
+        AiOp::Slice {
+            axes,
+            starts,
+            ends,
+            steps,
+        } => eval_slice(inputs, input_shapes, axes, starts, ends, steps),
         AiOp::Concat { axis } => eval_concat(inputs, input_shapes, *axis),
         AiOp::Identity => eval_identity(inputs, input_shapes),
 
@@ -266,8 +278,16 @@ fn broadcast_shape(a: &[usize], b: &[usize]) -> Option<Vec<usize>> {
     let mut result = vec![0usize; ndims];
 
     for i in 0..ndims {
-        let da = if i < ndims - a.len() { 1 } else { a[i - (ndims - a.len())] };
-        let db = if i < ndims - b.len() { 1 } else { b[i - (ndims - b.len())] };
+        let da = if i < ndims - a.len() {
+            1
+        } else {
+            a[i - (ndims - a.len())]
+        };
+        let db = if i < ndims - b.len() {
+            1
+        } else {
+            b[i - (ndims - b.len())]
+        };
         if da == db {
             result[i] = da;
         } else if da == 1 {
@@ -422,14 +442,15 @@ fn eval_expand(
     }
 
     // Read target shape from the shape tensor.
-    let target_shape: Vec<usize> = if shape_info.logical_dtype == DType::INT64 && shape_bytes.len() % 8 == 0 {
-        shape_bytes
-            .chunks_exact(8)
-            .map(|c| i64::from_le_bytes(c.try_into().unwrap()) as usize)
-            .collect()
-    } else {
-        return None;
-    };
+    let target_shape: Vec<usize> =
+        if shape_info.logical_dtype == DType::INT64 && shape_bytes.len() % 8 == 0 {
+            shape_bytes
+                .chunks_exact(8)
+                .map(|c| i64::from_le_bytes(c.try_into().unwrap()) as usize)
+                .collect()
+        } else {
+            return None;
+        };
 
     let target_elems: usize = target_shape.iter().product();
     if target_elems == 0 || target_elems > MAX_OUTPUT_ELEMS {
@@ -607,10 +628,7 @@ fn eval_where(
     Some((result, x_dtype, out_shape))
 }
 
-fn eval_cast(
-    inputs: &[(&[u8], &TensorInfo)],
-    to: DType,
-) -> Option<(Vec<u8>, DType, Vec<usize>)> {
+fn eval_cast(inputs: &[(&[u8], &TensorInfo)], to: DType) -> Option<(Vec<u8>, DType, Vec<usize>)> {
     if inputs.is_empty() {
         return None;
     }
@@ -768,15 +786,13 @@ fn eval_gather(
                 let data_flat = pre * data_strides[ax.min(data_strides.len() - 1)]
                     + index * post_axis_dims
                     + post;
-                let out_flat = pre * (indices_total * post_axis_dims)
-                    + idx_flat * post_axis_dims
-                    + post;
+                let out_flat =
+                    pre * (indices_total * post_axis_dims) + idx_flat * post_axis_dims + post;
 
                 let src = data_flat * elem_size;
                 let dst = out_flat * elem_size;
                 if src + elem_size <= data_bytes.len() && dst + elem_size <= result.len() {
-                    result[dst..dst + elem_size]
-                        .copy_from_slice(&data_bytes[src..src + elem_size]);
+                    result[dst..dst + elem_size].copy_from_slice(&data_bytes[src..src + elem_size]);
                 }
             }
         }
@@ -822,7 +838,11 @@ fn eval_structural_reshape(
             sorted_axes.sort();
             for &ax in &sorted_axes {
                 let ndim = shape.len() as i64;
-                let pos = if ax < 0 { (ndim + 1 + ax).max(0) as usize } else { ax as usize };
+                let pos = if ax < 0 {
+                    (ndim + 1 + ax).max(0) as usize
+                } else {
+                    ax as usize
+                };
                 shape.insert(pos.min(shape.len()), 1);
             }
             shape
@@ -835,7 +855,13 @@ fn eval_structural_reshape(
                 let ndim = in_shape.len() as i64;
                 let remove: Vec<usize> = axes
                     .iter()
-                    .map(|&a| if a < 0 { (ndim + a).max(0) as usize } else { a as usize })
+                    .map(|&a| {
+                        if a < 0 {
+                            (ndim + a).max(0) as usize
+                        } else {
+                            a as usize
+                        }
+                    })
                     .collect();
                 in_shape
                     .iter()
@@ -847,7 +873,11 @@ fn eval_structural_reshape(
         }
         AiOp::Flatten { axis } => {
             let ndim = in_shape.len() as i64;
-            let ax = if *axis < 0 { (ndim + axis).max(0) as usize } else { *axis as usize };
+            let ax = if *axis < 0 {
+                (ndim + axis).max(0) as usize
+            } else {
+                *axis as usize
+            };
             let ax = ax.min(in_shape.len());
             let d0: usize = in_shape[..ax].iter().product::<usize>().max(1);
             let d1: usize = in_shape[ax..].iter().product::<usize>().max(1);
@@ -991,13 +1021,14 @@ fn eval_slice(
     let ndim = in_shape.len();
 
     // Build per-dimension slice specs: (start, end, step) for each dim.
-    let mut dim_specs: Vec<(usize, usize, usize)> = in_shape
-        .iter()
-        .map(|&d| (0, d, 1))
-        .collect();
+    let mut dim_specs: Vec<(usize, usize, usize)> = in_shape.iter().map(|&d| (0, d, 1)).collect();
 
     for i in 0..axes.len() {
-        let ax = if axes[i] < 0 { (ndim as i64 + axes[i]).max(0) as usize } else { axes[i] as usize };
+        let ax = if axes[i] < 0 {
+            (ndim as i64 + axes[i]).max(0) as usize
+        } else {
+            axes[i] as usize
+        };
         if ax >= ndim {
             continue;
         }
@@ -1075,7 +1106,11 @@ fn eval_concat(
     }
 
     let ndim = input_shapes[0].len();
-    let ax = if axis < 0 { (ndim as i64 + axis).max(0) as usize } else { axis as usize };
+    let ax = if axis < 0 {
+        (ndim as i64 + axis).max(0) as usize
+    } else {
+        axis as usize
+    };
     if ax >= ndim {
         return None;
     }
@@ -1088,7 +1123,11 @@ fn eval_concat(
         if input_shapes[i].len() != ndim {
             return None;
         }
-        for (d, (&dim_i, &dim_0)) in input_shapes[i].iter().zip(input_shapes[0].iter()).enumerate() {
+        for (d, (&dim_i, &dim_0)) in input_shapes[i]
+            .iter()
+            .zip(input_shapes[0].iter())
+            .enumerate()
+        {
             if d != ax && dim_i != dim_0 {
                 return None;
             }
@@ -1210,22 +1249,13 @@ mod tests {
         // a = [0, 1, 2] shape [3, 1]
         // b = [0, 1, 2] shape [1, 3]
         // result[i][j] = (a[i] <= b[j]) → lower triangular
-        let a_bytes: Vec<u8> = [0i64, 1, 2]
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        let b_bytes: Vec<u8> = [0i64, 1, 2]
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let a_bytes: Vec<u8> = [0i64, 1, 2].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let b_bytes: Vec<u8> = [0i64, 1, 2].iter().flat_map(|v| v.to_le_bytes()).collect();
 
         let a_info = make_ti(DType::INT64, &[3, 1]);
         let b_info = make_ti(DType::INT64, &[1, 3]);
 
-        let inputs = vec![
-            (a_bytes.as_slice(), &a_info),
-            (b_bytes.as_slice(), &b_info),
-        ];
+        let inputs = vec![(a_bytes.as_slice(), &a_info), (b_bytes.as_slice(), &b_info)];
         let shapes = vec![vec![3, 1], vec![1, 3]];
 
         let (result, dtype, shape) = eval_comparison(&inputs, &shapes, |a, b| a <= b).unwrap();
@@ -1251,13 +1281,11 @@ mod tests {
         let a_info = make_ti(DType::INT64, &[2]);
         let b_info = make_ti(DType::INT64, &[2]);
 
-        let inputs = vec![
-            (a_bytes.as_slice(), &a_info),
-            (b_bytes.as_slice(), &b_info),
-        ];
+        let inputs = vec![(a_bytes.as_slice(), &a_info), (b_bytes.as_slice(), &b_info)];
         let shapes = vec![vec![2], vec![2]];
 
-        let (result, dtype, shape) = eval_logical(&inputs, &shapes, |a, b| a != 0 && b != 0).unwrap();
+        let (result, dtype, shape) =
+            eval_logical(&inputs, &shapes, |a, b| a != 0 && b != 0).unwrap();
         assert_eq!(dtype, DType::F32);
         assert_eq!(shape, vec![2]);
         let vals: Vec<f32> = result
@@ -1321,14 +1349,8 @@ mod tests {
     fn test_const_eval_causal_mask_pattern() {
         // Simulates causal mask: LessOrEqual(range_col[1,1,3,1], range_row[1,1,1,3])
         // → 3x3 lower-triangular mask
-        let col_bytes: Vec<u8> = [0i64, 1, 2]
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        let row_bytes: Vec<u8> = [0i64, 1, 2]
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let col_bytes: Vec<u8> = [0i64, 1, 2].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let row_bytes: Vec<u8> = [0i64, 1, 2].iter().flat_map(|v| v.to_le_bytes()).collect();
 
         let mut params = HashMap::new();
         params.insert(
@@ -1346,12 +1368,7 @@ mod tests {
         ti.insert(12u32, make_ti(DType::INT64, &[1, 1, 3, 3]));
 
         let g = make_graph_with_params(
-            vec![AiNode::new(
-                0,
-                AiOp::LessOrEqual,
-                vec![10, 11],
-                vec![12],
-            )],
+            vec![AiNode::new(0, AiOp::LessOrEqual, vec![10, 11], vec![12])],
             params,
             ti,
             vec![12],

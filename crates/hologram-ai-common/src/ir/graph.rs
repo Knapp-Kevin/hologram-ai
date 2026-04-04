@@ -319,7 +319,9 @@ impl AiGraph {
             order.push(nid);
             if let Some(succs) = adj.get(&nid) {
                 for &succ in succs {
-                    let deg = in_degree.get_mut(&succ).expect("in_degree missing for successor");
+                    let deg = in_degree
+                        .get_mut(&succ)
+                        .expect("in_degree missing for successor");
                     *deg -= 1;
                     if *deg == 0 {
                         queue.push_back(succ);

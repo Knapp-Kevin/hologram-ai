@@ -84,10 +84,8 @@ fn bert_onnx_executes() {
         .expect("compilation failed");
 
     // Load and build tape.
-    let plan = hologram::load_auto(&archive.bytes)
-        .expect("loading plan failed");
-    let tape = hologram::build_tape_from_plan(&plan)
-        .expect("building execution tape");
+    let plan = hologram::load_auto(&archive.bytes).expect("loading plan failed");
+    let tape = hologram::build_tape_from_plan(&plan).expect("building execution tape");
 
     // Build inputs: input_ids=[1, 32], attention_mask=[1, 32], token_type_ids=[1, 32]
     // BERT expects 3 inputs (order depends on export, but typically:
@@ -100,9 +98,21 @@ fn bert_onnx_executes() {
     let token_type_ids: Vec<i64> = vec![0i64; seq_len];
 
     let mut inputs = hologram::GraphInputs::new();
-    inputs.set_with_shape(0, bytemuck::cast_slice(&input_ids).to_vec(), vec![1, seq_len]);
-    inputs.set_with_shape(1, bytemuck::cast_slice(&attention_mask).to_vec(), vec![1, seq_len]);
-    inputs.set_with_shape(2, bytemuck::cast_slice(&token_type_ids).to_vec(), vec![1, seq_len]);
+    inputs.set_with_shape(
+        0,
+        bytemuck::cast_slice(&input_ids).to_vec(),
+        vec![1, seq_len],
+    );
+    inputs.set_with_shape(
+        1,
+        bytemuck::cast_slice(&attention_mask).to_vec(),
+        vec![1, seq_len],
+    );
+    inputs.set_with_shape(
+        2,
+        bytemuck::cast_slice(&token_type_ids).to_vec(),
+        vec![1, seq_len],
+    );
 
     // Execute — may hit runtime dispatch issues in hologram base for
     // ops not yet exercised by LLM models (BERT is the first encoder-only
@@ -117,7 +127,8 @@ fn bert_onnx_executes() {
             return;
         }
         Err(panic) => {
-            let msg = panic.downcast_ref::<String>()
+            let msg = panic
+                .downcast_ref::<String>()
                 .map(|s| s.as_str())
                 .or_else(|| panic.downcast_ref::<&str>().copied())
                 .unwrap_or("unknown panic");

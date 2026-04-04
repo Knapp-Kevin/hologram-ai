@@ -65,11 +65,7 @@ fn check_param_shapes(graph: &AiGraph, errors: &mut Vec<ShapeError>) {
         let info = param.info();
 
         // Try to evaluate shape to concrete dimensions.
-        let concrete_dims: Option<Vec<u64>> = info
-            .shape
-            .iter()
-            .map(|d| d.evaluate())
-            .collect();
+        let concrete_dims: Option<Vec<u64>> = info.shape.iter().map(|d| d.evaluate()).collect();
 
         let concrete_dims = match concrete_dims {
             Some(dims) => dims,
@@ -255,9 +251,7 @@ fn check_matmul_output_shape(
     if let (Some(rn), Some(on)) = (rhs_n, out_n) {
         if rn != on {
             errors.push(ShapeError {
-                message: format!(
-                    "node {node_id} MatMul output last dim {on} != B last dim {rn}",
-                ),
+                message: format!("node {node_id} MatMul output last dim {on} != B last dim {rn}",),
                 node_name: Some(format!("node_{node_id}")),
             });
         }
@@ -270,9 +264,7 @@ fn check_matmul_output_shape(
         if let (Some(lm), Some(om)) = (lhs_m, out_m) {
             if lm != om {
                 errors.push(ShapeError {
-                    message: format!(
-                        "node {node_id} MatMul output M dim {om} != A M dim {lm}",
-                    ),
+                    message: format!("node {node_id} MatMul output M dim {om} != A M dim {lm}",),
                     node_name: Some(format!("node_{node_id}")),
                 });
             }
@@ -283,8 +275,7 @@ fn check_matmul_output_shape(
 /// Check 3: No remaining Dynamic dims after concretization.
 fn check_dynamic_dims(graph: &AiGraph, errors: &mut Vec<ShapeError>) {
     // Skip graph inputs — they may legitimately have dynamic dims.
-    let input_tids: std::collections::HashSet<TensorId> =
-        graph.inputs.iter().copied().collect();
+    let input_tids: std::collections::HashSet<TensorId> = graph.inputs.iter().copied().collect();
 
     for (&tid, info) in &graph.tensor_info {
         if input_tids.contains(&tid) {
@@ -308,8 +299,7 @@ fn check_dynamic_dims(graph: &AiGraph, errors: &mut Vec<ShapeError>) {
 
 /// Check 4: No zero-product shapes (except graph inputs and shape-computation tensors).
 fn check_zero_product_shapes(graph: &AiGraph, errors: &mut Vec<ShapeError>) {
-    let input_tids: std::collections::HashSet<TensorId> =
-        graph.inputs.iter().copied().collect();
+    let input_tids: std::collections::HashSet<TensorId> = graph.inputs.iter().copied().collect();
 
     for (&tid, info) in &graph.tensor_info {
         if input_tids.contains(&tid) {
@@ -321,11 +311,7 @@ fn check_zero_product_shapes(graph: &AiGraph, errors: &mut Vec<ShapeError>) {
             continue;
         }
 
-        let concrete_dims: Option<Vec<u64>> = info
-            .shape
-            .iter()
-            .map(|d| d.evaluate())
-            .collect();
+        let concrete_dims: Option<Vec<u64>> = info.shape.iter().map(|d| d.evaluate()).collect();
 
         if let Some(dims) = concrete_dims {
             let product: u64 = dims.iter().product();
@@ -378,7 +364,8 @@ mod tests {
         let mut g = make_graph();
         let info = TensorInfo::new(DType::F32, shape_from_concrete(&[4, 8]));
         // 4*8*4 = 128 bytes expected, but provide 64 bytes.
-        g.params.insert(10, AiParam::inline(vec![0u8; 64], info.clone()));
+        g.params
+            .insert(10, AiParam::inline(vec![0u8; 64], info.clone()));
         g.tensor_info.insert(10, info);
 
         let errs = validate_shape_consistency(&g);
@@ -391,7 +378,8 @@ mod tests {
     fn param_shape_match_no_error() {
         let mut g = make_graph();
         let info = TensorInfo::new(DType::F32, shape_from_concrete(&[4, 8]));
-        g.params.insert(10, AiParam::inline(vec![0u8; 128], info.clone()));
+        g.params
+            .insert(10, AiParam::inline(vec![0u8; 128], info.clone()));
         g.tensor_info.insert(10, info);
 
         let errs = validate_shape_consistency(&g);
@@ -402,17 +390,25 @@ mod tests {
     fn matmul_k_mismatch_detected() {
         let mut g = make_graph();
         // A: [2, 64], B: [128, 32] — k=64 vs k=128, mismatch!
-        g.tensor_info
-            .insert(0, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 64])));
-        g.tensor_info
-            .insert(1, TensorInfo::new(DType::F32, shape_from_concrete(&[128, 32])));
-        g.tensor_info
-            .insert(2, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 32])));
-        g.nodes.push(AiNode::new(0, AiOp::MatMul, vec![0, 1], vec![2]));
+        g.tensor_info.insert(
+            0,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[2, 64])),
+        );
+        g.tensor_info.insert(
+            1,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[128, 32])),
+        );
+        g.tensor_info.insert(
+            2,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[2, 32])),
+        );
+        g.nodes
+            .push(AiNode::new(0, AiOp::MatMul, vec![0, 1], vec![2]));
 
         let errs = validate_shape_consistency(&g);
         assert!(
-            errs.iter().any(|e| e.message.contains("inner dim mismatch")),
+            errs.iter()
+                .any(|e| e.message.contains("inner dim mismatch")),
             "should detect k mismatch: {errs:?}"
         );
     }
@@ -421,13 +417,20 @@ mod tests {
     fn matmul_k_match_no_error() {
         let mut g = make_graph();
         // A: [2, 64], B: [64, 32] — k=64, matches
-        g.tensor_info
-            .insert(0, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 64])));
-        g.tensor_info
-            .insert(1, TensorInfo::new(DType::F32, shape_from_concrete(&[64, 32])));
-        g.tensor_info
-            .insert(2, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 32])));
-        g.nodes.push(AiNode::new(0, AiOp::MatMul, vec![0, 1], vec![2]));
+        g.tensor_info.insert(
+            0,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[2, 64])),
+        );
+        g.tensor_info.insert(
+            1,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[64, 32])),
+        );
+        g.tensor_info.insert(
+            2,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[2, 32])),
+        );
+        g.nodes
+            .push(AiNode::new(0, AiOp::MatMul, vec![0, 1], vec![2]));
 
         let errs = validate_shape_consistency(&g);
         let matmul_errs: Vec<_> = errs
@@ -457,8 +460,10 @@ mod tests {
     #[test]
     fn zero_product_shape_detected() {
         let mut g = make_graph();
-        g.tensor_info
-            .insert(5, TensorInfo::new(DType::F32, shape_from_concrete(&[1, 0, 64])));
+        g.tensor_info.insert(
+            5,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[1, 0, 64])),
+        );
 
         let errs = validate_shape_consistency(&g);
         assert!(
@@ -476,7 +481,10 @@ mod tests {
         g.inputs.push(0); // Mark as graph input — should be skipped.
 
         let errs = validate_shape_consistency(&g);
-        let dynamic_errs: Vec<_> = errs.iter().filter(|e| e.message.contains("Dynamic")).collect();
+        let dynamic_errs: Vec<_> = errs
+            .iter()
+            .filter(|e| e.message.contains("Dynamic"))
+            .collect();
         assert!(
             dynamic_errs.is_empty(),
             "graph input dynamic dims should be skipped: {dynamic_errs:?}"
@@ -488,14 +496,22 @@ mod tests {
         let mut g = make_graph();
         // Gemm with trans_b=true: A=[2,64], B=[32,64] (stored as [N,K])
         // k should be A's last dim = 64, B's last dim (trans_b) = 64 — match
-        g.tensor_info
-            .insert(0, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 64])));
-        g.tensor_info
-            .insert(1, TensorInfo::new(DType::F32, shape_from_concrete(&[32, 64])));
-        g.tensor_info
-            .insert(2, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 32])));
-        g.tensor_info
-            .insert(3, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 32])));
+        g.tensor_info.insert(
+            0,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[2, 64])),
+        );
+        g.tensor_info.insert(
+            1,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[32, 64])),
+        );
+        g.tensor_info.insert(
+            2,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[2, 32])),
+        );
+        g.tensor_info.insert(
+            3,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[2, 32])),
+        );
         g.nodes.push(AiNode::new(
             0,
             AiOp::Gemm {

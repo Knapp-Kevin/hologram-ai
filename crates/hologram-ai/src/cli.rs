@@ -28,7 +28,12 @@ enum Command {
     /// Multi-component: `hologram-ai compile --manifest pipeline.toml -o out/`
     Compile {
         /// Path to the input model (ONNX or GGUF). Mutually exclusive with --manifest.
-        #[arg(short, long, required_unless_present = "manifest", conflicts_with = "manifest")]
+        #[arg(
+            short,
+            long,
+            required_unless_present = "manifest",
+            conflicts_with = "manifest"
+        )]
         model: Option<PathBuf>,
         /// Path to a TOML manifest for multi-component compilation.
         /// Mutually exclusive with --model.
@@ -98,7 +103,9 @@ fn main() -> anyhow::Result<()> {
                 Some("q2_0" | "Q2_0") => hologram_ai_common::lower::QuantStrategy::Q2_0,
                 Some("q4_0" | "Q4_0") => hologram_ai_common::lower::QuantStrategy::Q4_0,
                 Some("q8_0" | "Q8_0") => hologram_ai_common::lower::QuantStrategy::Q8_0,
-                Some(other) => anyhow::bail!("unsupported quantization scheme '{other}' (supported: q2_0, q4_0, q8_0)"),
+                Some(other) => anyhow::bail!(
+                    "unsupported quantization scheme '{other}' (supported: q2_0, q4_0, q8_0)"
+                ),
                 None => hologram_ai_common::lower::QuantStrategy::Auto,
             };
             let compiler = ModelCompiler {
@@ -134,7 +141,8 @@ fn main() -> anyhow::Result<()> {
             } else {
                 // Detect LLM: either the metadata says so (GGUF sets arch/n_layers)
                 // or we have a tokenizer (strong signal for text models).
-                let is_llm = (compiled.metadata.arch != "unknown" && compiled.metadata.n_layers > 0)
+                let is_llm = (compiled.metadata.arch != "unknown"
+                    && compiled.metadata.n_layers > 0)
                     || tok_path.is_some();
                 if is_llm {
                     hologram::hologram_archive::section::model_meta::ModelKind::TextLlm
@@ -215,7 +223,6 @@ fn inspect_holo(
         .block_on(execute(args))
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
-
 
 /// Inspect an ONNX model file (import + print metadata without compilation).
 fn inspect_onnx(path: &std::path::Path) -> anyhow::Result<()> {
@@ -335,15 +342,20 @@ fn parse_model_kind(s: &str) -> hologram::hologram_archive::section::model_meta:
     }
 }
 
-fn parse_manifest(path: &std::path::Path) -> anyhow::Result<(ModelSource, Option<hologram::hologram_archive::section::model_meta::ModelKind>)> {
+fn parse_manifest(
+    path: &std::path::Path,
+) -> anyhow::Result<(
+    ModelSource,
+    Option<hologram::hologram_archive::section::model_meta::ModelKind>,
+)> {
     use anyhow::Context as _;
     use hologram_ai::compiler::ComponentInput;
     use hologram_ai_common::sections::meta::{ComponentConnection, ComponentRole};
 
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading manifest {}", path.display()))?;
-    let manifest: Manifest = toml::from_str(&text)
-        .with_context(|| format!("parsing manifest {}", path.display()))?;
+    let manifest: Manifest =
+        toml::from_str(&text).with_context(|| format!("parsing manifest {}", path.display()))?;
     let manifest_kind = manifest.kind.as_deref().map(parse_model_kind);
 
     let manifest_dir = path.parent().unwrap_or(std::path::Path::new("."));
@@ -375,10 +387,9 @@ fn parse_manifest(path: &std::path::Path) -> anyhow::Result<(ModelSource, Option
         .connection
         .into_iter()
         .map(|c| {
-            let (from_component, from_output) = c.from.split_once(':')
-                .unwrap_or((&c.from, "output"));
-            let (to_component, to_input) = c.to.split_once(':')
-                .unwrap_or((&c.to, "input"));
+            let (from_component, from_output) =
+                c.from.split_once(':').unwrap_or((&c.from, "output"));
+            let (to_component, to_input) = c.to.split_once(':').unwrap_or((&c.to, "input"));
             ComponentConnection {
                 from_component: from_component.to_string(),
                 from_output: from_output.to_string(),
@@ -388,7 +399,13 @@ fn parse_manifest(path: &std::path::Path) -> anyhow::Result<(ModelSource, Option
         })
         .collect();
 
-    Ok((ModelSource::MultiOnnx { components, connections }, manifest_kind))
+    Ok((
+        ModelSource::MultiOnnx {
+            components,
+            connections,
+        },
+        manifest_kind,
+    ))
 }
 
 fn tracing_subscriber_init() {

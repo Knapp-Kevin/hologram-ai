@@ -99,7 +99,12 @@ impl Pass for KvSlotInjection {
             // which is [batch, kv_heads, seq, head_dim] — heads-first.
             // KvWrite must transpose to seq-first for cache storage.
             let (nkv, hd, layout) = match &node.op {
-                AiOp::GroupedQueryAttention { num_kv_heads, head_dim, heads_first, .. } => {
+                AiOp::GroupedQueryAttention {
+                    num_kv_heads,
+                    head_dim,
+                    heads_first,
+                    ..
+                } => {
                     let kv_layout = if *heads_first {
                         crate::ir::KvLayout::HeadsFirst
                     } else {
@@ -121,7 +126,13 @@ impl Pass for KvSlotInjection {
             });
             let k_node = AiNode::new(
                 next_node_id,
-                AiOp::KvSlotWrite { layer, is_key: true, n_kv_heads: nkv, head_dim: hd, layout },
+                AiOp::KvSlotWrite {
+                    layer,
+                    is_key: true,
+                    n_kv_heads: nkv,
+                    head_dim: hd,
+                    layout,
+                },
                 vec![k_tid],
                 vec![k_out],
             );
@@ -135,7 +146,13 @@ impl Pass for KvSlotInjection {
             });
             let v_node = AiNode::new(
                 next_node_id,
-                AiOp::KvSlotWrite { layer, is_key: false, n_kv_heads: nkv, head_dim: hd, layout },
+                AiOp::KvSlotWrite {
+                    layer,
+                    is_key: false,
+                    n_kv_heads: nkv,
+                    head_dim: hd,
+                    layout,
+                },
                 vec![v_tid],
                 vec![v_out],
             );
@@ -153,7 +170,11 @@ impl Pass for KvSlotInjection {
             graph.nodes[gqa_idx].inputs[1] = k_out;
             graph.nodes[gqa_idx].inputs[2] = v_out;
 
-            injections.push(Injection { gqa_idx, k_node, v_node });
+            injections.push(Injection {
+                gqa_idx,
+                k_node,
+                v_node,
+            });
         }
 
         // Insert KvSlotWrite nodes just before their GQA nodes.

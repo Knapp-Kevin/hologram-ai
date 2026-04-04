@@ -135,7 +135,11 @@ fn import_onnx_inner(
 /// This is a lossless fix — no approximation or new weights are introduced.
 fn inject_lm_head_if_needed(mut graph: AiGraph) -> AiGraph {
     // Only inject when output is last_hidden_state (not already logits).
-    let lhs_idx = match graph.output_names.iter().position(|n| n == "last_hidden_state") {
+    let lhs_idx = match graph
+        .output_names
+        .iter()
+        .position(|n| n == "last_hidden_state")
+    {
         Some(i) => i,
         None => return graph,
     };
@@ -148,8 +152,11 @@ fn inject_lm_head_if_needed(mut graph: AiGraph) -> AiGraph {
     //   "embed_tokens.weight"        — older HF optimum exports
     //   "model.embed_tokens.weight"  — recent transformers / optimum-onnx exports
     //   "token_embd.weight"          — llama.cpp / GGUF-derived ONNX exports
-    const EMBED_WEIGHT_NAMES: &[&str] =
-        &["embed_tokens.weight", "model.embed_tokens.weight", "token_embd.weight"];
+    const EMBED_WEIGHT_NAMES: &[&str] = &[
+        "embed_tokens.weight",
+        "model.embed_tokens.weight",
+        "token_embd.weight",
+    ];
     let embed_tid = match EMBED_WEIGHT_NAMES.iter().find_map(|candidate| {
         graph
             .tensor_names
@@ -211,7 +218,12 @@ fn inject_lm_head_if_needed(mut graph: AiGraph) -> AiGraph {
     // logits = last_hidden_state @ embed_tokens.weight^T
     graph.nodes.push(AiNode::new(
         new_nid,
-        AiOp::Gemm { alpha: 1.0, beta: 0.0, trans_a: false, trans_b: true },
+        AiOp::Gemm {
+            alpha: 1.0,
+            beta: 0.0,
+            trans_a: false,
+            trans_b: true,
+        },
         vec![lhs_tid, embed_tid],
         vec![new_tid],
     ));
@@ -407,7 +419,10 @@ mod tests {
 
         let result = inject_lm_head_if_needed(graph);
 
-        assert_eq!(result.output_names[0], "logits", "output should be renamed to logits");
+        assert_eq!(
+            result.output_names[0], "logits",
+            "output should be renamed to logits"
+        );
         // The new output tensor should have vocab_size=32000 as its last dimension.
         let out_tid = result.outputs[0];
         let out_shape = &result.tensor_info[&out_tid].shape;
@@ -418,7 +433,10 @@ mod tests {
         assert_eq!(last_dim, 32000);
         // A Gemm node should have been appended.
         assert_eq!(result.nodes.len(), 1);
-        assert!(matches!(result.nodes[0].op, AiOp::Gemm { trans_b: true, .. }));
+        assert!(matches!(
+            result.nodes[0].op,
+            AiOp::Gemm { trans_b: true, .. }
+        ));
     }
 
     /// `inject_lm_head_if_needed` must be a no-op when `embed_tokens.weight` is
@@ -461,7 +479,13 @@ mod tests {
             result.output_names[0], "last_hidden_state",
             "output name must remain last_hidden_state when weight absent"
         );
-        assert_eq!(result.outputs[0], lhs_tid, "output tensor id must be unchanged");
-        assert!(result.nodes.is_empty(), "no nodes should have been injected");
+        assert_eq!(
+            result.outputs[0], lhs_tid,
+            "output tensor id must be unchanged"
+        );
+        assert!(
+            result.nodes.is_empty(),
+            "no nodes should have been injected"
+        );
     }
 }

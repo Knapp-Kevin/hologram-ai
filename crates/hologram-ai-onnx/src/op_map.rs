@@ -211,7 +211,10 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
         "Floor" => Floor,
         "Ceil" => Ceil,
         "Round" => Round,
-        "Clip" => Clip { min: f32::NEG_INFINITY, max: f32::INFINITY },
+        "Clip" => Clip {
+            min: f32::NEG_INFINITY,
+            max: f32::INFINITY,
+        },
         "Erf" => Erf,
         "Reciprocal" => Reciprocal,
         "Cos" => Cos,
@@ -273,34 +276,82 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
 
         // ── Convolution / pooling ────────────────────────────────────────
         "Conv" => Conv {
-            kernel_shape: ctx.attr_ints("kernel_shape").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
-            strides: ctx.attr_ints("strides").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
-            pads: ctx.attr_ints("pads").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
-            dilations: ctx.attr_ints("dilations").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            kernel_shape: ctx
+                .attr_ints("kernel_shape")
+                .map(|v| v.iter().map(|&i| i as u64).collect())
+                .unwrap_or_default(),
+            strides: ctx
+                .attr_ints("strides")
+                .map(|v| v.iter().map(|&i| i as u64).collect())
+                .unwrap_or_default(),
+            pads: ctx
+                .attr_ints("pads")
+                .map(|v| v.iter().map(|&i| i as u64).collect())
+                .unwrap_or_default(),
+            dilations: ctx
+                .attr_ints("dilations")
+                .map(|v| v.iter().map(|&i| i as u64).collect())
+                .unwrap_or_default(),
             group: ctx.attr_i("group").unwrap_or(1) as u64,
             auto_pad: ctx.attr_s("auto_pad").unwrap_or_default(),
         },
         "ConvTranspose" => ConvTranspose {
-            kernel_shape: ctx.attr_ints("kernel_shape").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
-            strides: ctx.attr_ints("strides").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
-            pads: ctx.attr_ints("pads").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
-            output_padding: ctx.attr_ints("output_padding").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
-            dilations: ctx.attr_ints("dilations").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            kernel_shape: ctx
+                .attr_ints("kernel_shape")
+                .map(|v| v.iter().map(|&i| i as u64).collect())
+                .unwrap_or_default(),
+            strides: ctx
+                .attr_ints("strides")
+                .map(|v| v.iter().map(|&i| i as u64).collect())
+                .unwrap_or_default(),
+            pads: ctx
+                .attr_ints("pads")
+                .map(|v| v.iter().map(|&i| i as u64).collect())
+                .unwrap_or_default(),
+            output_padding: ctx
+                .attr_ints("output_padding")
+                .map(|v| v.iter().map(|&i| i as u64).collect())
+                .unwrap_or_default(),
+            dilations: ctx
+                .attr_ints("dilations")
+                .map(|v| v.iter().map(|&i| i as u64).collect())
+                .unwrap_or_default(),
             group: ctx.attr_i("group").unwrap_or(1) as u64,
             auto_pad: ctx.attr_s("auto_pad").unwrap_or_default(),
         },
         "MaxPool" => MaxPool {
-            kernel_shape: ctx.attr_ints("kernel_shape").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
-            strides: ctx.attr_ints("strides").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
-            pads: ctx.attr_ints("pads").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
-            dilations: ctx.attr_ints("dilations").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            kernel_shape: ctx
+                .attr_ints("kernel_shape")
+                .map(|v| v.iter().map(|&i| i as u64).collect())
+                .unwrap_or_default(),
+            strides: ctx
+                .attr_ints("strides")
+                .map(|v| v.iter().map(|&i| i as u64).collect())
+                .unwrap_or_default(),
+            pads: ctx
+                .attr_ints("pads")
+                .map(|v| v.iter().map(|&i| i as u64).collect())
+                .unwrap_or_default(),
+            dilations: ctx
+                .attr_ints("dilations")
+                .map(|v| v.iter().map(|&i| i as u64).collect())
+                .unwrap_or_default(),
             auto_pad: ctx.attr_s("auto_pad").unwrap_or_default(),
             ceil_mode: ctx.attr_i("ceil_mode").unwrap_or(0) != 0,
         },
         "AveragePool" => AveragePool {
-            kernel_shape: ctx.attr_ints("kernel_shape").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
-            strides: ctx.attr_ints("strides").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
-            pads: ctx.attr_ints("pads").map(|v| v.iter().map(|&i| i as u64).collect()).unwrap_or_default(),
+            kernel_shape: ctx
+                .attr_ints("kernel_shape")
+                .map(|v| v.iter().map(|&i| i as u64).collect())
+                .unwrap_or_default(),
+            strides: ctx
+                .attr_ints("strides")
+                .map(|v| v.iter().map(|&i| i as u64).collect())
+                .unwrap_or_default(),
+            pads: ctx
+                .attr_ints("pads")
+                .map(|v| v.iter().map(|&i| i as u64).collect())
+                .unwrap_or_default(),
             count_include_pad: ctx.attr_i("count_include_pad").unwrap_or(0) != 0,
             auto_pad: ctx.attr_s("auto_pad").unwrap_or_default(),
             ceil_mode: ctx.attr_i("ceil_mode").unwrap_or(0) != 0,
@@ -308,8 +359,12 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
         "GlobalAveragePool" => GlobalAveragePool,
         "Resize" | "Upsample" => Resize {
             mode: ctx.attr_s("mode").unwrap_or_else(|| "nearest".into()),
-            coordinate_transform_mode: ctx.attr_s("coordinate_transformation_mode").unwrap_or_else(|| "half_pixel".into()),
-            nearest_mode: ctx.attr_s("nearest_mode").unwrap_or_else(|| "round_prefer_floor".into()),
+            coordinate_transform_mode: ctx
+                .attr_s("coordinate_transformation_mode")
+                .unwrap_or_else(|| "half_pixel".into()),
+            nearest_mode: ctx
+                .attr_s("nearest_mode")
+                .unwrap_or_else(|| "round_prefer_floor".into()),
         },
         "Pad" => Pad {
             mode: ctx.attr_s("mode").unwrap_or_else(|| "constant".into()),
@@ -413,10 +468,17 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
         },
 
         // ONNX-ML ops — not part of standard DNN inference.
-        "StringNormalizer" | "TfIdfVectorizer" | "LinearClassifier"
-        | "LinearRegressor" | "SVMClassifier" | "SVMRegressor"
-        | "TreeEnsembleClassifier" | "TreeEnsembleRegressor"
-        | "Normalizer" | "Binarizer" | "LabelEncoder" => Opaque {
+        "StringNormalizer"
+        | "TfIdfVectorizer"
+        | "LinearClassifier"
+        | "LinearRegressor"
+        | "SVMClassifier"
+        | "SVMRegressor"
+        | "TreeEnsembleClassifier"
+        | "TreeEnsembleRegressor"
+        | "Normalizer"
+        | "Binarizer"
+        | "LabelEncoder" => Opaque {
             op_type: ctx.op_type.to_string(),
             raw_attrs: vec![],
         },
@@ -428,9 +490,8 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
         },
 
         // String/sequence ops — no tensor representation.
-        "SequenceConstruct" | "SequenceAt" | "SequenceLength"
-        | "SequenceInsert" | "SequenceErase" | "SequenceEmpty"
-        | "ConcatFromSequence" | "SplitToSequence" => Opaque {
+        "SequenceConstruct" | "SequenceAt" | "SequenceLength" | "SequenceInsert"
+        | "SequenceErase" | "SequenceEmpty" | "ConcatFromSequence" | "SplitToSequence" => Opaque {
             op_type: ctx.op_type.to_string(),
             raw_attrs: vec![],
         },

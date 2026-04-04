@@ -5,11 +5,11 @@
 //! sessions or runtime state (see ADR-0016).
 
 use anyhow::Context;
-use rayon::prelude::*;
 use hologram_ai_common::{
-    exec_context::ShapeContextGraph, lower, AiGraph, AiParam, LowerPhase,
-    LoweringOptions, MemoryPlanner, OptPipeline, Pass,
+    exec_context::ShapeContextGraph, lower, AiGraph, AiParam, LowerPhase, LoweringOptions,
+    MemoryPlanner, OptPipeline, Pass,
 };
+use rayon::prelude::*;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
@@ -196,13 +196,21 @@ impl ModelCompiler {
     /// a single-graph archive.
     pub fn compile(&self, source: ModelSource) -> anyhow::Result<HoloArchive> {
         // Multi-component models have their own compilation path.
-        if let ModelSource::MultiOnnx { components, connections } = source {
+        if let ModelSource::MultiOnnx {
+            components,
+            connections,
+        } = source
+        {
             return self.compile_multi_onnx(components, connections);
         }
 
         // Step 1 — import.
         let mut ai_graph = self.import(source)?;
-        info!(nodes = ai_graph.nodes.len(), params = ai_graph.params.len(), "import complete");
+        info!(
+            nodes = ai_graph.nodes.len(),
+            params = ai_graph.params.len(),
+            "import complete"
+        );
 
         // Step 1b — apply spatial scaling if requested.
         if let Some(scale) = self.spatial_scale {
@@ -214,10 +222,7 @@ impl ModelCompiler {
         // are text models that benefit from attention fusion + KV injection.
         // Vision/diffusion models (sample, pixel_values, etc.) use the
         // generic pipeline to avoid incorrectly injecting KV cache ops.
-        let has_input_ids = ai_graph
-            .input_names
-            .iter()
-            .any(|n| n == "input_ids");
+        let has_input_ids = ai_graph.input_names.iter().any(|n| n == "input_ids");
         // Only use LLM pipeline (attention fusion + KV cache) for causal
         // language models. Encoder-only models (BERT, CLIP) have input_ids
         // but should NOT get KV injection. Heuristic: causal LMs output
@@ -233,9 +238,7 @@ impl ModelCompiler {
             info!("using generic optimization pipeline (no input_ids detected)");
             OptPipeline::generic()
         };
-        let mut ai_graph = pipeline
-            .run(ai_graph)
-            .context("optimization pass failed")?;
+        let mut ai_graph = pipeline.run(ai_graph).context("optimization pass failed")?;
         info!(nodes = ai_graph.nodes.len(), "optimization complete");
 
         // Step 2a — infer LLM metadata from fused attention nodes.
@@ -257,7 +260,8 @@ impl ModelCompiler {
         let import_warnings = ai_graph.warnings.len();
         // Determine if this is an LLM needing prefill+decode pipeline.
         // Check: detected as causal LM AND has fused attention layers (from AttentionFusion).
-        let prefill_mem = MemoryPlanner.plan(&ai_graph)
+        let prefill_mem = MemoryPlanner
+            .plan(&ai_graph)
             .context("memory planning failed")?;
         let is_llm = looks_like_causal_lm && prefill_mem.kv_cache_layout.n_layers > 0;
 
@@ -270,7 +274,11 @@ impl ModelCompiler {
         // correct. The Q4 constants are still used for execution.
         let (weights, weight_index) = collect_weight_bytes(&ai_graph)?;
         let total_weight_bytes = weights.len() as u64;
-        let extra_weights: Option<&[u8]> = if weights.is_empty() { None } else { Some(&weights) };
+        let extra_weights: Option<&[u8]> = if weights.is_empty() {
+            None
+        } else {
+            Some(&weights)
+        };
 
         let archive_bytes = if is_llm {
             // ── LLM pipeline: prefill (seq=N) + decode (seq=1) ──────────────
@@ -287,9 +295,14 @@ impl ModelCompiler {
             log_post_repair_diagnostics(&prefill_graph);
             let errs = prefill_graph.validate();
             if !errs.is_empty() {
-                anyhow::bail!("prefill: {} validation error(s): {}", errs.len(), errs[0].message);
+                anyhow::bail!(
+                    "prefill: {} validation error(s): {}",
+                    errs.len(),
+                    errs[0].message
+                );
             }
-            let prefill_mem = MemoryPlanner.plan(&prefill_graph)
+            let prefill_mem = MemoryPlanner
+                .plan(&prefill_graph)
                 .context("prefill memory planning failed")?;
             let prefill_nodes = prefill_graph.nodes.len();
 
@@ -299,9 +312,14 @@ impl ModelCompiler {
             let decode_graph = post_concretization_repair(decode_graph)?;
             let errs = decode_graph.validate();
             if !errs.is_empty() {
-                anyhow::bail!("decode: {} validation error(s): {}", errs.len(), errs[0].message);
+                anyhow::bail!(
+                    "decode: {} validation error(s): {}",
+                    errs.len(),
+                    errs[0].message
+                );
             }
-            let decode_mem = MemoryPlanner.plan(&decode_graph)
+            let decode_mem = MemoryPlanner
+                .plan(&decode_graph)
                 .context("decode memory planning failed")?;
             let decode_nodes = decode_graph.nodes.len();
 
@@ -311,7 +329,8 @@ impl ModelCompiler {
             let verify_graph = concretize_all_dims(verify_ai_graph, Some(verify_seq))
                 .context("verify concretization failed")?;
             let verify_graph = post_concretization_repair(verify_graph)?;
-            let verify_mem = MemoryPlanner.plan(&verify_graph)
+            let verify_mem = MemoryPlanner
+                .plan(&verify_graph)
                 .context("verify memory planning failed")?;
             let verify_nodes = verify_graph.nodes.len();
 
@@ -376,13 +395,20 @@ impl ModelCompiler {
             let shape_errors =
                 hologram_ai_common::opt::shape_consistency::validate_shape_consistency(&ai_graph);
             if !shape_errors.is_empty() {
-                warn!(count = shape_errors.len(), "shape consistency issues detected");
+                warn!(
+                    count = shape_errors.len(),
+                    "shape consistency issues detected"
+                );
                 for err in &shape_errors {
-                    warn!(node = err.node_name.as_deref().unwrap_or("-"), "{}", err.message);
+                    warn!(
+                        node = err.node_name.as_deref().unwrap_or("-"),
+                        "{}", err.message
+                    );
                 }
             }
 
-            let mem_plan = MemoryPlanner.plan(&ai_graph)
+            let mem_plan = MemoryPlanner
+                .plan(&ai_graph)
                 .context("memory planning failed")?;
 
             self.compile_components(
@@ -429,7 +455,11 @@ impl ModelCompiler {
     ) -> anyhow::Result<(HoloArchive, DebugMap)> {
         // Reuse the full compile pipeline.
         let ai_graph = self.import(source)?;
-        info!(nodes = ai_graph.nodes.len(), params = ai_graph.params.len(), "import complete (debug)");
+        info!(
+            nodes = ai_graph.nodes.len(),
+            params = ai_graph.params.len(),
+            "import complete (debug)"
+        );
 
         // Capture tensor_names before optimization passes (passes preserve it).
         let mut ai_graph = OptPipeline::mvp()
@@ -439,7 +469,8 @@ impl ModelCompiler {
         // Infer LLM metadata from GQA nodes (same as compile()).
         infer_llm_metadata_from_graph(&mut ai_graph);
 
-        let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override).context("shape concretization failed")?;
+        let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override)
+            .context("shape concretization failed")?;
 
         // Post-concretization repair (same as compile()).
         let ai_graph = post_concretization_repair(ai_graph)?;
@@ -490,10 +521,18 @@ impl ModelCompiler {
             Some(&lower_out.context)
         };
         let total_weight_bytes = weights.len() as u64;
-        let wi = if weight_index.entries.is_empty() { None } else { Some(&weight_index) };
+        let wi = if weight_index.entries.is_empty() {
+            None
+        } else {
+            Some(&weight_index)
+        };
         let archive_bytes = build_final_archive(
             unpacked,
-            if weights.is_empty() { None } else { Some(&weights) },
+            if weights.is_empty() {
+                None
+            } else {
+                Some(&weights)
+            },
             Some(layer_header),
             bundle,
             wi,
@@ -530,7 +569,8 @@ impl ModelCompiler {
         let ai_graph = OptPipeline::mvp()
             .run(ai_graph)
             .context("optimization pass failed")?;
-        let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override).context("shape concretization failed")?;
+        let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override)
+            .context("shape concretization failed")?;
 
         let ai_graph = post_concretization_repair(ai_graph)?;
 
@@ -557,11 +597,7 @@ impl ModelCompiler {
         .context("lowering failed")?;
 
         // Extract ShapeContextGraph before the context is consumed.
-        let shape_ctx = lower_out
-            .context
-            .get::<ShapeContextGraph>()
-            .ok()
-            .flatten();
+        let shape_ctx = lower_out.context.get::<ShapeContextGraph>().ok().flatten();
 
         // Build debug map.
         let mut name_to_idx = std::collections::HashMap::new();
@@ -573,8 +609,7 @@ impl ModelCompiler {
         let debug_map = DebugMap { name_to_idx };
 
         // Compile and assemble archive.
-        let compilation =
-            hologram::compile(lower_out.graph).context("hologram::compile failed")?;
+        let compilation = hologram::compile(lower_out.graph).context("hologram::compile failed")?;
         let unpacked = unpack_archive(&compilation.archive)?;
         let layer_header = build_tensor_port_header(&unpacked.plan, &ai_graph);
         let (weights, weight_index) = collect_weight_bytes(&ai_graph)?;
@@ -584,10 +619,18 @@ impl ModelCompiler {
             Some(&lower_out.context)
         };
         let total_weight_bytes = weights.len() as u64;
-        let wi = if weight_index.entries.is_empty() { None } else { Some(&weight_index) };
+        let wi = if weight_index.entries.is_empty() {
+            None
+        } else {
+            Some(&weight_index)
+        };
         let archive_bytes = build_final_archive(
             unpacked,
-            if weights.is_empty() { None } else { Some(&weights) },
+            if weights.is_empty() {
+                None
+            } else {
+                Some(&weights)
+            },
             Some(layer_header),
             bundle,
             wi,
@@ -714,11 +757,12 @@ impl ModelCompiler {
         let dedup_bytes = weight_store.total_bytes();
         let needs_shared_blob = dedup_bytes > 0 && n > 1 && distinct_groups > 1;
         let pipeline = if needs_shared_blob {
-            let savings = if total_weight_bytes_before > 0 && dedup_bytes < total_weight_bytes_before {
-                (1.0 - dedup_bytes as f64 / total_weight_bytes_before as f64) * 100.0
-            } else {
-                0.0
-            };
+            let savings =
+                if total_weight_bytes_before > 0 && dedup_bytes < total_weight_bytes_before {
+                    (1.0 - dedup_bytes as f64 / total_weight_bytes_before as f64) * 100.0
+                } else {
+                    0.0
+                };
             let (shared_blob, dedup_index) = weight_store.build();
             info!(
                 before_mb = format_args!("{:.1}", total_weight_bytes_before as f64 / 1_048_576.0),
@@ -781,7 +825,12 @@ impl ModelCompiler {
             .map(|comp| {
                 // Import.
                 let ai_graph = hologram_ai_onnx::import_onnx_path(&comp.path, Default::default())
-                    .with_context(|| format!("importing ONNX component '{}' from {:?}", comp.name, comp.path))?;
+                    .with_context(|| {
+                    format!(
+                        "importing ONNX component '{}' from {:?}",
+                        comp.name, comp.path
+                    )
+                })?;
                 info!(
                     component = %comp.name,
                     nodes = ai_graph.nodes.len(),
@@ -823,7 +872,8 @@ impl ModelCompiler {
 
         // Unpack parallel results, preserving original component order.
         let mut graphs: Vec<AiGraph> = Vec::with_capacity(components.len());
-        let mut mem_plans: Vec<hologram_ai_common::MemoryPlan> = Vec::with_capacity(components.len());
+        let mut mem_plans: Vec<hologram_ai_common::MemoryPlan> =
+            Vec::with_capacity(components.len());
         for (idx, result) in results.into_iter().enumerate() {
             let (graph, mem_plan) = result
                 .with_context(|| format!("compiling component '{}'", components[idx].name))?;
@@ -860,10 +910,9 @@ impl ModelCompiler {
 
         for (i, comp) in components.iter().enumerate() {
             let graph = &graphs[i];
-            let weights: Option<&[u8]> = weight_blob_indices[i]
-                .map(|idx| weight_blobs[idx].as_slice());
-            let weight_index = weight_blob_indices[i]
-                .map(|idx| weight_indexes[idx].clone());
+            let weights: Option<&[u8]> =
+                weight_blob_indices[i].map(|idx| weight_blobs[idx].as_slice());
+            let weight_index = weight_blob_indices[i].map(|idx| weight_indexes[idx].clone());
 
             specs.push(ComponentSpec {
                 name: comp.name.clone(),
@@ -878,7 +927,11 @@ impl ModelCompiler {
             });
         }
 
-        let total_weight_bytes: u64 = specs.iter().filter_map(|s| s.weights.as_ref()).map(|w| w.len() as u64).sum();
+        let total_weight_bytes: u64 = specs
+            .iter()
+            .filter_map(|s| s.weights.as_ref())
+            .map(|w| w.len() as u64)
+            .sum();
         let total_nodes: usize = graphs.iter().map(|g| g.nodes.len()).sum();
 
         let archive_bytes = self.compile_components(specs, connections)?;
@@ -952,15 +1005,15 @@ fn unpack_archive(archive: &[u8]) -> anyhow::Result<UnpackedArchive> {
 
     let effective: std::borrow::Cow<'_, [u8]> = if is_compressed(archive) {
         std::borrow::Cow::Owned(
-            decompress_archive(archive).context("decompressing archive for unpack")?
+            decompress_archive(archive)
+                .context("decompressing archive for unpack")?
                 .context("decompress returned None")?,
         )
     } else {
         std::borrow::Cow::Borrowed(archive)
     };
 
-    let plan =
-        hologram::load_from_bytes(&effective).context("unpacking archive")?;
+    let plan = hologram::load_from_bytes(&effective).context("unpacking archive")?;
     let h = plan.header();
     let graph_bytes =
         effective[h.graph_offset as usize..(h.graph_offset + h.graph_size) as usize].to_vec();
@@ -1020,9 +1073,7 @@ fn build_final_archive(
         .set_weights(weights);
 
     // Determine which section kinds will be replaced.
-    let layer_header_kind = layer_header
-        .as_ref()
-        .map(|lh| lh.section_kind());
+    let layer_header_kind = layer_header.as_ref().map(|lh| lh.section_kind());
     let bundle_kinds: Vec<u32> = bundle
         .map(|b| b.iter().map(|(k, _)| k).collect())
         .unwrap_or_default();
@@ -1080,14 +1131,22 @@ fn compile_one_component(
 
     let lower_out = lower(ai_graph, kv_layout, opts, phase)
         .with_context(|| format!("lowering {phase_name} graph"))?;
-    debug!(graph_nodes = lower_out.graph.node_count(), phase = phase_name, "lowered");
+    debug!(
+        graph_nodes = lower_out.graph.node_count(),
+        phase = phase_name,
+        "lowered"
+    );
 
     // Validate: check all Gemm/MatMul nodes' weight inputs are valid constants.
     validate_matmul_constants(&lower_out.graph, extra_weights);
 
     let compiled = hologram::compile(lower_out.graph)
         .with_context(|| format!("compiling {phase_name} graph"))?;
-    debug!(archive_bytes = compiled.archive.len(), phase = phase_name, "compiled");
+    debug!(
+        archive_bytes = compiled.archive.len(),
+        phase = phase_name,
+        "compiled"
+    );
 
     let unpacked = unpack_archive(&compiled.archive)?;
     let layer_header = build_tensor_port_header(&unpacked.plan, ai_graph);
@@ -1097,7 +1156,13 @@ fn compile_one_component(
         Some(&lower_out.context)
     };
 
-    build_final_archive(unpacked, extra_weights, Some(layer_header), bundle, weight_index)
+    build_final_archive(
+        unpacked,
+        extra_weights,
+        Some(layer_header),
+        bundle,
+        weight_index,
+    )
 }
 
 /// Build a corrected `LayerHeader` with proper TensorPorts from the AiGraph.
@@ -1321,13 +1386,22 @@ fn log_post_repair_diagnostics(ai_graph: &AiGraph) {
         .filter(|info| info.shape.is_empty())
         .count();
     if empty_count > 0 {
-        warn!(count = empty_count, "tensors still have empty shapes after repair");
+        warn!(
+            count = empty_count,
+            "tensors still have empty shapes after repair"
+        );
         for (&tid, info) in &ai_graph.tensor_info {
             if info.shape.is_empty() {
-                let name = ai_graph.tensor_names.get(&tid).map(|s| s.as_str()).unwrap_or("?");
+                let name = ai_graph
+                    .tensor_names
+                    .get(&tid)
+                    .map(|s| s.as_str())
+                    .unwrap_or("?");
                 // Find which node produces this tensor.
                 let producer = ai_graph.nodes.iter().find(|n| n.outputs.contains(&tid));
-                let op_name = producer.map(|n| format!("{:?}", n.op)).unwrap_or_else(|| "input/param".into());
+                let op_name = producer
+                    .map(|n| format!("{:?}", n.op))
+                    .unwrap_or_else(|| "input/param".into());
                 warn!(tid, name, op = %op_name, "empty shape tensor");
             }
         }
@@ -1340,7 +1414,11 @@ fn log_post_repair_diagnostics(ai_graph: &AiGraph) {
             let has_dynamic = ai_graph
                 .tensor_info
                 .get(&out_tid)
-                .map(|i| i.shape.iter().any(|d| matches!(d, hologram_ai_common::Dim::Dynamic)))
+                .map(|i| {
+                    i.shape
+                        .iter()
+                        .any(|d| matches!(d, hologram_ai_common::Dim::Dynamic))
+                })
                 .unwrap_or(false);
             if !has_dynamic {
                 continue;
@@ -1349,7 +1427,9 @@ fn log_post_repair_diagnostics(ai_graph: &AiGraph) {
                 ai_graph
                     .tensor_info
                     .get(&tid)
-                    .map(|i| !i.shape.is_empty() && i.shape.iter().all(|d| d.as_concrete().is_some()))
+                    .map(|i| {
+                        !i.shape.is_empty() && i.shape.iter().all(|d| d.as_concrete().is_some())
+                    })
                     .unwrap_or(false)
             });
             if all_inputs_concrete && dynamic_roots < 2 {
@@ -1366,8 +1446,10 @@ fn log_post_repair_diagnostics(ai_graph: &AiGraph) {
     // MatMul shapes (first 5).
     let mut matmul_count = 0u32;
     for node in &ai_graph.nodes {
-        if matches!(node.op, hologram_ai_common::AiOp::MatMul | hologram_ai_common::AiOp::BatchMatMul)
-            && matmul_count < 5
+        if matches!(
+            node.op,
+            hologram_ai_common::AiOp::MatMul | hologram_ai_common::AiOp::BatchMatMul
+        ) && matmul_count < 5
         {
             let input_shapes: Vec<_> = node
                 .inputs
@@ -1442,11 +1524,11 @@ fn log_post_repair_diagnostics(ai_graph: &AiGraph) {
 /// 5. Runs shape healing to fill any remaining empty shapes.
 fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGraph> {
     use hologram_ai_common::{
-        AggressiveShapePropagation, ConstantDeduplication, Dim,
         opt::{
             const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
             data_prop::DataPropagation, dead_node::DeadNodeElimination,
         },
+        AggressiveShapePropagation, ConstantDeduplication, Dim,
     };
 
     // Clear stale known_i64_values so DataProp re-evaluates with the
@@ -1473,7 +1555,9 @@ fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGraph> 
     // nodes can be folded (they need fully-concrete input shapes).
     struct ForceConcretize;
     impl Pass for ForceConcretize {
-        fn name(&self) -> &str { "ForceConcretize" }
+        fn name(&self) -> &str {
+            "ForceConcretize"
+        }
         fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
             let subs = graph.dim_vars.fixed_substitutions();
             for info in graph.tensor_info.values_mut() {
@@ -1530,8 +1614,7 @@ fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGraph> 
         if dynamic_count >= prev_dynamic_count {
             info!(
                 pass_num,
-                dynamic_count,
-                "post-concretization repair converged early"
+                dynamic_count, "post-concretization repair converged early"
             );
             break;
         }
@@ -1581,7 +1664,10 @@ fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGraph> 
 ///
 /// For LLM pipeline archives, the caller compiles prefill (seq=context_len)
 /// and decode (seq=1) as separate graphs — both fully concrete.
-fn concretize_all_dims(mut graph: AiGraph, seq_len_override: Option<u64>) -> anyhow::Result<AiGraph> {
+fn concretize_all_dims(
+    mut graph: AiGraph,
+    seq_len_override: Option<u64>,
+) -> anyhow::Result<AiGraph> {
     use hologram_ai_common::Dim;
 
     // Use override if provided, otherwise extract from model metadata.
@@ -1596,7 +1682,10 @@ fn concretize_all_dims(mut graph: AiGraph, seq_len_override: Option<u64>) -> any
             continue;
         }
         let name_lower = entry.name.to_lowercase();
-        if name_lower.contains("seq") || name_lower.contains("length") || name_lower.contains("position") {
+        if name_lower.contains("seq")
+            || name_lower.contains("length")
+            || name_lower.contains("position")
+        {
             debug!(var = %entry.name, value = context_len, "concretizing seq-like dim");
             entry.fixed = Some(context_len);
         } else {
@@ -1656,7 +1745,10 @@ fn validate_matmul_constants(
 /// byte range and layer group within the blob.
 fn collect_weight_bytes(
     ai_graph: &AiGraph,
-) -> anyhow::Result<(Vec<u8>, hologram::hologram_archive::weight::index::WeightIndex)> {
+) -> anyhow::Result<(
+    Vec<u8>,
+    hologram::hologram_archive::weight::index::WeightIndex,
+)> {
     collect_weight_bytes_filtered(ai_graph, &std::collections::HashSet::new())
 }
 
@@ -1674,14 +1766,19 @@ fn predict_quantized_weight_tids(
     let mut quantized = std::collections::HashSet::new();
 
     // Collect attention dimensions for gating.
-    let attn_dims: Vec<usize> = ai_graph.nodes.iter()
+    let attn_dims: Vec<usize> = ai_graph
+        .nodes
+        .iter()
         .filter_map(|n| match &n.op {
-            AiOp::GroupedQueryAttention { num_heads, num_kv_heads, head_dim, .. } => {
-                Some(vec![
-                    *num_heads as usize * *head_dim as usize,
-                    *num_kv_heads as usize * *head_dim as usize,
-                ])
-            }
+            AiOp::GroupedQueryAttention {
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                ..
+            } => Some(vec![
+                *num_heads as usize * *head_dim as usize,
+                *num_kv_heads as usize * *head_dim as usize,
+            ]),
             _ => None,
         })
         .flatten()
@@ -1705,8 +1802,13 @@ fn predict_quantized_weight_tids(
             Some(info) => info,
             None => continue,
         };
-        let dims: Vec<usize> = info.shape.iter()
-            .filter_map(|d| match d { Dim::Concrete(n) => Some(*n as usize), _ => None })
+        let dims: Vec<usize> = info
+            .shape
+            .iter()
+            .filter_map(|d| match d {
+                Dim::Concrete(n) => Some(*n as usize),
+                _ => None,
+            })
             .collect();
         if dims.len() != 2 || dims[0] < 256 || dims[1] < 256 {
             continue;
@@ -1729,7 +1831,10 @@ fn predict_quantized_weight_tids(
 fn collect_weight_bytes_filtered(
     ai_graph: &AiGraph,
     skip_tids: &std::collections::HashSet<hologram_ai_common::ir::TensorId>,
-) -> anyhow::Result<(Vec<u8>, hologram::hologram_archive::weight::index::WeightIndex)> {
+) -> anyhow::Result<(
+    Vec<u8>,
+    hologram::hologram_archive::weight::index::WeightIndex,
+)> {
     use hologram::hologram_archive::weight::index::{
         derive_layer_group, WeightIndex, WeightIndexEntry,
     };
@@ -1921,8 +2026,7 @@ impl HoloRunner {
     ) -> anyhow::Result<Self> {
         // Load config: explicit path > standard search.
         let config = match config_path {
-            Some(p) => hologram::config::HologramConfig::load_file(p)
-                .unwrap_or_default(),
+            Some(p) => hologram::config::HologramConfig::load_file(p).unwrap_or_default(),
             None => hologram::config::HologramConfig::load(),
         };
         // CLI cache_dir > config cache.dir > default (next to archive).
@@ -1976,25 +2080,33 @@ impl HoloRunner {
             .map_err(|e| anyhow::anyhow!("loading archive: {e}"))?;
 
         // Check if this is a pipeline archive (has SECTION_PIPELINE header).
-        let is_pipeline = probe.sections().entries.iter().any(|e| {
-            e.kind == hologram::hologram_archive::section::SECTION_PIPELINE
-        });
+        let is_pipeline = probe
+            .sections()
+            .entries
+            .iter()
+            .any(|e| e.kind == hologram::hologram_archive::section::SECTION_PIPELINE);
 
         if is_pipeline {
             // Pipeline archive: load the first (or only) model component.
             let weights_start = probe.header().weights_offset as usize;
 
-            let pipeline_entry = probe.sections()
+            let pipeline_entry = probe
+                .sections()
                 .find(hologram::hologram_archive::section::SECTION_PIPELINE)
                 .ok_or_else(|| anyhow::anyhow!("pipeline section missing"))?;
             let ps = pipeline_entry.offset as usize;
             let pe = ps + pipeline_entry.size as usize;
             let ph: hologram::hologram_archive::writer::pipeline_writer::PipelineHeader =
-                rkyv::from_bytes::<hologram::hologram_archive::writer::pipeline_writer::PipelineHeader, rkyv::rancor::Error>(&bytes[ps..pe])
-                    .map_err(|e| anyhow::anyhow!("parsing pipeline header: {e}"))?;
+                rkyv::from_bytes::<
+                    hologram::hologram_archive::writer::pipeline_writer::PipelineHeader,
+                    rkyv::rancor::Error,
+                >(&bytes[ps..pe])
+                .map_err(|e| anyhow::anyhow!("parsing pipeline header: {e}"))?;
 
             // Load the first model component.
-            let first = ph.models.first()
+            let first = ph
+                .models
+                .first()
                 .ok_or_else(|| anyhow::anyhow!("pipeline has no models"))?;
             let model_start = weights_start + first.offset as usize;
             let model_end = model_start + first.size as usize;
@@ -2007,7 +2119,8 @@ impl HoloRunner {
                 .map_err(|e| anyhow::anyhow!("loading model plan: {e}"))?;
 
             // Resolve shared weights via dedup index if available.
-            let dedup_index = probe.sections()
+            let dedup_index = probe
+                .sections()
                 .find(hologram::hologram_archive::section::SECTION_WEIGHT_DEDUP)
                 .and_then(|entry| {
                     let s = entry.offset as usize;
@@ -2026,7 +2139,9 @@ impl HoloRunner {
                         let w_start = entry.offset as usize;
                         let w_end = w_start + entry.size as usize;
                         if w_end <= wrapper_weights.len() {
-                            unsafe { plan.set_weights_borrowed(&wrapper_weights[w_start..w_end]); }
+                            unsafe {
+                                plan.set_weights_borrowed(&wrapper_weights[w_start..w_end]);
+                            }
                         }
                     }
                 }
@@ -2052,8 +2167,13 @@ impl HoloRunner {
                 // from the same AiGraph with identical constant ordering, so weight
                 // offsets are the same. Just borrow the prefill's weight buffer.
                 if d_plan.weights().is_empty() && !plan.weights().is_empty() {
-                    unsafe { d_plan.set_weights_borrowed(plan.weights()); }
-                    info!(decode_weights = plan.weights().len(), "decode shares prefill weights");
+                    unsafe {
+                        d_plan.set_weights_borrowed(plan.weights());
+                    }
+                    info!(
+                        decode_weights = plan.weights().len(),
+                        "decode shares prefill weights"
+                    );
                 }
 
                 let d_tape = hologram::build_tape_from_plan(&d_plan)
@@ -2076,7 +2196,9 @@ impl HoloRunner {
                 let mut v_plan = unsafe { hologram::load_from_bytes_zero_copy(v_slice) }
                     .map_err(|e| anyhow::anyhow!("loading verify plan: {e}"))?;
                 if v_plan.weights().is_empty() && !plan.weights().is_empty() {
-                    unsafe { v_plan.set_weights_borrowed(plan.weights()); }
+                    unsafe {
+                        v_plan.set_weights_borrowed(plan.weights());
+                    }
                 }
                 let v_tape = hologram::build_tape_from_plan(&v_plan)
                     .map_err(|e| anyhow::anyhow!("building verify tape: {e}"))?;
@@ -2104,18 +2226,10 @@ impl HoloRunner {
             {
                 let sg = runner.plan.graph();
                 let mut wc = runner.weight_cache.write();
-                wc.prewarm_q4(
-                    &runner.tape,
-                    &sg.constants,
-                    runner.plan.weights(),
-                );
+                wc.prewarm_q4(&runner.tape, &sg.constants, runner.plan.weights());
                 if let Some(ref dt) = runner.decode_tape {
                     // Decode plan shares weights with prefill plan.
-                    wc.prewarm_q4(
-                        dt,
-                        &sg.constants,
-                        runner.plan.weights(),
-                    );
+                    wc.prewarm_q4(dt, &sg.constants, runner.plan.weights());
                 }
             }
             Ok(runner)
@@ -2140,11 +2254,7 @@ impl HoloRunner {
             {
                 let sg = runner.plan.graph();
                 let mut wc = runner.weight_cache.write();
-                wc.prewarm_q4(
-                    &runner.tape,
-                    &sg.constants,
-                    runner.plan.weights(),
-                );
+                wc.prewarm_q4(&runner.tape, &sg.constants, runner.plan.weights());
             }
             Ok(runner)
         }
@@ -2154,9 +2264,11 @@ impl HoloRunner {
     ///
     /// Variable-length execution is handled by the runtime's per-op dimension
     /// resolution from actual buffer sizes.
-    pub fn execute(&self, inputs: &hologram::GraphInputs) -> anyhow::Result<hologram::GraphOutputs> {
-        hologram::execute_tape(&self.tape, &self.plan, inputs)
-            .map_err(|e| anyhow::anyhow!("{e}"))
+    pub fn execute(
+        &self,
+        inputs: &hologram::GraphInputs,
+    ) -> anyhow::Result<hologram::GraphOutputs> {
+        hologram::execute_tape(&self.tape, &self.plan, inputs).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// Access the underlying loaded plan (for layer headers, weights, etc.).
@@ -2207,10 +2319,8 @@ impl HoloRunner {
             (&self.tape, &self.plan)
         };
 
-        hologram::execute_tape_with_kv_cached(
-            tape, plan, inputs, kv_state, &self.weight_cache,
-        )
-        .map_err(|e| anyhow::anyhow!("{e}"))
+        hologram::execute_tape_with_kv_cached(tape, plan, inputs, kv_state, &self.weight_cache)
+            .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// Whether this runner has a separate decode model for fast autoregressive generation.
@@ -2235,16 +2345,15 @@ impl HoloRunner {
         inputs: &hologram::GraphInputs,
         kv_state: &mut hologram::KvCacheState,
     ) -> anyhow::Result<hologram::GraphOutputs> {
-        let (tape, plan) = if let (Some(ref vt), Some(ref vp)) = (&self.verify_tape, &self.verify_plan) {
-            (vt, vp)
-        } else {
-            // No verify tape — fall back to prefill tape.
-            (&self.tape, &self.plan)
-        };
-        hologram::execute_tape_with_kv_cached(
-            tape, plan, inputs, kv_state, &self.weight_cache,
-        )
-        .map_err(|e| anyhow::anyhow!("{e}"))
+        let (tape, plan) =
+            if let (Some(ref vt), Some(ref vp)) = (&self.verify_tape, &self.verify_plan) {
+                (vt, vp)
+            } else {
+                // No verify tape — fall back to prefill tape.
+                (&self.tape, &self.plan)
+            };
+        hologram::execute_tape_with_kv_cached(tape, plan, inputs, kv_state, &self.weight_cache)
+            .map_err(|e| anyhow::anyhow!("{e}"))
     }
 }
 
@@ -2282,7 +2391,9 @@ fn read_shape_context_from_plan(
 ///
 /// Returns `None` if the archive was compiled without a shape context section
 /// (older archives or models compiled with shape context disabled).
-pub fn read_shape_context_from_archive(archive_bytes: &[u8]) -> anyhow::Result<Option<ShapeContextGraph>> {
+pub fn read_shape_context_from_archive(
+    archive_bytes: &[u8],
+) -> anyhow::Result<Option<ShapeContextGraph>> {
     // SAFETY: plan is dropped at the end of this function; archive_bytes outlives it.
     let plan = unsafe { hologram::load_from_bytes_zero_copy(archive_bytes) }?;
     read_shape_context_from_plan(&plan, archive_bytes)
@@ -2344,4 +2455,3 @@ pub fn rebuild_archive_with_section(
         .build()
         .map_err(|e| anyhow::anyhow!("rebuilding archive with section: {e}"))
 }
-

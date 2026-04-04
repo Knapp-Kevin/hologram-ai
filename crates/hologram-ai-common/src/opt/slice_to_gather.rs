@@ -22,13 +22,7 @@ impl Pass for SliceToGather {
     }
 
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
-        let mut next_tid = graph
-            .tensor_info
-            .keys()
-            .copied()
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let mut next_tid = graph.tensor_info.keys().copied().max().unwrap_or(0) + 1;
 
         // Collect nodes to convert (can't mutate while iterating).
         let conversions: Vec<(usize, i64, Vec<i64>)> = graph
@@ -120,9 +114,7 @@ impl Pass for SliceToGather {
                 semantic: SemanticHint::Unknown,
             };
 
-            graph
-                .tensor_info
-                .insert(indices_tid, index_info.clone());
+            graph.tensor_info.insert(indices_tid, index_info.clone());
             graph
                 .params
                 .insert(indices_tid, AiParam::inline(index_bytes, index_info));

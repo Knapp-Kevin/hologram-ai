@@ -68,7 +68,12 @@ pub fn build_llama_graph(
 
         let gemm = |b: &mut GraphAssembler, x, w, out_dim| {
             b.add_node(
-                AiOp::Gemm { alpha: 1.0, beta: 0.0, trans_a: false, trans_b: true },
+                AiOp::Gemm {
+                    alpha: 1.0,
+                    beta: 0.0,
+                    trans_a: false,
+                    trans_b: true,
+                },
                 vec![x, w],
                 DType::F32,
                 b.bsv(out_dim),
@@ -210,7 +215,12 @@ pub fn build_llama_graph(
         embed_weight // tied embeddings
     };
     let logits = b.add_node(
-        AiOp::Gemm { alpha: 1.0, beta: 0.0, trans_a: false, trans_b: true },
+        AiOp::Gemm {
+            alpha: 1.0,
+            beta: 0.0,
+            trans_a: false,
+            trans_b: true,
+        },
         vec![final_normed, lm_head_w],
         DType::F32,
         b.bsv(vocab),

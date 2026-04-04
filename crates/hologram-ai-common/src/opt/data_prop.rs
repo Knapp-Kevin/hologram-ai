@@ -53,7 +53,8 @@ impl Pass for DataPropagation {
         // Track which TIDs were freshly computed by this forward pass.
         // Used in materialization to allow re-writing a DataProp-created param
         // when the shape computation is re-evaluated with updated input shapes.
-        let mut computed_tids: std::collections::HashSet<TensorId> = std::collections::HashSet::new();
+        let mut computed_tids: std::collections::HashSet<TensorId> =
+            std::collections::HashSet::new();
 
         // Forward pass in topological order.
         for &nid in order.iter() {

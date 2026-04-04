@@ -22,16 +22,13 @@ fn quant_cross_validate_q4_0_zero_block() {
     let data = make_q4_0_block(0x3C00, &[0x88; 16]);
 
     let quant_result = dequant_q4_0(&data);
-    let dispatch_result = dispatch_float(&FloatOp::Dequantize, &[&data])
-        .expect("dispatch_float(Dequantize) failed");
+    let dispatch_result =
+        dispatch_float(&FloatOp::Dequantize, &[&data]).expect("dispatch_float(Dequantize) failed");
     let dispatch_f32: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&dispatch_result).to_vec();
 
     assert_eq!(quant_result.len(), dispatch_f32.len(), "length mismatch");
     for (i, (q, d)) in quant_result.iter().zip(dispatch_f32.iter()).enumerate() {
-        assert!(
-            (q - d).abs() < 1e-10,
-            "index {i}: quant={q} dispatch={d}"
-        );
+        assert!((q - d).abs() < 1e-10, "index {i}: quant={q} dispatch={d}");
     }
 }
 
@@ -44,23 +41,36 @@ fn quant_cross_validate_q4_0_known_values() {
     let data = make_q4_0_block(0x4000, &qs);
 
     let quant_result = dequant_q4_0(&data);
-    let dispatch_result = dispatch_float(&FloatOp::Dequantize, &[&data])
-        .expect("dispatch_float(Dequantize) failed");
+    let dispatch_result =
+        dispatch_float(&FloatOp::Dequantize, &[&data]).expect("dispatch_float(Dequantize) failed");
     let dispatch_f32: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&dispatch_result).to_vec();
 
     assert_eq!(quant_result.len(), dispatch_f32.len());
     for (i, (q, d)) in quant_result.iter().zip(dispatch_f32.iter()).enumerate() {
-        assert!(
-            (q - d).abs() < 1e-10,
-            "index {i}: quant={q} dispatch={d}"
-        );
+        assert!((q - d).abs() < 1e-10, "index {i}: quant={q} dispatch={d}");
     }
 
     // Also verify known values from quant crate
-    assert!((quant_result[0] - 2.0).abs() < 1e-5, "qs[0] lo: expected 2.0, got {}", quant_result[0]);
-    assert!((quant_result[1] - (-16.0)).abs() < 1e-5, "qs[0] hi: expected -16.0, got {}", quant_result[1]);
-    assert!((quant_result[2] - 4.0).abs() < 1e-5, "qs[1] lo: expected 4.0, got {}", quant_result[2]);
-    assert!((quant_result[3] - 14.0).abs() < 1e-5, "qs[1] hi: expected 14.0, got {}", quant_result[3]);
+    assert!(
+        (quant_result[0] - 2.0).abs() < 1e-5,
+        "qs[0] lo: expected 2.0, got {}",
+        quant_result[0]
+    );
+    assert!(
+        (quant_result[1] - (-16.0)).abs() < 1e-5,
+        "qs[0] hi: expected -16.0, got {}",
+        quant_result[1]
+    );
+    assert!(
+        (quant_result[2] - 4.0).abs() < 1e-5,
+        "qs[1] lo: expected 4.0, got {}",
+        quant_result[2]
+    );
+    assert!(
+        (quant_result[3] - 14.0).abs() < 1e-5,
+        "qs[1] hi: expected 14.0, got {}",
+        quant_result[3]
+    );
 }
 
 #[test]
@@ -71,17 +81,14 @@ fn quant_cross_validate_q4_0_multi_block() {
     let data: Vec<u8> = block1.into_iter().chain(block2).collect();
 
     let quant_result = dequant_q4_0(&data);
-    let dispatch_result = dispatch_float(&FloatOp::Dequantize, &[&data])
-        .expect("dispatch_float(Dequantize) failed");
+    let dispatch_result =
+        dispatch_float(&FloatOp::Dequantize, &[&data]).expect("dispatch_float(Dequantize) failed");
     let dispatch_f32: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&dispatch_result).to_vec();
 
     assert_eq!(quant_result.len(), 64, "2 blocks → 64 values");
     assert_eq!(dispatch_f32.len(), 64);
     for (i, (q, d)) in quant_result.iter().zip(dispatch_f32.iter()).enumerate() {
-        assert!(
-            (q - d).abs() < 1e-10,
-            "index {i}: quant={q} dispatch={d}"
-        );
+        assert!((q - d).abs() < 1e-10, "index {i}: quant={q} dispatch={d}");
     }
 }
 
@@ -91,16 +98,13 @@ fn quant_cross_validate_q4_0_negative_scale() {
     let data = make_q4_0_block(0xB800, &[0x09; 16]);
 
     let quant_result = dequant_q4_0(&data);
-    let dispatch_result = dispatch_float(&FloatOp::Dequantize, &[&data])
-        .expect("dispatch_float(Dequantize) failed");
+    let dispatch_result =
+        dispatch_float(&FloatOp::Dequantize, &[&data]).expect("dispatch_float(Dequantize) failed");
     let dispatch_f32: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&dispatch_result).to_vec();
 
     assert_eq!(quant_result.len(), dispatch_f32.len());
     for (i, (q, d)) in quant_result.iter().zip(dispatch_f32.iter()).enumerate() {
-        assert!(
-            (q - d).abs() < 1e-10,
-            "index {i}: quant={q} dispatch={d}"
-        );
+        assert!((q - d).abs() < 1e-10, "index {i}: quant={q} dispatch={d}");
     }
 }
 
@@ -113,8 +117,8 @@ fn quant_cross_validate_q4_0_extreme_nibbles() {
     let data = make_q4_0_block(0x3C00, &qs); // scale = 1.0
 
     let quant_result = dequant_q4_0(&data);
-    let dispatch_result = dispatch_float(&FloatOp::Dequantize, &[&data])
-        .expect("dispatch_float(Dequantize) failed");
+    let dispatch_result =
+        dispatch_float(&FloatOp::Dequantize, &[&data]).expect("dispatch_float(Dequantize) failed");
     let dispatch_f32: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&dispatch_result).to_vec();
 
     // Check extreme values
@@ -125,9 +129,6 @@ fn quant_cross_validate_q4_0_extreme_nibbles() {
 
     // Cross-validate
     for (i, (q, d)) in quant_result.iter().zip(dispatch_f32.iter()).enumerate() {
-        assert!(
-            (q - d).abs() < 1e-10,
-            "index {i}: quant={q} dispatch={d}"
-        );
+        assert!((q - d).abs() < 1e-10, "index {i}: quant={q} dispatch={d}");
     }
 }

@@ -117,12 +117,7 @@ impl Pass for OpDecomposition {
                     // Sqrt node: sum_out → out
                     let sqrt_nid = next_nid;
                     next_nid += 1;
-                    new_nodes.push(AiNode::new(
-                        sqrt_nid,
-                        AiOp::Sqrt,
-                        vec![sum_out],
-                        vec![out],
-                    ));
+                    new_nodes.push(AiNode::new(sqrt_nid, AiOp::Sqrt, vec![sum_out], vec![out]));
                 }
                 AiOp::DepthToSpace { blocksize, .. } => {
                     // DepthToSpace: [N, C, H, W] → [N, C/bs², H*bs, W*bs]
@@ -151,7 +146,10 @@ impl Pass for OpDecomposition {
                                     r1_out,
                                     TensorInfo::new(
                                         DType::F32,
-                                        r1_shape.iter().map(|&d| crate::ir::DimExpr::Concrete(d)).collect(),
+                                        r1_shape
+                                            .iter()
+                                            .map(|&d| crate::ir::DimExpr::Concrete(d))
+                                            .collect(),
                                     ),
                                 );
                                 new_nodes.push(AiNode::new(
@@ -171,7 +169,10 @@ impl Pass for OpDecomposition {
                                     t_out,
                                     TensorInfo::new(
                                         DType::F32,
-                                        t_shape.iter().map(|&d| crate::ir::DimExpr::Concrete(d)).collect(),
+                                        t_shape
+                                            .iter()
+                                            .map(|&d| crate::ir::DimExpr::Concrete(d))
+                                            .collect(),
                                     ),
                                 );
                                 new_nodes.push(AiNode::new(
@@ -228,7 +229,10 @@ impl Pass for OpDecomposition {
                                     r1_out,
                                     TensorInfo::new(
                                         DType::F32,
-                                        r1_shape.iter().map(|&d| crate::ir::DimExpr::Concrete(d)).collect(),
+                                        r1_shape
+                                            .iter()
+                                            .map(|&d| crate::ir::DimExpr::Concrete(d))
+                                            .collect(),
                                     ),
                                 );
                                 new_nodes.push(AiNode::new(
@@ -248,7 +252,10 @@ impl Pass for OpDecomposition {
                                     t_out,
                                     TensorInfo::new(
                                         DType::F32,
-                                        t_shape.iter().map(|&d| crate::ir::DimExpr::Concrete(d)).collect(),
+                                        t_shape
+                                            .iter()
+                                            .map(|&d| crate::ir::DimExpr::Concrete(d))
+                                            .collect(),
                                     ),
                                 );
                                 new_nodes.push(AiNode::new(
@@ -277,7 +284,9 @@ impl Pass for OpDecomposition {
                     new_nodes.push(node);
                     continue;
                 }
-                AiOp::BatchNorm { epsilon, training, .. } if !training => {
+                AiOp::BatchNorm {
+                    epsilon, training, ..
+                } if !training => {
                     // BatchNorm inference: y = (x - mean) / sqrt(var + eps) * scale + bias
                     // Decompose into: w = scale / sqrt(var + eps), b = bias - mean * w
                     // Then: y = x * w_4d + b_4d (channel-wise with NCHW broadcast)
@@ -291,8 +300,14 @@ impl Pass for OpDecomposition {
                         let var_tid = node.inputs[4];
                         let out = node.outputs[0];
                         let eps = *epsilon;
-                        let x_ndim = graph.tensor_info.get(&x).map(|i| i.shape.len()).unwrap_or(4);
-                        let chan_dim = graph.tensor_info.get(&scale_tid)
+                        let x_ndim = graph
+                            .tensor_info
+                            .get(&x)
+                            .map(|i| i.shape.len())
+                            .unwrap_or(4);
+                        let chan_dim = graph
+                            .tensor_info
+                            .get(&scale_tid)
                             .and_then(|i| i.shape.first())
                             .and_then(|d| d.as_concrete());
 
@@ -304,63 +319,157 @@ impl Pass for OpDecomposition {
                         let x_info = graph.tensor_info.get(&x).cloned();
 
                         // Epsilon constant.
-                        let eps_tid = next_tid; next_tid += 1;
-                        let eps_info = TensorInfo::new(DType::F32, crate::ir::shape_from_concrete(&[1]));
-                        graph.params.insert(eps_tid, crate::ir::AiParam::inline(eps.to_le_bytes().to_vec(), eps_info.clone()));
+                        let eps_tid = next_tid;
+                        next_tid += 1;
+                        let eps_info =
+                            TensorInfo::new(DType::F32, crate::ir::shape_from_concrete(&[1]));
+                        graph.params.insert(
+                            eps_tid,
+                            crate::ir::AiParam::inline(
+                                eps.to_le_bytes().to_vec(),
+                                eps_info.clone(),
+                            ),
+                        );
                         graph.tensor_info.insert(eps_tid, eps_info);
 
                         // var_eps = var + eps
-                        let var_eps = next_tid; next_tid += 1;
-                        if let Some(info) = &var_info { graph.tensor_info.insert(var_eps, info.clone()); }
-                        new_nodes.push(AiNode::new(next_nid, AiOp::Add, vec![var_tid, eps_tid], vec![var_eps])); next_nid += 1;
+                        let var_eps = next_tid;
+                        next_tid += 1;
+                        if let Some(info) = &var_info {
+                            graph.tensor_info.insert(var_eps, info.clone());
+                        }
+                        new_nodes.push(AiNode::new(
+                            next_nid,
+                            AiOp::Add,
+                            vec![var_tid, eps_tid],
+                            vec![var_eps],
+                        ));
+                        next_nid += 1;
 
                         // sqrt_var = sqrt(var_eps)
-                        let sqrt_var = next_tid; next_tid += 1;
-                        if let Some(info) = &var_info { graph.tensor_info.insert(sqrt_var, info.clone()); }
-                        new_nodes.push(AiNode::new(next_nid, AiOp::Sqrt, vec![var_eps], vec![sqrt_var])); next_nid += 1;
+                        let sqrt_var = next_tid;
+                        next_tid += 1;
+                        if let Some(info) = &var_info {
+                            graph.tensor_info.insert(sqrt_var, info.clone());
+                        }
+                        new_nodes.push(AiNode::new(
+                            next_nid,
+                            AiOp::Sqrt,
+                            vec![var_eps],
+                            vec![sqrt_var],
+                        ));
+                        next_nid += 1;
 
                         // w = scale / sqrt_var
-                        let w = next_tid; next_tid += 1;
-                        if let Some(info) = &scale_info { graph.tensor_info.insert(w, info.clone()); }
-                        new_nodes.push(AiNode::new(next_nid, AiOp::Div, vec![scale_tid, sqrt_var], vec![w])); next_nid += 1;
+                        let w = next_tid;
+                        next_tid += 1;
+                        if let Some(info) = &scale_info {
+                            graph.tensor_info.insert(w, info.clone());
+                        }
+                        new_nodes.push(AiNode::new(
+                            next_nid,
+                            AiOp::Div,
+                            vec![scale_tid, sqrt_var],
+                            vec![w],
+                        ));
+                        next_nid += 1;
 
                         // mean_w = mean * w
-                        let mean_w = next_tid; next_tid += 1;
-                        if let Some(info) = &mean_info { graph.tensor_info.insert(mean_w, info.clone()); }
-                        new_nodes.push(AiNode::new(next_nid, AiOp::Mul, vec![mean_tid, w], vec![mean_w])); next_nid += 1;
+                        let mean_w = next_tid;
+                        next_tid += 1;
+                        if let Some(info) = &mean_info {
+                            graph.tensor_info.insert(mean_w, info.clone());
+                        }
+                        new_nodes.push(AiNode::new(
+                            next_nid,
+                            AiOp::Mul,
+                            vec![mean_tid, w],
+                            vec![mean_w],
+                        ));
+                        next_nid += 1;
 
                         // b = bias - mean_w
-                        let b = next_tid; next_tid += 1;
-                        if let Some(info) = &bias_info { graph.tensor_info.insert(b, info.clone()); }
-                        new_nodes.push(AiNode::new(next_nid, AiOp::Sub, vec![bias_tid, mean_w], vec![b])); next_nid += 1;
+                        let b = next_tid;
+                        next_tid += 1;
+                        if let Some(info) = &bias_info {
+                            graph.tensor_info.insert(b, info.clone());
+                        }
+                        new_nodes.push(AiNode::new(
+                            next_nid,
+                            AiOp::Sub,
+                            vec![bias_tid, mean_w],
+                            vec![b],
+                        ));
+                        next_nid += 1;
 
                         // For 4D NCHW inputs: unsqueeze w,b from [C] to [1,C,1,1]
                         let (w_final, b_final) = if x_ndim == 4 {
-                            let w_4d = next_tid; next_tid += 1;
+                            let w_4d = next_tid;
+                            next_tid += 1;
                             if let Some(c) = chan_dim {
-                                graph.tensor_info.insert(w_4d, TensorInfo::new(
-                                    DType::F32, crate::ir::shape_from_concrete(&[1, c, 1, 1]),
-                                ));
+                                graph.tensor_info.insert(
+                                    w_4d,
+                                    TensorInfo::new(
+                                        DType::F32,
+                                        crate::ir::shape_from_concrete(&[1, c, 1, 1]),
+                                    ),
+                                );
                             }
-                            new_nodes.push(AiNode::new(next_nid, AiOp::Unsqueeze { axes: vec![0, 2, 3] }, vec![w], vec![w_4d])); next_nid += 1;
+                            new_nodes.push(AiNode::new(
+                                next_nid,
+                                AiOp::Unsqueeze {
+                                    axes: vec![0, 2, 3],
+                                },
+                                vec![w],
+                                vec![w_4d],
+                            ));
+                            next_nid += 1;
 
-                            let b_4d = next_tid; next_tid += 1;
+                            let b_4d = next_tid;
+                            next_tid += 1;
                             if let Some(c) = chan_dim {
-                                graph.tensor_info.insert(b_4d, TensorInfo::new(
-                                    DType::F32, crate::ir::shape_from_concrete(&[1, c, 1, 1]),
-                                ));
+                                graph.tensor_info.insert(
+                                    b_4d,
+                                    TensorInfo::new(
+                                        DType::F32,
+                                        crate::ir::shape_from_concrete(&[1, c, 1, 1]),
+                                    ),
+                                );
                             }
-                            new_nodes.push(AiNode::new(next_nid, AiOp::Unsqueeze { axes: vec![0, 2, 3] }, vec![b], vec![b_4d])); next_nid += 1;
+                            new_nodes.push(AiNode::new(
+                                next_nid,
+                                AiOp::Unsqueeze {
+                                    axes: vec![0, 2, 3],
+                                },
+                                vec![b],
+                                vec![b_4d],
+                            ));
+                            next_nid += 1;
                             (w_4d, b_4d)
                         } else {
                             (w, b)
                         };
 
                         // y = x * w_final + b_final
-                        let x_w = next_tid; next_tid += 1;
-                        if let Some(info) = &x_info { graph.tensor_info.insert(x_w, info.clone()); }
-                        new_nodes.push(AiNode::new(next_nid, AiOp::Mul, vec![x, w_final], vec![x_w])); next_nid += 1;
-                        new_nodes.push(AiNode::new(next_nid, AiOp::Add, vec![x_w, b_final], vec![out])); next_nid += 1;
+                        let x_w = next_tid;
+                        next_tid += 1;
+                        if let Some(info) = &x_info {
+                            graph.tensor_info.insert(x_w, info.clone());
+                        }
+                        new_nodes.push(AiNode::new(
+                            next_nid,
+                            AiOp::Mul,
+                            vec![x, w_final],
+                            vec![x_w],
+                        ));
+                        next_nid += 1;
+                        new_nodes.push(AiNode::new(
+                            next_nid,
+                            AiOp::Add,
+                            vec![x_w, b_final],
+                            vec![out],
+                        ));
+                        next_nid += 1;
                     } else {
                         new_nodes.push(node);
                     }
@@ -386,8 +495,14 @@ mod tests {
     #[test]
     fn reduce_l1_decomposition() {
         let mut ti = HashMap::new();
-        ti.insert(0u32, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 4])));
-        ti.insert(1u32, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 1])));
+        ti.insert(
+            0u32,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[2, 4])),
+        );
+        ti.insert(
+            1u32,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[2, 1])),
+        );
 
         let g = AiGraph {
             name: "test".into(),
@@ -425,8 +540,14 @@ mod tests {
     #[test]
     fn reduce_l2_decomposition() {
         let mut ti = HashMap::new();
-        ti.insert(0u32, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 4])));
-        ti.insert(1u32, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 1])));
+        ti.insert(
+            0u32,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[2, 4])),
+        );
+        ti.insert(
+            1u32,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[2, 1])),
+        );
 
         let g = AiGraph {
             name: "test".into(),

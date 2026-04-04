@@ -61,8 +61,16 @@ pub mod runner {
 
     /// Input for ORT that can carry either f32 or i64 data.
     pub enum OrtInputTyped {
-        F32 { name: String, shape: Vec<usize>, data: Vec<f32> },
-        I64 { name: String, shape: Vec<usize>, data: Vec<i64> },
+        F32 {
+            name: String,
+            shape: Vec<usize>,
+            data: Vec<f32>,
+        },
+        I64 {
+            name: String,
+            shape: Vec<usize>,
+            data: Vec<i64>,
+        },
     }
 
     impl OrtInputTyped {
@@ -98,14 +106,15 @@ pub mod runner {
         model_bytes: Option<&[u8]>,
         inputs: Vec<OrtInputTyped>,
     ) -> Result<Vec<IntermediateTensor>> {
-        let mut session = Session::builder()
-            .context("failed to create ORT session builder")?;
+        let mut session = Session::builder().context("failed to create ORT session builder")?;
         let mut session = if let Some(path) = model_path {
-            session.commit_from_file(path)
+            session
+                .commit_from_file(path)
                 .context("failed to load ONNX model from file into ORT")?
         } else {
             let bytes = model_bytes.expect("either model_path or model_bytes required");
-            session.commit_from_memory(bytes)
+            session
+                .commit_from_memory(bytes)
                 .context("failed to load ONNX model into ORT")?
         };
 
@@ -237,12 +246,7 @@ pub mod onnx_builder {
     /// Build a minimal ONNX model for a unary elementwise op.
     /// Graph: input "X" [1, size] -> op -> output "Y" [1, size]
     pub fn unary_op(op_type: &str, size: usize) -> Vec<u8> {
-        build_model(
-            op_type,
-            &[("X", &[1, size])],
-            &[("Y", &[1, size])],
-            &[],
-        )
+        build_model(op_type, &[("X", &[1, size])], &[("Y", &[1, size])], &[])
     }
 
     /// Build a minimal ONNX model for a binary elementwise op.
@@ -314,8 +318,15 @@ pub mod onnx_builder {
     pub fn rms_norm(rows: usize, size: usize, epsilon: f32) -> Vec<u8> {
         let nodes = vec![
             Node::new("Pow", &["X", "two"], &["x_sq"]),
-            Node::with_attrs("ReduceMean", &["x_sq"], &["mean_sq"],
-                &[("axes", AttrVal::Ints(vec![-1])), ("keepdims", AttrVal::Int(1))]),
+            Node::with_attrs(
+                "ReduceMean",
+                &["x_sq"],
+                &["mean_sq"],
+                &[
+                    ("axes", AttrVal::Ints(vec![-1])),
+                    ("keepdims", AttrVal::Int(1)),
+                ],
+            ),
             Node::new("Add", &["mean_sq", "eps"], &["mean_plus_eps"]),
             Node::new("Sqrt", &["mean_plus_eps"], &["rms"]),
             Node::new("Div", &["X", "rms"], &["normed"]),
@@ -337,12 +348,26 @@ pub mod onnx_builder {
     /// LayerNorm(x, weight, bias, eps) = (x - mean(x)) / sqrt(var(x) + eps) * weight + bias
     pub fn layer_norm(rows: usize, size: usize, epsilon: f32) -> Vec<u8> {
         let nodes = vec![
-            Node::with_attrs("ReduceMean", &["X"], &["mean"],
-                &[("axes", AttrVal::Ints(vec![-1])), ("keepdims", AttrVal::Int(1))]),
+            Node::with_attrs(
+                "ReduceMean",
+                &["X"],
+                &["mean"],
+                &[
+                    ("axes", AttrVal::Ints(vec![-1])),
+                    ("keepdims", AttrVal::Int(1)),
+                ],
+            ),
             Node::new("Sub", &["X", "mean"], &["x_centered"]),
             Node::new("Pow", &["x_centered", "two"], &["x_sq"]),
-            Node::with_attrs("ReduceMean", &["x_sq"], &["var"],
-                &[("axes", AttrVal::Ints(vec![-1])), ("keepdims", AttrVal::Int(1))]),
+            Node::with_attrs(
+                "ReduceMean",
+                &["x_sq"],
+                &["var"],
+                &[
+                    ("axes", AttrVal::Ints(vec![-1])),
+                    ("keepdims", AttrVal::Int(1)),
+                ],
+            ),
             Node::new("Add", &["var", "eps"], &["var_eps"]),
             Node::new("Sqrt", &["var_eps"], &["std"]),
             Node::new("Div", &["x_centered", "std"], &["normed"]),
@@ -411,7 +436,10 @@ pub mod onnx_builder {
         )];
         build_multi_node_model(
             &nodes,
-            &[("A", &[batch, heads, seq, dim_a]), ("B", &[batch, heads, seq, dim_b])],
+            &[
+                ("A", &[batch, heads, seq, dim_a]),
+                ("B", &[batch, heads, seq, dim_b]),
+            ],
             &[("Y", &[batch, heads, seq, dim_a + dim_b])],
             &[],
         )
@@ -527,8 +555,7 @@ pub mod onnx_builder {
             ),
             Node::new("MatMul", &["QK_soft", "V_exp"], &["AttnOut"]),
         ];
-        let attn_shape: Vec<i64> =
-            vec![batch as i64, n_heads as i64, seq as i64, head_dim as i64];
+        let attn_shape: Vec<i64> = vec![batch as i64, n_heads as i64, seq as i64, head_dim as i64];
         let initializers = vec![
             Initializer::int64_1d("unsq_axes", vec![2]),
             Initializer::int64_1d("expand_shape_k", expand_shape_k),
@@ -588,8 +615,18 @@ pub mod onnx_builder {
                 &[("start", AttrVal::Int(2)), ("end", AttrVal::Int(4))],
             ),
             // Cast to float so we can compare numerically.
-            Node::with_attrs("Cast", &["batch_dim"], &["batch_f"], &[("to", AttrVal::Int(1))]),
-            Node::with_attrs("Cast", &["seq_hdim"], &["seqhd_f"], &[("to", AttrVal::Int(1))]),
+            Node::with_attrs(
+                "Cast",
+                &["batch_dim"],
+                &["batch_f"],
+                &[("to", AttrVal::Int(1))],
+            ),
+            Node::with_attrs(
+                "Cast",
+                &["seq_hdim"],
+                &["seqhd_f"],
+                &[("to", AttrVal::Int(1))],
+            ),
             // Concat: [batch] ++ [seq, head_dim] → [batch, seq, head_dim]
             Node::with_attrs(
                 "Concat",
@@ -709,10 +746,8 @@ pub mod onnx_builder {
         // Build the model manually so we can use `encode_value_info_dyn`
         // to declare `seq` as a dynamic (symbolic) dimension.
         let mut buf = Vec::new();
-        let graph_input = encode_value_info_dyn(
-            "K",
-            &[Some(batch), Some(n_kv_heads), None, Some(head_dim)],
-        );
+        let graph_input =
+            encode_value_info_dyn("K", &[Some(batch), Some(n_kv_heads), None, Some(head_dim)]);
         let graph_output = encode_value_info("Y", &[2]);
 
         let mut graph = Vec::new();
@@ -745,12 +780,7 @@ pub mod onnx_builder {
             Node::new("Shape", &["X"], &["X_shape"]),
             Node::with_attrs("Cast", &["X_shape"], &["Y"], &[("to", AttrVal::Int(1))]),
         ];
-        build_multi_node_model(
-            &nodes,
-            &[("X", &[batch, seq, hidden])],
-            &[("Y", &[3])],
-            &[],
-        )
+        build_multi_node_model(&nodes, &[("X", &[batch, seq, hidden])], &[("Y", &[3])], &[])
     }
 
     /// Build a model where a Reshape target is computed at runtime via
@@ -937,8 +967,16 @@ pub mod onnx_builder {
             ),
         ];
         let initializers = vec![
-            Initializer { name: "row", data: InitData::Float(row_data), shape: vec![seq, 1] },
-            Initializer { name: "col", data: InitData::Float(col_data), shape: vec![1, seq] },
+            Initializer {
+                name: "row",
+                data: InitData::Float(row_data),
+                shape: vec![seq, 1],
+            },
+            Initializer {
+                name: "col",
+                data: InitData::Float(col_data),
+                shape: vec![1, seq],
+            },
         ];
         build_multi_node_model(&nodes, &[], &[("output", &[seq, seq])], &initializers)
     }
@@ -1013,9 +1051,7 @@ pub mod onnx_builder {
 
         // Build lower-triangular causal mask for [seq, seq]: 0 on/below diagonal, -inf above.
         let causal_data: Vec<f32> = (0..seq)
-            .flat_map(|i| {
-                (0..seq).map(move |j| if j > i { f32::NEG_INFINITY } else { 0.0_f32 })
-            })
+            .flat_map(|i| (0..seq).map(move |j| if j > i { f32::NEG_INFINITY } else { 0.0_f32 }))
             .collect();
 
         let nodes = vec![
@@ -1114,7 +1150,10 @@ pub mod onnx_builder {
         seq: usize,
         head_dim: usize,
     ) -> Vec<u8> {
-        assert!(n_q_heads.is_multiple_of(n_kv_heads), "n_q_heads must be divisible by n_kv_heads");
+        assert!(
+            n_q_heads.is_multiple_of(n_kv_heads),
+            "n_q_heads must be divisible by n_kv_heads"
+        );
         let group_size = n_q_heads / n_kv_heads;
         let scale = 1.0_f32 / (head_dim as f32).sqrt();
 
@@ -1123,52 +1162,79 @@ pub mod onnx_builder {
         let kv_reshape: Vec<i64> = vec![seq as i64, n_kv_heads as i64, head_dim as i64];
         // After transpose: [n_kv_heads, seq, head_dim] → unsqueeze → [n_kv_heads, 1, seq, head_dim]
         // Expand to [n_kv_heads, group_size, seq, head_dim] → reshape [n_q_heads, seq, head_dim]
-        let kv_expand: Vec<i64> = vec![n_kv_heads as i64, group_size as i64, seq as i64, head_dim as i64];
+        let kv_expand: Vec<i64> = vec![
+            n_kv_heads as i64,
+            group_size as i64,
+            seq as i64,
+            head_dim as i64,
+        ];
         let kv_final: Vec<i64> = vec![n_q_heads as i64, seq as i64, head_dim as i64];
         let out_flat: Vec<i64> = vec![seq as i64, (n_q_heads * head_dim) as i64];
 
         // Causal mask: 0 on/below diagonal, -inf above
         let causal_data: Vec<f32> = (0..seq)
-            .flat_map(|i| {
-                (0..seq).map(move |j| if j > i { f32::NEG_INFINITY } else { 0.0_f32 })
-            })
+            .flat_map(|i| (0..seq).map(move |j| if j > i { f32::NEG_INFINITY } else { 0.0_f32 }))
             .collect();
 
         let nodes = vec![
             // Q: [seq, n_q*head_dim] → [seq, n_q, head_dim] → [n_q, seq, head_dim]
             Node::new("Reshape", &["Q_flat", "q_reshape"], &["Q_3d"]),
-            Node::with_attrs("Transpose", &["Q_3d"], &["Q_t"], &[("perm", AttrVal::Ints(vec![1, 0, 2]))]),
-
+            Node::with_attrs(
+                "Transpose",
+                &["Q_3d"],
+                &["Q_t"],
+                &[("perm", AttrVal::Ints(vec![1, 0, 2]))],
+            ),
             // K: [seq, n_kv*head_dim] → [seq, n_kv, head_dim] → [n_kv, seq, head_dim]
             Node::new("Reshape", &["K_flat", "kv_reshape_k"], &["K_3d"]),
-            Node::with_attrs("Transpose", &["K_3d"], &["K_t"], &[("perm", AttrVal::Ints(vec![1, 0, 2]))]),
+            Node::with_attrs(
+                "Transpose",
+                &["K_3d"],
+                &["K_t"],
+                &[("perm", AttrVal::Ints(vec![1, 0, 2]))],
+            ),
             // Expand K: [n_kv, seq, hd] → [n_kv, 1, seq, hd] → [n_kv, gs, seq, hd] → [n_q, seq, hd]
             // Opset 13+: axes is a tensor input, not an attribute.
             Node::new("Unsqueeze", &["K_t", "unsq_axes_k"], &["K_4d"]),
             Node::new("Expand", &["K_4d", "kv_expand_k"], &["K_exp4"]),
             Node::new("Reshape", &["K_exp4", "kv_final_k"], &["K_exp"]),
-
             // V: same expansion as K
             Node::new("Reshape", &["V_flat", "kv_reshape_v"], &["V_3d"]),
-            Node::with_attrs("Transpose", &["V_3d"], &["V_t"], &[("perm", AttrVal::Ints(vec![1, 0, 2]))]),
+            Node::with_attrs(
+                "Transpose",
+                &["V_3d"],
+                &["V_t"],
+                &[("perm", AttrVal::Ints(vec![1, 0, 2]))],
+            ),
             Node::new("Unsqueeze", &["V_t", "unsq_axes_v"], &["V_4d"]),
             Node::new("Expand", &["V_4d", "kv_expand_v"], &["V_exp4"]),
             Node::new("Reshape", &["V_exp4", "kv_final_v"], &["V_exp"]),
-
             // K^T for QK matmul: [n_q, seq, head_dim] → [n_q, head_dim, seq]
-            Node::with_attrs("Transpose", &["K_exp"], &["K_T"], &[("perm", AttrVal::Ints(vec![0, 2, 1]))]),
-
+            Node::with_attrs(
+                "Transpose",
+                &["K_exp"],
+                &["K_T"],
+                &[("perm", AttrVal::Ints(vec![0, 2, 1]))],
+            ),
             // QK^T: [n_q, seq, seq]
             Node::new("MatMul", &["Q_t", "K_T"], &["QK"]),
             Node::new("Mul", &["QK", "scale"], &["QK_s"]),
             Node::new("Add", &["QK_s", "causal_mask"], &["QK_masked"]),
-            Node::with_attrs("Softmax", &["QK_masked"], &["scores"], &[("axis", AttrVal::Int(-1))]),
-
+            Node::with_attrs(
+                "Softmax",
+                &["QK_masked"],
+                &["scores"],
+                &[("axis", AttrVal::Int(-1))],
+            ),
             // scores @ V: [n_q, seq, head_dim]
             Node::new("MatMul", &["scores", "V_exp"], &["AttnOut_t"]),
-
             // Transpose back and flatten: [n_q, seq, hd] → [seq, n_q, hd] → [seq, n_q*hd]
-            Node::with_attrs("Transpose", &["AttnOut_t"], &["AttnOut_3d"], &[("perm", AttrVal::Ints(vec![1, 0, 2]))]),
+            Node::with_attrs(
+                "Transpose",
+                &["AttnOut_t"],
+                &["AttnOut_3d"],
+                &[("perm", AttrVal::Ints(vec![1, 0, 2]))],
+            ),
             Node::new("Reshape", &["AttnOut_3d", "out_flat"], &["output"]),
         ];
 
@@ -1222,11 +1288,18 @@ pub mod onnx_builder {
     /// This makes it a reliable fast CI fixture for variable-seq correctness.
     ///
     /// Weights: ~50 KB. Compile: <100 ms. Execute at seq=128: <5 ms.
-    pub fn mini_transformer_dyn(hidden: usize, _n_heads: usize, ffn_dim: usize, vocab: usize) -> Vec<u8> {
+    pub fn mini_transformer_dyn(
+        hidden: usize,
+        _n_heads: usize,
+        ffn_dim: usize,
+        vocab: usize,
+    ) -> Vec<u8> {
         let scale = 1.0_f32 / (hidden as f32).sqrt();
 
         let mk_w = |n: usize, offset: f32| -> Vec<f32> {
-            (0..n).map(|i| ((i % 64) as f32 * 0.02 - 0.6) + offset).collect()
+            (0..n)
+                .map(|i| ((i % 64) as f32 * 0.02 - 0.6) + offset)
+                .collect()
         };
 
         let nodes = vec![
@@ -1234,22 +1307,28 @@ pub mod onnx_builder {
             Node::new("MatMul", &["X", "w_q"], &["Q"]),
             Node::new("MatMul", &["X", "w_k"], &["K"]),
             Node::new("MatMul", &["X", "w_v"], &["V"]),
-
             // ── K^T: [hidden, seq] ──
-            Node::with_attrs("Transpose", &["K"], &["K_T"], &[("perm", AttrVal::Ints(vec![1, 0]))]),
-
+            Node::with_attrs(
+                "Transpose",
+                &["K"],
+                &["K_T"],
+                &[("perm", AttrVal::Ints(vec![1, 0]))],
+            ),
             // ── Scaled dot-product attention ──
             // QK^T: [seq, seq]
             Node::new("MatMul", &["Q", "K_T"], &["QK"]),
             Node::new("Mul", &["QK", "scale_s"], &["QK_s"]),
-            Node::with_attrs("Softmax", &["QK_s"], &["attn_w"], &[("axis", AttrVal::Int(-1))]),
+            Node::with_attrs(
+                "Softmax",
+                &["QK_s"],
+                &["attn_w"],
+                &[("axis", AttrVal::Int(-1))],
+            ),
             // attn_out: [seq, hidden]
             Node::new("MatMul", &["attn_w", "V"], &["attn_out"]),
-
             // ── Output projection + residual ──
             Node::new("MatMul", &["attn_out", "w_o"], &["o_proj"]),
             Node::new("Add", &["X", "o_proj"], &["h2"]),
-
             // ── FFN SwiGLU: silu(gate) * up → down ──
             Node::new("MatMul", &["h2", "w_gate"], &["gate"]),
             Node::new("Sigmoid", &["gate"], &["gate_s"]),
@@ -1258,27 +1337,58 @@ pub mod onnx_builder {
             Node::new("Mul", &["gate_silu", "up"], &["ffn_h"]),
             Node::new("MatMul", &["ffn_h", "w_down"], &["h3"]),
             Node::new("Add", &["h2", "h3"], &["Y_pre"]),
-
             // ── LM head: [seq, hidden] → [seq, vocab] ──
             Node::new("MatMul", &["Y_pre", "w_lm"], &["Y"]),
         ];
 
         let initializers = vec![
-            Initializer { name: "w_q",    data: InitData::Float(mk_w(hidden * hidden,  0.00)), shape: vec![hidden, hidden] },
-            Initializer { name: "w_k",    data: InitData::Float(mk_w(hidden * hidden,  0.10)), shape: vec![hidden, hidden] },
-            Initializer { name: "w_v",    data: InitData::Float(mk_w(hidden * hidden,  0.20)), shape: vec![hidden, hidden] },
-            Initializer { name: "w_o",    data: InitData::Float(mk_w(hidden * hidden,  0.30)), shape: vec![hidden, hidden] },
-            Initializer { name: "w_gate", data: InitData::Float(mk_w(hidden * ffn_dim, 0.00)), shape: vec![hidden, ffn_dim] },
-            Initializer { name: "w_up",   data: InitData::Float(mk_w(hidden * ffn_dim, 0.15)), shape: vec![hidden, ffn_dim] },
-            Initializer { name: "w_down", data: InitData::Float(mk_w(ffn_dim * hidden, 0.05)), shape: vec![ffn_dim, hidden] },
-            Initializer { name: "w_lm",   data: InitData::Float(mk_w(hidden * vocab,   0.00)), shape: vec![hidden, vocab] },
+            Initializer {
+                name: "w_q",
+                data: InitData::Float(mk_w(hidden * hidden, 0.00)),
+                shape: vec![hidden, hidden],
+            },
+            Initializer {
+                name: "w_k",
+                data: InitData::Float(mk_w(hidden * hidden, 0.10)),
+                shape: vec![hidden, hidden],
+            },
+            Initializer {
+                name: "w_v",
+                data: InitData::Float(mk_w(hidden * hidden, 0.20)),
+                shape: vec![hidden, hidden],
+            },
+            Initializer {
+                name: "w_o",
+                data: InitData::Float(mk_w(hidden * hidden, 0.30)),
+                shape: vec![hidden, hidden],
+            },
+            Initializer {
+                name: "w_gate",
+                data: InitData::Float(mk_w(hidden * ffn_dim, 0.00)),
+                shape: vec![hidden, ffn_dim],
+            },
+            Initializer {
+                name: "w_up",
+                data: InitData::Float(mk_w(hidden * ffn_dim, 0.15)),
+                shape: vec![hidden, ffn_dim],
+            },
+            Initializer {
+                name: "w_down",
+                data: InitData::Float(mk_w(ffn_dim * hidden, 0.05)),
+                shape: vec![ffn_dim, hidden],
+            },
+            Initializer {
+                name: "w_lm",
+                data: InitData::Float(mk_w(hidden * vocab, 0.00)),
+                shape: vec![hidden, vocab],
+            },
             Initializer::scalar("scale_s", scale),
         ];
 
         build_multi_node_model_dyn(
             &nodes,
-            &[("X", &[None, Some(hidden)])],   // [dyn_seq, hidden]
-            &[("Y", &[vocab])],                // placeholder output shape
+            &[("X", &[None, Some(hidden)])], // [dyn_seq, hidden]
+            &[("Y", &[vocab])],              // placeholder output shape
             &initializers,
         )
     }
@@ -1298,11 +1408,7 @@ pub mod onnx_builder {
     ///
     /// hidden=32, n_heads=4, n_kv_heads=4, head_dim=8.
     /// Weights: ~20 KB. Compile: <50 ms. Execute: <2 ms.
-    pub fn multihead_attention_dyn(
-        hidden: usize,
-        n_heads: usize,
-        head_dim: usize,
-    ) -> Vec<u8> {
+    pub fn multihead_attention_dyn(hidden: usize, n_heads: usize, head_dim: usize) -> Vec<u8> {
         assert_eq!(hidden, n_heads * head_dim);
         let scale = 1.0_f32 / (head_dim as f32).sqrt();
 
@@ -1325,62 +1431,115 @@ pub mod onnx_builder {
             Node::new("MatMul", &["X", "w_q"], &["Q_flat"]),
             Node::new("MatMul", &["X", "w_k"], &["K_flat"]),
             Node::new("MatMul", &["X", "w_v"], &["V_flat"]),
-
             // ── Reshape to [seq, n_heads, head_dim] ──
             Node::new("Reshape", &["Q_flat", "shape_heads"], &["Q_3d"]),
             Node::new("Reshape", &["K_flat", "shape_heads"], &["K_3d"]),
             Node::new("Reshape", &["V_flat", "shape_heads"], &["V_3d"]),
-
             // ── Transpose to head-first: [n_heads, seq, head_dim] ──
-            Node::with_attrs("Transpose", &["Q_3d"], &["Q_hf"], &[("perm", AttrVal::Ints(perm_to_head_first.clone()))]),
-            Node::with_attrs("Transpose", &["K_3d"], &["K_hf"], &[("perm", AttrVal::Ints(perm_to_head_first.clone()))]),
-            Node::with_attrs("Transpose", &["V_3d"], &["V_hf"], &[("perm", AttrVal::Ints(perm_to_head_first))]),
-
+            Node::with_attrs(
+                "Transpose",
+                &["Q_3d"],
+                &["Q_hf"],
+                &[("perm", AttrVal::Ints(perm_to_head_first.clone()))],
+            ),
+            Node::with_attrs(
+                "Transpose",
+                &["K_3d"],
+                &["K_hf"],
+                &[("perm", AttrVal::Ints(perm_to_head_first.clone()))],
+            ),
+            Node::with_attrs(
+                "Transpose",
+                &["V_3d"],
+                &["V_hf"],
+                &[("perm", AttrVal::Ints(perm_to_head_first))],
+            ),
             // ── Unsqueeze K for broadcast: [1, n_kv, seq, hd] ──
             // Opset 13+: axes is a tensor input, not an attribute.
             Node::new("Unsqueeze", &["K_hf", "unsq_axes"], &["K_4d"]),
-
             // ── Squeeze back: [n_kv, seq, hd] ──
             Node::new("Squeeze", &["K_4d", "sq_axes"], &["K_sq"]),
-
             // ── K^T: [n_heads, head_dim, seq] ──
-            Node::with_attrs("Transpose", &["K_sq"], &["K_T"], &[("perm", AttrVal::Ints(vec![0, 2, 1]))]),
-
+            Node::with_attrs(
+                "Transpose",
+                &["K_sq"],
+                &["K_T"],
+                &[("perm", AttrVal::Ints(vec![0, 2, 1]))],
+            ),
             // ── Scaled dot-product attention ──
             // QK^T: [n_heads, seq, seq]
             Node::new("MatMul", &["Q_hf", "K_T"], &["QK"]),
             Node::new("Mul", &["QK", "scale_s"], &["QK_s"]),
-            Node::with_attrs("Softmax", &["QK_s"], &["attn_w"], &[("axis", AttrVal::Int(-1))]),
+            Node::with_attrs(
+                "Softmax",
+                &["QK_s"],
+                &["attn_w"],
+                &[("axis", AttrVal::Int(-1))],
+            ),
             // attn_out: [n_heads, seq, head_dim]
             Node::new("MatMul", &["attn_w", "V_hf"], &["attn_hf"]),
-
             // ── Transpose back to [seq, n_heads, head_dim] ──
-            Node::with_attrs("Transpose", &["attn_hf"], &["attn_sf"], &[("perm", AttrVal::Ints(perm_to_seq_first))]),
-
+            Node::with_attrs(
+                "Transpose",
+                &["attn_hf"],
+                &["attn_sf"],
+                &[("perm", AttrVal::Ints(perm_to_seq_first))],
+            ),
             // ── Reshape to [seq, hidden] ──
             Node::new("Reshape", &["attn_sf", "shape_flat"], &["attn_flat"]),
-
             // ── Output projection + residual ──
             Node::new("MatMul", &["attn_flat", "w_o"], &["o_proj"]),
             Node::new("Add", &["X", "o_proj"], &["Y"]),
         ];
 
         let initializers = vec![
-            Initializer { name: "w_q", data: InitData::Float(mk_w(hidden, hidden, 0.00)), shape: vec![hidden, hidden] },
-            Initializer { name: "w_k", data: InitData::Float(mk_w(hidden, hidden, 0.10)), shape: vec![hidden, hidden] },
-            Initializer { name: "w_v", data: InitData::Float(mk_w(hidden, hidden, 0.20)), shape: vec![hidden, hidden] },
-            Initializer { name: "w_o", data: InitData::Float(mk_w(hidden, hidden, 0.30)), shape: vec![hidden, hidden] },
-            Initializer { name: "shape_heads", data: InitData::Int64(reshape_to_heads), shape: vec![3] },
-            Initializer { name: "shape_flat", data: InitData::Int64(reshape_to_flat), shape: vec![2] },
-            Initializer { name: "unsq_axes", data: InitData::Int64(vec![0]), shape: vec![1] },
-            Initializer { name: "sq_axes", data: InitData::Int64(vec![0]), shape: vec![1] },
+            Initializer {
+                name: "w_q",
+                data: InitData::Float(mk_w(hidden, hidden, 0.00)),
+                shape: vec![hidden, hidden],
+            },
+            Initializer {
+                name: "w_k",
+                data: InitData::Float(mk_w(hidden, hidden, 0.10)),
+                shape: vec![hidden, hidden],
+            },
+            Initializer {
+                name: "w_v",
+                data: InitData::Float(mk_w(hidden, hidden, 0.20)),
+                shape: vec![hidden, hidden],
+            },
+            Initializer {
+                name: "w_o",
+                data: InitData::Float(mk_w(hidden, hidden, 0.30)),
+                shape: vec![hidden, hidden],
+            },
+            Initializer {
+                name: "shape_heads",
+                data: InitData::Int64(reshape_to_heads),
+                shape: vec![3],
+            },
+            Initializer {
+                name: "shape_flat",
+                data: InitData::Int64(reshape_to_flat),
+                shape: vec![2],
+            },
+            Initializer {
+                name: "unsq_axes",
+                data: InitData::Int64(vec![0]),
+                shape: vec![1],
+            },
+            Initializer {
+                name: "sq_axes",
+                data: InitData::Int64(vec![0]),
+                shape: vec![1],
+            },
             Initializer::scalar("scale_s", scale),
         ];
 
         build_multi_node_model_dyn(
             &nodes,
-            &[("X", &[None, Some(hidden)])],  // [dyn_seq, hidden]
-            &[("Y", &[hidden])],              // placeholder
+            &[("X", &[None, Some(hidden)])], // [dyn_seq, hidden]
+            &[("Y", &[hidden])],             // placeholder
             &initializers,
         )
     }
@@ -1495,7 +1654,11 @@ pub mod onnx_builder {
         //   Reshape(X, reshape_target) → Y [1, num_heads, seq, head_dim]
         let nodes = vec![
             Node::new("Shape", &["X"], &["x_shape"]),
-            Node::new("Slice", &["x_shape", "slice_s1", "slice_e2", "slice_ax0"], &["seq_val"]),
+            Node::new(
+                "Slice",
+                &["x_shape", "slice_s1", "slice_e2", "slice_ax0"],
+                &["seq_val"],
+            ),
             Node::with_attrs(
                 "Concat",
                 &["batch_c", "num_heads_c", "seq_val", "head_dim_c"],
@@ -1526,31 +1689,38 @@ pub mod onnx_builder {
     /// Graph: input "X" [n, ic, h, w] + initializer "W" [oc, ic, kh, kw] → Conv → "Y"
     #[allow(clippy::too_many_arguments)]
     pub fn conv2d(
-        n: usize, ic: usize, h: usize, w: usize,
-        oc: usize, kh: usize, kw: usize,
-        stride: usize, pad: usize,
+        n: usize,
+        ic: usize,
+        h: usize,
+        w: usize,
+        oc: usize,
+        kh: usize,
+        kw: usize,
+        stride: usize,
+        pad: usize,
     ) -> Vec<u8> {
         let h_out = (h + 2 * pad - kh) / stride + 1;
         let w_out = (w + 2 * pad - kw) / stride + 1;
         let weight_len = oc * ic * kh * kw;
-        let weight_data: Vec<f32> = (0..weight_len)
-            .map(|i| ((i as f32) * 0.01).sin())
-            .collect();
-        let nodes = vec![
-            Node::with_attrs(
-                "Conv",
-                &["X", "W"],
-                &["Y"],
-                &[
-                    ("kernel_shape", AttrVal::Ints(vec![kh as i64, kw as i64])),
-                    ("strides", AttrVal::Ints(vec![stride as i64, stride as i64])),
-                    ("pads", AttrVal::Ints(vec![pad as i64, pad as i64, pad as i64, pad as i64])),
-                ],
-            ),
-        ];
-        let initializers = vec![
-            Initializer::float_nd("W", weight_data, vec![oc, ic, kh, kw]),
-        ];
+        let weight_data: Vec<f32> = (0..weight_len).map(|i| ((i as f32) * 0.01).sin()).collect();
+        let nodes = vec![Node::with_attrs(
+            "Conv",
+            &["X", "W"],
+            &["Y"],
+            &[
+                ("kernel_shape", AttrVal::Ints(vec![kh as i64, kw as i64])),
+                ("strides", AttrVal::Ints(vec![stride as i64, stride as i64])),
+                (
+                    "pads",
+                    AttrVal::Ints(vec![pad as i64, pad as i64, pad as i64, pad as i64]),
+                ),
+            ],
+        )];
+        let initializers = vec![Initializer::float_nd(
+            "W",
+            weight_data,
+            vec![oc, ic, kh, kw],
+        )];
         build_multi_node_model(
             &nodes,
             &[("X", &[n, ic, h, w])],
@@ -1564,9 +1734,7 @@ pub mod onnx_builder {
         let kh = 3;
         let kw = 3;
         let weight_len = oc * ic * kh * kw;
-        let weight_data: Vec<f32> = (0..weight_len)
-            .map(|i| ((i as f32) * 0.01).sin())
-            .collect();
+        let weight_data: Vec<f32> = (0..weight_len).map(|i| ((i as f32) * 0.01).sin()).collect();
         let nodes = vec![
             Node::with_attrs(
                 "Conv",
@@ -1577,9 +1745,11 @@ pub mod onnx_builder {
             Node::new("Relu", &["conv_out"], &["relu_out"]),
             Node::new("GlobalAveragePool", &["relu_out"], &["Y"]),
         ];
-        let initializers = vec![
-            Initializer::float_nd("conv_W", weight_data, vec![oc, ic, kh, kw]),
-        ];
+        let initializers = vec![Initializer::float_nd(
+            "conv_W",
+            weight_data,
+            vec![oc, ic, kh, kw],
+        )];
         build_multi_node_model(
             &nodes,
             &[("X", &[1, ic, h, w])],
@@ -1591,7 +1761,11 @@ pub mod onnx_builder {
     /// Build a Conv+Relu+GlobalAveragePool+Flatten+Gemm (mini classifier) model.
     /// This exercises the full ResNet-style pipeline at tiny scale.
     pub fn mini_vision_classifier(
-        ic: usize, h: usize, w: usize, oc: usize, num_classes: usize,
+        ic: usize,
+        h: usize,
+        w: usize,
+        oc: usize,
+        num_classes: usize,
     ) -> Vec<u8> {
         let kh = 3;
         let kw = 3;
@@ -1603,9 +1777,7 @@ pub mod onnx_builder {
         let gemm_weight: Vec<f32> = (0..num_classes * oc)
             .map(|i| ((i as f32) * 0.005).cos())
             .collect();
-        let gemm_bias: Vec<f32> = (0..num_classes)
-            .map(|i| (i as f32) * 0.01)
-            .collect();
+        let gemm_bias: Vec<f32> = (0..num_classes).map(|i| (i as f32) * 0.01).collect();
 
         let h_out = h - kh + 1; // no padding
         let w_out = w - kw + 1;
@@ -1616,9 +1788,7 @@ pub mod onnx_builder {
                 "Conv",
                 &["X", "conv_W"],
                 &["conv_out"],
-                &[
-                    ("kernel_shape", AttrVal::Ints(vec![kh as i64, kw as i64])),
-                ],
+                &[("kernel_shape", AttrVal::Ints(vec![kh as i64, kw as i64]))],
             ),
             Node::new("Relu", &["conv_out"], &["relu_out"]),
             Node::new("GlobalAveragePool", &["relu_out"], &["pool_out"]),
@@ -1667,7 +1837,11 @@ pub mod onnx_builder {
     }
 
     impl Node {
-        pub fn new(op_type: &'static str, inputs: &[&'static str], outputs: &[&'static str]) -> Self {
+        pub fn new(
+            op_type: &'static str,
+            inputs: &[&'static str],
+            outputs: &[&'static str],
+        ) -> Self {
             Self {
                 op_type,
                 inputs: inputs.to_vec(),
@@ -1704,23 +1878,39 @@ pub mod onnx_builder {
 
     impl Initializer {
         pub fn scalar(name: &'static str, val: f32) -> Self {
-            Self { name, data: InitData::Float(vec![val]), shape: vec![] }
+            Self {
+                name,
+                data: InitData::Float(vec![val]),
+                shape: vec![],
+            }
         }
 
         /// 1-D INT64 initializer — used for shape inputs (e.g. Expand's `shape` argument).
         pub fn int64_1d(name: &'static str, vals: Vec<i64>) -> Self {
             let n = vals.len();
-            Self { name, data: InitData::Int64(vals), shape: vec![n] }
+            Self {
+                name,
+                data: InitData::Int64(vals),
+                shape: vec![n],
+            }
         }
 
         /// Scalar (rank-0) INT64 initializer — used for Range start/limit/delta.
         pub fn int64_scalar(name: &'static str, val: i64) -> Self {
-            Self { name, data: InitData::Int64(vec![val]), shape: vec![] }
+            Self {
+                name,
+                data: InitData::Int64(vec![val]),
+                shape: vec![],
+            }
         }
 
         /// N-D float initializer — used for Conv2d weights, biases, etc.
         pub fn float_nd(name: &'static str, data: Vec<f32>, shape: Vec<usize>) -> Self {
-            Self { name, data: InitData::Float(data), shape }
+            Self {
+                name,
+                data: InitData::Float(data),
+                shape,
+            }
         }
     }
 

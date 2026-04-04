@@ -25,8 +25,16 @@ impl std::fmt::Display for OrtValidationReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "=== ORT Cross-Validation Report ===")?;
         writeln!(f, "Model: {}", self.model_path)?;
-        writeln!(f, "ORT load:     {}", if self.ort_ok { "PASS" } else { "FAIL" })?;
-        writeln!(f, "Hologram compile: {}", if self.hologram_ok { "PASS" } else { "FAIL" })?;
+        writeln!(
+            f,
+            "ORT load:     {}",
+            if self.ort_ok { "PASS" } else { "FAIL" }
+        )?;
+        writeln!(
+            f,
+            "Hologram compile: {}",
+            if self.hologram_ok { "PASS" } else { "FAIL" }
+        )?;
         if self.hologram_ok {
             writeln!(f, "Compiled nodes:   {}", self.compiled_nodes)?;
         }
@@ -46,9 +54,7 @@ pub fn validate_model_with_ort(model_path: &Path) -> OrtValidationReport {
     let model_str = model_path.display().to_string();
 
     // Step 1: Can ORT load it?
-    let ort_ok = match Session::builder()
-        .and_then(|mut b| b.commit_from_file(model_path))
-    {
+    let ort_ok = match Session::builder().and_then(|mut b| b.commit_from_file(model_path)) {
         Ok(_session) => true,
         Err(e) => {
             return OrtValidationReport {

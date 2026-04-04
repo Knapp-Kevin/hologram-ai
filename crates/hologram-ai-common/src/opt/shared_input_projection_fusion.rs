@@ -36,7 +36,7 @@
 //! Saves 66 BLAS calls per decode step (44 from QKV + 22 from gate+up).
 
 use super::pipeline::Pass;
-use crate::ir::{AiGraph, AiNode, AiOp, AiParam, Dim, DType, SemanticHint, TensorId, TensorInfo};
+use crate::ir::{AiGraph, AiNode, AiOp, AiParam, DType, Dim, SemanticHint, TensorId, TensorInfo};
 use std::collections::{HashMap, HashSet};
 
 /// Fuse shared-input MatMul projections into single MatMul + Slices.
@@ -56,207 +56,216 @@ impl Pass for SharedInputProjectionFusion {
         // To re-enable: remove the early return and uncomment the fusion paths below.
         return Ok(graph);
 
-        #[allow(unreachable_code, clippy::overly_complex_bool_expr, clippy::needless_borrow,
-                clippy::iter_over_hash_type, clippy::for_kv_map, unused_variables, unused_mut)]
+        #[allow(
+            unreachable_code,
+            clippy::overly_complex_bool_expr,
+            clippy::needless_borrow,
+            clippy::iter_over_hash_type,
+            clippy::for_kv_map,
+            unused_variables,
+            unused_mut
+        )]
         {
-        let mut graph = graph;
-        // Collect MatMul nodes grouped by their shared input tensor.
-        // Key: input[0] tid, Value: vec of (node_idx, weight_tid, K, N).
-        let mut shared_input_groups: HashMap<TensorId, Vec<MatMulInfo>> = HashMap::new();
+            let mut graph = graph;
+            // Collect MatMul nodes grouped by their shared input tensor.
+            // Key: input[0] tid, Value: vec of (node_idx, weight_tid, K, N).
+            let mut shared_input_groups: HashMap<TensorId, Vec<MatMulInfo>> = HashMap::new();
 
-        for (idx, node) in graph.nodes.iter().enumerate() {
-            if !matches!(node.op, AiOp::MatMul) || node.inputs.len() < 2 {
-                continue;
-            }
-            let input_tid = node.inputs[0];
-            let weight_tid = node.inputs[1];
-
-            // Weight must be a parameter (not an intermediate activation).
-            if !graph.params.contains_key(&weight_tid) {
-                continue;
-            }
-
-            // Get weight shape — must be 2D with concrete dims.
-            let (k, n) = match get_2d_shape(&graph, weight_tid) {
-                Some(dims) => dims,
-                None => continue,
-            };
-
-            // Skip tiny weights.
-            if k < 256 || n < 256 {
-                continue;
-            }
-
-            let output_tid = match node.outputs.first() {
-                Some(&tid) => tid,
-                None => continue,
-            };
-
-            shared_input_groups.entry(input_tid).or_default().push(MatMulInfo {
-                node_idx: idx,
-                weight_tid,
-                output_tid,
-                k,
-                n,
-            });
-        }
-
-        let mut to_remove: HashSet<usize> = HashSet::new();
-        let mut new_nodes: Vec<(usize, Vec<AiNode>)> = Vec::new(); // (insert_before_idx, nodes)
-        let mut fused_qkv = 0u32;
-        let mut fused_gate_up = 0u32;
-
-        // Next available node ID and tensor ID.
-        let mut next_node_id = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
-        let mut next_tid = graph
-            .nodes
-            .iter()
-            .flat_map(|n| n.outputs.iter().chain(n.inputs.iter()))
-            .copied()
-            .max()
-            .unwrap_or(0)
-            + 1;
-        // Also consider param tensor IDs.
-        if let Some(max_param_tid) = graph.params.keys().max() {
-            next_tid = next_tid.max(*max_param_tid + 1);
-        }
-
-        for (_input_tid, group) in &shared_input_groups {
-            // All members must have the same K dimension.
-            let k = group[0].k;
-            if !group.iter().all(|m| m.k == k) {
-                continue;
-            }
-
-            // QKV fusion: disabled for now — profiling shows the fused 2048×2560
-            // sgemm is slower than 3 separate calls on Apple Silicon AMX.
-            // The per-call overhead is negligible for M=1 vecmat on this hardware.
-            // Re-enable for non-AMX platforms or when M>1 (prefill).
-            if false && group.len() == 3 {
-                if let Some(qkv) = try_classify_qkv(group) {
-                    if to_remove.contains(&qkv.q.node_idx)
-                        || to_remove.contains(&qkv.k.node_idx)
-                        || to_remove.contains(&qkv.v.node_idx)
-                    {
-                        continue;
-                    }
-
-                    match fuse_matmuls(
-                        &mut graph,
-                        &[&qkv.q, &qkv.k, &qkv.v],
-                        &mut next_node_id,
-                        &mut next_tid,
-                    ) {
-                        Ok(result) => {
-                            to_remove.insert(qkv.q.node_idx);
-                            to_remove.insert(qkv.k.node_idx);
-                            to_remove.insert(qkv.v.node_idx);
-                            let insert_idx = qkv
-                                .q
-                                .node_idx
-                                .min(qkv.k.node_idx)
-                                .min(qkv.v.node_idx);
-                            new_nodes.push((insert_idx, result));
-                            fused_qkv += 1;
-                            tracing::debug!(
-                                k,
-                                n_q = qkv.q.n,
-                                n_k = qkv.k.n,
-                                n_v = qkv.v.n,
-                                "SharedInputProjectionFusion: fused QKV projections"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!("SharedInputProjectionFusion: QKV fusion failed: {e}");
-                        }
-                    }
+            for (idx, node) in graph.nodes.iter().enumerate() {
+                if !matches!(node.op, AiOp::MatMul) || node.inputs.len() < 2 {
                     continue;
                 }
+                let input_tid = node.inputs[0];
+                let weight_tid = node.inputs[1];
+
+                // Weight must be a parameter (not an intermediate activation).
+                if !graph.params.contains_key(&weight_tid) {
+                    continue;
+                }
+
+                // Get weight shape — must be 2D with concrete dims.
+                let (k, n) = match get_2d_shape(&graph, weight_tid) {
+                    Some(dims) => dims,
+                    None => continue,
+                };
+
+                // Skip tiny weights.
+                if k < 256 || n < 256 {
+                    continue;
+                }
+
+                let output_tid = match node.outputs.first() {
+                    Some(&tid) => tid,
+                    None => continue,
+                };
+
+                shared_input_groups
+                    .entry(input_tid)
+                    .or_default()
+                    .push(MatMulInfo {
+                        node_idx: idx,
+                        weight_tid,
+                        output_tid,
+                        k,
+                        n,
+                    });
             }
 
-            // Try gate+up fusion: exactly 2 members with equal N.
-            // TODO: re-enable after fixing rkyv serialization for large Q4 weights
-            if false && group.len() >= 2 {
-                // Find pairs with equal N.
-                let mut n_groups: HashMap<usize, Vec<&MatMulInfo>> = HashMap::new();
-                for m in group {
-                    n_groups.entry(m.n).or_default().push(m);
+            let mut to_remove: HashSet<usize> = HashSet::new();
+            let mut new_nodes: Vec<(usize, Vec<AiNode>)> = Vec::new(); // (insert_before_idx, nodes)
+            let mut fused_qkv = 0u32;
+            let mut fused_gate_up = 0u32;
+
+            // Next available node ID and tensor ID.
+            let mut next_node_id = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+            let mut next_tid = graph
+                .nodes
+                .iter()
+                .flat_map(|n| n.outputs.iter().chain(n.inputs.iter()))
+                .copied()
+                .max()
+                .unwrap_or(0)
+                + 1;
+            // Also consider param tensor IDs.
+            if let Some(max_param_tid) = graph.params.keys().max() {
+                next_tid = next_tid.max(*max_param_tid + 1);
+            }
+
+            for (_input_tid, group) in &shared_input_groups {
+                // All members must have the same K dimension.
+                let k = group[0].k;
+                if !group.iter().all(|m| m.k == k) {
+                    continue;
                 }
-                for (_n_val, members) in &n_groups {
-                    if members.len() == 2 {
-                        let a = members[0];
-                        let b = members[1];
-                        if to_remove.contains(&a.node_idx) || to_remove.contains(&b.node_idx) {
+
+                // QKV fusion: disabled for now — profiling shows the fused 2048×2560
+                // sgemm is slower than 3 separate calls on Apple Silicon AMX.
+                // The per-call overhead is negligible for M=1 vecmat on this hardware.
+                // Re-enable for non-AMX platforms or when M>1 (prefill).
+                if false && group.len() == 3 {
+                    if let Some(qkv) = try_classify_qkv(group) {
+                        if to_remove.contains(&qkv.q.node_idx)
+                            || to_remove.contains(&qkv.k.node_idx)
+                            || to_remove.contains(&qkv.v.node_idx)
+                        {
                             continue;
                         }
 
                         match fuse_matmuls(
                             &mut graph,
-                            &[a, b],
+                            &[&qkv.q, &qkv.k, &qkv.v],
                             &mut next_node_id,
                             &mut next_tid,
                         ) {
                             Ok(result) => {
-                                to_remove.insert(a.node_idx);
-                                to_remove.insert(b.node_idx);
-                                let insert_idx = a.node_idx.min(b.node_idx);
+                                to_remove.insert(qkv.q.node_idx);
+                                to_remove.insert(qkv.k.node_idx);
+                                to_remove.insert(qkv.v.node_idx);
+                                let insert_idx =
+                                    qkv.q.node_idx.min(qkv.k.node_idx).min(qkv.v.node_idx);
                                 new_nodes.push((insert_idx, result));
-                                fused_gate_up += 1;
+                                fused_qkv += 1;
                                 tracing::debug!(
                                     k,
-                                    n = a.n,
-                                    "SharedInputProjectionFusion: fused gate+up projections"
+                                    n_q = qkv.q.n,
+                                    n_k = qkv.k.n,
+                                    n_v = qkv.v.n,
+                                    "SharedInputProjectionFusion: fused QKV projections"
                                 );
                             }
                             Err(e) => {
                                 tracing::warn!(
-                                    "SharedInputProjectionFusion: gate+up fusion failed: {e}"
+                                    "SharedInputProjectionFusion: QKV fusion failed: {e}"
                                 );
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                // Try gate+up fusion: exactly 2 members with equal N.
+                // TODO: re-enable after fixing rkyv serialization for large Q4 weights
+                if false && group.len() >= 2 {
+                    // Find pairs with equal N.
+                    let mut n_groups: HashMap<usize, Vec<&MatMulInfo>> = HashMap::new();
+                    for m in group {
+                        n_groups.entry(m.n).or_default().push(m);
+                    }
+                    for (_n_val, members) in &n_groups {
+                        if members.len() == 2 {
+                            let a = members[0];
+                            let b = members[1];
+                            if to_remove.contains(&a.node_idx) || to_remove.contains(&b.node_idx) {
+                                continue;
+                            }
+
+                            match fuse_matmuls(
+                                &mut graph,
+                                &[a, b],
+                                &mut next_node_id,
+                                &mut next_tid,
+                            ) {
+                                Ok(result) => {
+                                    to_remove.insert(a.node_idx);
+                                    to_remove.insert(b.node_idx);
+                                    let insert_idx = a.node_idx.min(b.node_idx);
+                                    new_nodes.push((insert_idx, result));
+                                    fused_gate_up += 1;
+                                    tracing::debug!(
+                                        k,
+                                        n = a.n,
+                                        "SharedInputProjectionFusion: fused gate+up projections"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "SharedInputProjectionFusion: gate+up fusion failed: {e}"
+                                    );
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        if fused_qkv > 0 || fused_gate_up > 0 {
-            tracing::info!(
-                fused_qkv,
-                fused_gate_up,
-                "SharedInputProjectionFusion: fused projection groups"
-            );
-        }
+            if fused_qkv > 0 || fused_gate_up > 0 {
+                tracing::info!(
+                    fused_qkv,
+                    fused_gate_up,
+                    "SharedInputProjectionFusion: fused projection groups"
+                );
+            }
 
-        // Apply: remove old nodes, insert new ones.
-        // Sort new_nodes by insert position (ascending) for stable insertion.
-        new_nodes.sort_by_key(|(idx, _)| *idx);
+            // Apply: remove old nodes, insert new ones.
+            // Sort new_nodes by insert position (ascending) for stable insertion.
+            new_nodes.sort_by_key(|(idx, _)| *idx);
 
-        let mut result_nodes = Vec::with_capacity(graph.nodes.len());
-        let mut insert_iter = new_nodes.into_iter().peekable();
+            let mut result_nodes = Vec::with_capacity(graph.nodes.len());
+            let mut insert_iter = new_nodes.into_iter().peekable();
 
-        for (i, node) in graph.nodes.into_iter().enumerate() {
-            // Insert any new nodes that should appear before this index.
-            while let Some((insert_idx, _)) = insert_iter.peek() {
-                if *insert_idx <= i {
-                    let (_, nodes) = insert_iter.next().expect("peeked");
-                    result_nodes.extend(nodes);
-                } else {
-                    break;
+            for (i, node) in graph.nodes.into_iter().enumerate() {
+                // Insert any new nodes that should appear before this index.
+                while let Some((insert_idx, _)) = insert_iter.peek() {
+                    if *insert_idx <= i {
+                        let (_, nodes) = insert_iter.next().expect("peeked");
+                        result_nodes.extend(nodes);
+                    } else {
+                        break;
+                    }
                 }
+                if to_remove.contains(&i) {
+                    continue;
+                }
+                result_nodes.push(node);
             }
-            if to_remove.contains(&i) {
-                continue;
+            // Remaining insertions after all original nodes.
+            for (_, nodes) in insert_iter {
+                result_nodes.extend(nodes);
             }
-            result_nodes.push(node);
-        }
-        // Remaining insertions after all original nodes.
-        for (_, nodes) in insert_iter {
-            result_nodes.extend(nodes);
-        }
 
-        graph.nodes = result_nodes;
-        graph.invalidate_topo_cache();
-        Ok(graph)
+            graph.nodes = result_nodes;
+            graph.invalidate_topo_cache();
+            Ok(graph)
         } // end #[allow(unreachable_code)]
     }
 }
@@ -348,10 +357,9 @@ fn concat_weights_along_n(
     let weight_data: Vec<Vec<u8>> = matmuls
         .iter()
         .map(|m| {
-            let param = graph
-                .params
-                .get(&m.weight_tid)
-                .ok_or_else(|| anyhow::anyhow!("weight param not found for tid {}", m.weight_tid))?;
+            let param = graph.params.get(&m.weight_tid).ok_or_else(|| {
+                anyhow::anyhow!("weight param not found for tid {}", m.weight_tid)
+            })?;
             param_bytes(param)
         })
         .collect::<anyhow::Result<_>>()?;
@@ -403,9 +411,13 @@ fn fuse_matmuls(
         known_i64_values: None,
         semantic: SemanticHint::Unknown,
     };
-    graph
-        .params
-        .insert(weight_tid, AiParam::Inline { data: concat_bytes, info: weight_info.clone() });
+    graph.params.insert(
+        weight_tid,
+        AiParam::Inline {
+            data: concat_bytes,
+            info: weight_info.clone(),
+        },
+    );
     graph.tensor_info.insert(weight_tid, weight_info);
 
     // Register fused output tensor info.
@@ -433,7 +445,9 @@ fn fuse_matmuls(
             semantic: SemanticHint::Unknown,
         }
     };
-    graph.tensor_info.insert(fused_output_tid, fused_output_info);
+    graph
+        .tensor_info
+        .insert(fused_output_tid, fused_output_info);
 
     // Create fused MatMul node.
     let matmul_node_id = *next_node_id;

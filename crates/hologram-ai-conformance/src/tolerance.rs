@@ -2,8 +2,8 @@
 //!
 //! Uses numpy `allclose` semantics: `|actual - expected| <= atol + rtol * |expected|`
 
-use hologram::FloatOp;
 use hologram::hologram_core::op::OpCategory;
+use hologram::FloatOp;
 
 /// Absolute and relative tolerance for comparing kernel outputs.
 #[derive(Debug, Clone, Copy)]
@@ -76,11 +76,7 @@ pub fn tolerance_for(op: &FloatOp) -> Tolerance {
 }
 
 /// Compare two f32 slices and return a detailed comparison result.
-pub fn compare_outputs(
-    actual: &[f32],
-    expected: &[f32],
-    tol: Tolerance,
-) -> ComparisonResult {
+pub fn compare_outputs(actual: &[f32], expected: &[f32], tol: Tolerance) -> ComparisonResult {
     if actual.len() != expected.len() {
         return ComparisonResult {
             passed: false,
@@ -121,7 +117,11 @@ pub fn compare_outputs(
 
     let passed = mismatches == 0;
     let message = if passed {
-        format!("PASS (max_abs={max_abs:.2e}, {}/{} elements)", actual.len(), actual.len())
+        format!(
+            "PASS (max_abs={max_abs:.2e}, {}/{} elements)",
+            actual.len(),
+            actual.len()
+        )
     } else {
         format!(
             "FAIL: {mismatches}/{} elements exceed tolerance (atol={}, rtol={})\n  worst: idx={worst_idx} actual={} expected={} abs_err={max_abs:.2e}",

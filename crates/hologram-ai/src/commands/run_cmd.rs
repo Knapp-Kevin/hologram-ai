@@ -7,7 +7,6 @@
 
 use anyhow::Context as _;
 use clap::Args;
-use tracing::{debug, info, warn};
 use hologram::hologram_archive::section::model_meta::{ModelMetaSection, SECTION_MODEL_META};
 use hologram::hologram_archive::section::tokenizer::{
     MiniBpeEncoder, TokenizerSection, SECTION_TOKENIZER,
@@ -16,6 +15,7 @@ use hologram::hologram_archive::weight::WeightDType;
 use hologram::GraphInputs;
 use std::io::Write;
 use std::path::PathBuf;
+use tracing::{debug, info, warn};
 
 use crate::compiler::HoloRunner;
 
@@ -121,9 +121,16 @@ pub fn parse_kv_cache_config(
 /// Execute the run command using shape-aware inference.
 pub fn execute(args: RunArgs) -> anyhow::Result<()> {
     let load_start = std::time::Instant::now();
-    let runner = HoloRunner::from_path(&args.file, args.cache_dir.as_deref(), args.config.as_deref())
-        .with_context(|| format!("loading archive {}", args.file.display()))?;
-    info!("archive loaded in {:.1}ms", load_start.elapsed().as_secs_f64() * 1000.0);
+    let runner = HoloRunner::from_path(
+        &args.file,
+        args.cache_dir.as_deref(),
+        args.config.as_deref(),
+    )
+    .with_context(|| format!("loading archive {}", args.file.display()))?;
+    info!(
+        "archive loaded in {:.1}ms",
+        load_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     // Load optional metadata sections.
     // Try the effective bytes (sub-archive) first, then fall back to the raw
@@ -133,9 +140,17 @@ pub fn execute(args: RunArgs) -> anyhow::Result<()> {
     let raw = runner.raw_bytes();
     let raw_plan = hologram::load_from_bytes(raw).ok();
     let tokenizer = load_section::<TokenizerSection>(effective, runner.plan(), SECTION_TOKENIZER)
-        .or_else(|| raw_plan.as_ref().and_then(|p| load_section::<TokenizerSection>(raw, p, SECTION_TOKENIZER)));
+        .or_else(|| {
+            raw_plan
+                .as_ref()
+                .and_then(|p| load_section::<TokenizerSection>(raw, p, SECTION_TOKENIZER))
+        });
     let model_meta = load_section::<ModelMetaSection>(effective, runner.plan(), SECTION_MODEL_META)
-        .or_else(|| raw_plan.as_ref().and_then(|p| load_section::<ModelMetaSection>(raw, p, SECTION_MODEL_META)));
+        .or_else(|| {
+            raw_plan
+                .as_ref()
+                .and_then(|p| load_section::<ModelMetaSection>(raw, p, SECTION_MODEL_META))
+        });
 
     print_model_info(runner.plan(), &model_meta);
 
@@ -255,7 +270,8 @@ fn resolve_seq_mode(runner: &HoloRunner, prompt_len: Option<usize>) -> SeqMode {
 
 /// Try to read max_seq_len from embedded ModelMetaSection.
 fn load_meta_seq_len(runner: &HoloRunner) -> Option<usize> {
-    let meta: ModelMetaSection = load_section(runner.archive_bytes(), runner.plan(), SECTION_MODEL_META)?;
+    let meta: ModelMetaSection =
+        load_section(runner.archive_bytes(), runner.plan(), SECTION_MODEL_META)?;
     if meta.max_seq_len > 0 {
         Some(meta.max_seq_len as usize)
     } else {
@@ -295,8 +311,7 @@ fn run_generation(
     }
     info!(
         "sampling: temperature={:.2}, top_k={}, rep_penalty=1.3 (generated tokens only)",
-        config.temperature,
-        config.top_k,
+        config.temperature, config.top_k,
     );
 
     let input_slot = plan
@@ -336,9 +351,7 @@ fn run_generation(
     }
 
     let max_tokens = config.max_tokens.unwrap_or_else(|| {
-        let limit = model_meta
-            .map(|m| m.max_seq_len as usize)
-            .unwrap_or(2048);
+        let limit = model_meta.map(|m| m.max_seq_len as usize).unwrap_or(2048);
         info!("max_tokens not set, using model max_seq_len: {limit}");
         limit
     });
@@ -388,10 +401,7 @@ fn run_generation(
                     }
                 })
                 .collect();
-            let pos_bytes: Vec<u8> = position_ids
-                .iter()
-                .flat_map(|&v| v.to_le_bytes())
-                .collect();
+            let pos_bytes: Vec<u8> = position_ids.iter().flat_map(|&v| v.to_le_bytes()).collect();
             inputs.set_with_shape(slot, pos_bytes, vec![1, padded_len]);
         }
 
@@ -401,7 +411,8 @@ fn run_generation(
             // Lazy-init KV cache on first call.
             if kv_state.is_none() {
                 // Read KV architecture params from the already-loaded metadata.
-                let meta = model_meta.as_ref()
+                let meta = model_meta
+                    .as_ref()
                     .expect("KV cache requires ModelMetaSection in archive");
                 let max_seq = meta.max_seq_len as usize;
                 let n_layers = meta.n_layers;
@@ -411,11 +422,18 @@ fn run_generation(
                     "kv_cache: n_layers={n_layers} n_kv_heads={n_kv_heads} head_dim={head_dim} max_seq={max_seq}"
                 );
                 let kv_config = parse_kv_cache_config(
-                    &config.kv_cache, config.kv_boundary_layers, config.kv_wht,
-                ).expect("invalid --kv-cache value");
-                info!("kv_config: k={:?} v={:?} boundary={} wht={}",
-                    kv_config.k_bits, kv_config.v_bits,
-                    kv_config.boundary_layers, kv_config.wht_rotation);
+                    &config.kv_cache,
+                    config.kv_boundary_layers,
+                    config.kv_wht,
+                )
+                .expect("invalid --kv-cache value");
+                info!(
+                    "kv_config: k={:?} v={:?} boundary={} wht={}",
+                    kv_config.k_bits,
+                    kv_config.v_bits,
+                    kv_config.boundary_layers,
+                    kv_config.wht_rotation
+                );
                 kv_state = Some(hologram::KvCacheState::with_config(
                     n_layers, n_kv_heads, head_dim, max_seq, kv_config,
                 ));
@@ -501,7 +519,10 @@ fn run_generation(
                 for _cycle in 0..remaining {
                     let last = *token_ids.last().expect("no tokens");
                     let result = crate::speculative::speculative_decode_step(
-                        runner, kv, last, &spec_config,
+                        runner,
+                        kv,
+                        last,
+                        &spec_config,
                     )?;
 
                     if result.accepted_tokens.is_empty() {
@@ -522,7 +543,11 @@ fn run_generation(
                         speculative_tokens += 1;
                     }
 
-                    if result.accepted_tokens.iter().any(|&t| t == encoder.eos_id()) {
+                    if result
+                        .accepted_tokens
+                        .iter()
+                        .any(|&t| t == encoder.eos_id())
+                    {
                         break;
                     }
                     if token_ids.len() - prompt_len >= remaining {
@@ -542,7 +567,9 @@ fn run_generation(
 
     let _elapsed = start.elapsed();
     let generated = token_ids.len() - prompt_len;
-    let decode_elapsed = decode_start.map(|d| d.elapsed().as_secs_f64()).unwrap_or(0.0);
+    let decode_elapsed = decode_start
+        .map(|d| d.elapsed().as_secs_f64())
+        .unwrap_or(0.0);
     let decode_tokens = generated.saturating_sub(1); // first token is from prefill
     let decode_tok_s = if decode_elapsed > 0.0 && decode_tokens > 0 {
         decode_tokens as f64 / decode_elapsed
@@ -592,11 +619,7 @@ fn build_step_tokens(token_ids: &[u32], mode: &SeqMode) -> (Vec<u32>, usize) {
 /// For output shape `[1, seq, vocab]`, the logits at position `pos` start at
 /// `pos * vocab * 4` bytes. Falls back to the last `vocab * 4` bytes if the
 /// offset is out of range.
-fn extract_logits_at_pos(
-    logit_data: &[u8],
-    target_pos: usize,
-    bytes_per_pos: usize,
-) -> &[u8] {
+fn extract_logits_at_pos(logit_data: &[u8], target_pos: usize, bytes_per_pos: usize) -> &[u8] {
     let offset = target_pos * bytes_per_pos;
     if logit_data.len() >= offset + bytes_per_pos {
         &logit_data[offset..offset + bytes_per_pos]
@@ -774,11 +797,7 @@ fn print_logit_diagnostics(
 
 // ── Section loading ────────────────────────────────────────────────────────
 
-fn load_section<T>(
-    archive_bytes: &[u8],
-    plan: &hologram::LoadedPlan,
-    kind: u32,
-) -> Option<T>
+fn load_section<T>(archive_bytes: &[u8], plan: &hologram::LoadedPlan, kind: u32) -> Option<T>
 where
     T: SectionDeserialize,
 {
@@ -835,8 +854,7 @@ fn parse_input_pair(s: &str) -> anyhow::Result<(u32, Vec<u8>)> {
     let idx: u32 = idx_str
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid index {idx_str:?} in {s:?}"))?;
-    let bytes = decode_hex(hex_str)
-        .map_err(|e| anyhow::anyhow!("invalid hex in {s:?}: {e}"))?;
+    let bytes = decode_hex(hex_str).map_err(|e| anyhow::anyhow!("invalid hex in {s:?}: {e}"))?;
     Ok((idx, bytes))
 }
 
@@ -848,9 +866,12 @@ fn load_file_inputs(raw: &[String], inputs: &mut GraphInputs) -> anyhow::Result<
         let idx: u32 = idx_str
             .parse()
             .map_err(|_| anyhow::anyhow!("invalid slot {idx_str:?} in {s:?}"))?;
-        let bytes = std::fs::read(path_str)
-            .with_context(|| format!("reading input file {path_str:?}"))?;
-        info!("loaded slot {idx} from {path_str:?} ({} bytes)", bytes.len());
+        let bytes =
+            std::fs::read(path_str).with_context(|| format!("reading input file {path_str:?}"))?;
+        info!(
+            "loaded slot {idx} from {path_str:?} ({} bytes)",
+            bytes.len()
+        );
         inputs.set(idx, bytes);
     }
     Ok(())
@@ -871,10 +892,7 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
 
 // ── Output formatting ──────────────────────────────────────────────────────
 
-fn print_model_info(
-    plan: &hologram::LoadedPlan,
-    model_meta: &Option<ModelMetaSection>,
-) {
+fn print_model_info(plan: &hologram::LoadedPlan, model_meta: &Option<ModelMetaSection>) {
     if let Some(meta) = model_meta {
         info!(
             "model: {:?} arch={} seq_len={} prompt={}",
@@ -945,10 +963,7 @@ fn print_input_help(plan: &hologram::LoadedPlan) {
     }
 }
 
-fn print_typed_outputs(
-    outputs: &hologram::GraphOutputs,
-    plan: &hologram::LoadedPlan,
-) {
+fn print_typed_outputs(outputs: &hologram::GraphOutputs, plan: &hologram::LoadedPlan) {
     use hologram::hologram_archive::entrypoint::TensorPort;
     let output_ports: Vec<TensorPort> = plan
         .layer_header()
@@ -964,7 +979,11 @@ fn print_typed_outputs(
                 Some(WeightDType::F32) if data.len() >= 4 => {
                     let n = data.len() / 4;
                     let floats: Vec<f32> = (0..n)
-                        .map(|j| f32::from_le_bytes(data[j * 4..(j + 1) * 4].try_into().expect("4 bytes")))
+                        .map(|j| {
+                            f32::from_le_bytes(
+                                data[j * 4..(j + 1) * 4].try_into().expect("4 bytes"),
+                            )
+                        })
                         .collect();
                     if floats.len() <= 16 {
                         println!("{name}: {floats:?}");
@@ -981,7 +1000,11 @@ fn print_typed_outputs(
                 Some(WeightDType::I64) if data.len() >= 8 => {
                     let n = data.len() / 8;
                     let ints: Vec<i64> = (0..n)
-                        .map(|j| i64::from_le_bytes(data[j * 8..(j + 1) * 8].try_into().expect("8 bytes")))
+                        .map(|j| {
+                            i64::from_le_bytes(
+                                data[j * 8..(j + 1) * 8].try_into().expect("8 bytes"),
+                            )
+                        })
                         .collect();
                     if ints.len() <= 32 {
                         println!("{name}: {ints:?}");
@@ -992,7 +1015,11 @@ fn print_typed_outputs(
                 Some(WeightDType::I32) if data.len() >= 4 => {
                     let n = data.len() / 4;
                     let ints: Vec<i32> = (0..n)
-                        .map(|j| i32::from_le_bytes(data[j * 4..(j + 1) * 4].try_into().expect("4 bytes")))
+                        .map(|j| {
+                            i32::from_le_bytes(
+                                data[j * 4..(j + 1) * 4].try_into().expect("4 bytes"),
+                            )
+                        })
                         .collect();
                     if ints.len() <= 32 {
                         println!("{name}: {ints:?}");
@@ -1027,10 +1054,7 @@ fn print_decoded_outputs(outputs: &hologram::GraphOutputs, tok: &TokenizerSectio
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-fn resolve_input_dtype(
-    plan: &hologram::LoadedPlan,
-    name: &str,
-) -> WeightDType {
+fn resolve_input_dtype(plan: &hologram::LoadedPlan, name: &str) -> WeightDType {
     plan.layer_header()
         .into_iter()
         .flat_map(|lh| lh.layers.iter())
@@ -1070,13 +1094,31 @@ fn serialize_ones(n: usize, dtype: WeightDType) -> Vec<u8> {
 fn serialize_mask(real_len: usize, total_len: usize, dtype: WeightDType) -> Vec<u8> {
     match dtype {
         WeightDType::I32 => (0..total_len)
-            .flat_map(|i| if i < real_len { 1i32.to_le_bytes() } else { 0i32.to_le_bytes() })
+            .flat_map(|i| {
+                if i < real_len {
+                    1i32.to_le_bytes()
+                } else {
+                    0i32.to_le_bytes()
+                }
+            })
             .collect(),
         WeightDType::F32 => (0..total_len)
-            .flat_map(|i| if i < real_len { 1.0f32.to_le_bytes() } else { 0.0f32.to_le_bytes() })
+            .flat_map(|i| {
+                if i < real_len {
+                    1.0f32.to_le_bytes()
+                } else {
+                    0.0f32.to_le_bytes()
+                }
+            })
             .collect(),
         _ => (0..total_len)
-            .flat_map(|i| if i < real_len { 1i64.to_le_bytes() } else { 0i64.to_le_bytes() })
+            .flat_map(|i| {
+                if i < real_len {
+                    1i64.to_le_bytes()
+                } else {
+                    0i64.to_le_bytes()
+                }
+            })
             .collect(),
     }
 }

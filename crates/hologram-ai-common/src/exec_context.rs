@@ -252,7 +252,11 @@ pub enum ShapeSpecRepr {
     /// Concat along the last axis: `output[-1] = a[-1] + b[-1]`.
     Concat,
     /// Contiguous axis slice. `axis_from_end=1` means the last axis.
-    Slice { axis_from_end: u8, start: u32, end: u32 },
+    Slice {
+        axis_from_end: u8,
+        start: u32,
+        end: u32,
+    },
     /// Shape op: output is a 1-D tensor `[ndim_of_input]`.
     Shape,
     /// Insert size-1 dims at specified axes. Negative axes count from the end
@@ -322,9 +326,7 @@ impl ShapeContextGraph {
     }
 
     /// Zero-copy access from raw archive bytes.
-    pub fn from_bytes(
-        bytes: &[u8],
-    ) -> Result<&ArchivedShapeContextGraph, rkyv::rancor::Error> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<&ArchivedShapeContextGraph, rkyv::rancor::Error> {
         rkyv::access::<ArchivedShapeContextGraph, rkyv::rancor::Error>(bytes)
     }
 
@@ -347,8 +349,7 @@ impl EmbeddableSection for ShapeContextGraph {
 
     fn to_bytes(&self) -> Vec<u8> {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            rkyv::to_bytes::<rkyv::rancor::Error>(self)
-                .map(|b| b.to_vec())
+            rkyv::to_bytes::<rkyv::rancor::Error>(self).map(|b| b.to_vec())
         })) {
             Ok(Ok(bytes)) => bytes,
             Ok(Err(e)) => {

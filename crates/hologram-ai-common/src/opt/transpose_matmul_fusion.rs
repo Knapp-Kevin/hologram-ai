@@ -232,7 +232,9 @@ mod tests {
         g.nodes = vec![
             AiNode::new(
                 0,
-                AiOp::Transpose { perm: vec![1u32, 0] },
+                AiOp::Transpose {
+                    perm: vec![1u32, 0],
+                },
                 vec![11],
                 vec![20],
             ),
@@ -269,7 +271,9 @@ mod tests {
         g.nodes = vec![
             AiNode::new(
                 0,
-                AiOp::Transpose { perm: vec![1u32, 0] },
+                AiOp::Transpose {
+                    perm: vec![1u32, 0],
+                },
                 vec![10],
                 vec![20],
             ),
@@ -346,7 +350,9 @@ mod tests {
         g.nodes = vec![
             AiNode::new(
                 0,
-                AiOp::Transpose { perm: vec![1u32, 0] },
+                AiOp::Transpose {
+                    perm: vec![1u32, 0],
+                },
                 vec![11],
                 vec![20],
             ),
@@ -355,6 +361,10 @@ mod tests {
         ];
 
         let result = TransposeMatMulFusion.run(g).expect("pass should succeed");
-        assert_eq!(result.nodes.len(), 3, "should not fuse multi-consumer transpose");
+        assert_eq!(
+            result.nodes.len(),
+            3,
+            "should not fuse multi-consumer transpose"
+        );
     }
 }

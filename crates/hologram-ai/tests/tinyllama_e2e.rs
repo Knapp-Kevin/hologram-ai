@@ -62,9 +62,8 @@ fn tinyllama_onnx_compiles() {
 
 #[test]
 fn tinyllama_gguf_compiles() {
-    let model = workspace_path(
-        "models/TinyLlama-1.1B-Chat-v1.0-GGUF/tinyllama-1.1b-chat-v1.0.Q4_0.gguf",
-    );
+    let model =
+        workspace_path("models/TinyLlama-1.1B-Chat-v1.0-GGUF/tinyllama-1.1b-chat-v1.0.Q4_0.gguf");
     if !model.exists() {
         eprintln!("SKIP: {} not found", model.display());
         return;
@@ -233,9 +232,8 @@ fn tinyllama_onnx_runs_and_produces_english() {
 
 #[test]
 fn tinyllama_gguf_runs_and_produces_english() {
-    let model = workspace_path(
-        "models/TinyLlama-1.1B-Chat-v1.0-GGUF/tinyllama-1.1b-chat-v1.0.Q4_0.gguf",
-    );
+    let model =
+        workspace_path("models/TinyLlama-1.1B-Chat-v1.0-GGUF/tinyllama-1.1b-chat-v1.0.Q4_0.gguf");
     if !model.exists() {
         eprintln!("SKIP: {} not found", model.display());
         return;
@@ -301,7 +299,11 @@ fn tinyllama_onnx_variable_seq_len_runs() {
     }
     let model = {
         let causal = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
-        if causal.exists() { causal } else { model }
+        if causal.exists() {
+            causal
+        } else {
+            model
+        }
     };
 
     // Compile once.
@@ -334,7 +336,10 @@ fn tinyllama_onnx_variable_seq_len_runs() {
             "seq_len={seq_len} produced empty output"
         );
 
-        eprintln!("seq_len={seq_len} OK — {} output bytes", outputs.get(0).map(|(_, b)| b.len()).unwrap_or(0));
+        eprintln!(
+            "seq_len={seq_len} OK — {} output bytes",
+            outputs.get(0).map(|(_, b)| b.len()).unwrap_or(0)
+        );
     }
 }
 

@@ -77,7 +77,7 @@ mod tests {
     use super::*;
     use crate::ir::{
         shape::{shape_from_concrete, Shape},
-        AiGraph, DType, DimVarTable, ConstraintStore,
+        AiGraph, ConstraintStore, DType, DimVarTable,
     };
 
     fn make_graph(tids: &[(u32, Shape)]) -> AiGraph {
@@ -108,7 +108,10 @@ mod tests {
     fn oracle_fills_empty_shapes() {
         let graph = make_graph(&[(0, Shape::new()), (1, shape_from_concrete(&[4, 8]))]);
         let mut oracle = HashMap::new();
-        oracle.insert(0u32, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 3])));
+        oracle.insert(
+            0u32,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[2, 3])),
+        );
         let pass = ShapeOraclePass::new(oracle);
         let graph = pass.run(graph).unwrap();
         // Tensor 0: empty → filled by oracle.
@@ -122,7 +125,10 @@ mod tests {
     fn oracle_skips_nonempty_shapes() {
         let graph = make_graph(&[(0, shape_from_concrete(&[4, 8]))]);
         let mut oracle = HashMap::new();
-        oracle.insert(0u32, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 3])));
+        oracle.insert(
+            0u32,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[2, 3])),
+        );
         let pass = ShapeOraclePass::new(oracle);
         let graph = pass.run(graph).unwrap();
         // Tensor 0: already had shape [4,8] — oracle must not overwrite.
@@ -136,7 +142,10 @@ mod tests {
     fn oracle_applies_dtype_when_default() {
         let graph = make_graph(&[(0, Shape::new())]);
         let mut oracle = HashMap::new();
-        oracle.insert(0u32, TensorInfo::new(DType::INT64, shape_from_concrete(&[3])));
+        oracle.insert(
+            0u32,
+            TensorInfo::new(DType::INT64, shape_from_concrete(&[3])),
+        );
         let pass = ShapeOraclePass::new(oracle);
         let graph = pass.run(graph).unwrap();
         // Both shape and dtype should be updated.
@@ -159,7 +168,10 @@ mod tests {
         graph.tensor_info.insert(0, ti);
 
         let mut oracle = HashMap::new();
-        oracle.insert(0u32, TensorInfo::new(DType::INT64, shape_from_concrete(&[3])));
+        oracle.insert(
+            0u32,
+            TensorInfo::new(DType::INT64, shape_from_concrete(&[3])),
+        );
         let pass = ShapeOraclePass::new(oracle);
         let graph = pass.run(graph).unwrap();
         // Shape is filled by oracle, but dtype should stay INT32 (not default F32).

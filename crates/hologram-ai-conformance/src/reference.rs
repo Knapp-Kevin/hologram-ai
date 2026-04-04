@@ -237,10 +237,7 @@ pub fn attention(
 
 /// Reference ReduceSum along last `size` elements.
 pub fn reduce_sum(input: &[f32], size: usize) -> Vec<f32> {
-    input
-        .chunks(size)
-        .map(|chunk| chunk.iter().sum())
-        .collect()
+    input.chunks(size).map(|chunk| chunk.iter().sum()).collect()
 }
 
 /// Reference ReduceMean along last `size` elements.
@@ -302,8 +299,7 @@ pub fn conv2d_simple(
                     let ih = ih as isize - pad_h as isize;
                     let iw = iw as isize - pad_w as isize;
                     if ih >= 0 && ih < in_h as isize && iw >= 0 && iw < in_w as isize {
-                        sum += input[ih as usize * in_w + iw as usize]
-                            * kernel[kh * k_w + kw];
+                        sum += input[ih as usize * in_w + iw as usize] * kernel[kh * k_w + kw];
                     }
                 }
             }

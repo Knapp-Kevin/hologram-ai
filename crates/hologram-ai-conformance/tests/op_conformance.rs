@@ -7,7 +7,7 @@
 use hologram::hologram_exec::float_dispatch::dispatch_float;
 use hologram::FloatOp;
 use hologram_ai_conformance::reference;
-use hologram_ai_conformance::tolerance::{tolerance_for, compare_outputs, Tolerance};
+use hologram_ai_conformance::tolerance::{compare_outputs, tolerance_for, Tolerance};
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -76,7 +76,10 @@ fn conformance_log_softmax() {
 
     assert_close(&actual, &expected, tol, "LogSoftmax");
     // All log-softmax outputs should be <= 0
-    assert!(actual.iter().all(|&v| v <= 0.0), "LogSoftmax should be <= 0");
+    assert!(
+        actual.iter().all(|&v| v <= 0.0),
+        "LogSoftmax should be <= 0"
+    );
 }
 
 // ── RmsNorm ─────────────────────────────────────────────────────────────────
@@ -663,9 +666,7 @@ fn conformance_conv2d_with_padding() {
 fn conformance_softmax_multi_row() {
     // 4 rows of 5 elements each — tests correct row-independent processing
     let size = 5;
-    let input: Vec<f32> = (0..20)
-        .map(|i| ((i as f32) * 1.7 - 15.0).sin())
-        .collect();
+    let input: Vec<f32> = (0..20).map(|i| ((i as f32) * 1.7 - 15.0).sin()).collect();
     let op = FloatOp::Softmax { size };
     let tol = tolerance_for(&op);
 
@@ -687,9 +688,7 @@ fn conformance_softmax_multi_row() {
 fn conformance_rms_norm_multi_row() {
     let size = 16;
     let rows = 4;
-    let input: Vec<f32> = (0..rows * size)
-        .map(|i| ((i as f32) * 0.7).sin())
-        .collect();
+    let input: Vec<f32> = (0..rows * size).map(|i| ((i as f32) * 0.7).sin()).collect();
     let weight: Vec<f32> = (0..size).map(|i| 0.8 + i as f32 * 0.025).collect();
     let epsilon = 1e-5_f32;
     let op = FloatOp::RmsNorm {
@@ -770,7 +769,10 @@ fn conformance_group_norm() {
         num_groups,
         epsilon: epsilon.to_bits(),
     };
-    let tol = Tolerance { atol: 1e-5, rtol: 1e-4 };
+    let tol = Tolerance {
+        atol: 1e-5,
+        rtol: 1e-4,
+    };
 
     let actual = run_dispatch(
         &op,
@@ -799,7 +801,10 @@ fn conformance_group_norm_single_group() {
         num_groups,
         epsilon: epsilon.to_bits(),
     };
-    let tol = Tolerance { atol: 1e-5, rtol: 1e-4 };
+    let tol = Tolerance {
+        atol: 1e-5,
+        rtol: 1e-4,
+    };
 
     let actual = run_dispatch(
         &op,

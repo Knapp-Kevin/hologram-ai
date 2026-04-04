@@ -2,8 +2,8 @@
 //! reference implementation, compares outputs.
 
 use crate::tolerance::{compare_outputs, tolerance_for, ComparisonResult, Tolerance};
-use hologram::FloatOp;
 use hologram::hologram_exec::float_dispatch::dispatch_float;
+use hologram::FloatOp;
 
 /// Run a FloatOp through dispatch_float and compare against expected output.
 pub fn verify_dispatch(

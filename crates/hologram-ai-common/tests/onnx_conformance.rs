@@ -70,7 +70,7 @@ fn run_single_op(
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
         tensor_names: HashMap::new(),
-            topo_cache: Default::default(),
+        topo_cache: Default::default(),
     };
 
     OptPipeline::mvp().run(graph).expect("opt pipeline failed")
@@ -81,11 +81,7 @@ fn assert_shape(graph: &AiGraph, tid: u32, expected: &[u64]) {
         .tensor_info
         .get(&tid)
         .unwrap_or_else(|| panic!("tensor {} not found in tensor_info", tid));
-    let actual: Vec<u64> = info
-        .shape
-        .iter()
-        .filter_map(|d| d.as_concrete())
-        .collect();
+    let actual: Vec<u64> = info.shape.iter().filter_map(|d| d.as_concrete()).collect();
     assert_eq!(
         actual, expected,
         "tensor {} shape mismatch: got {:?}, expected {:?}",
@@ -446,7 +442,9 @@ fn conformance_reduce_l1_decomposed() {
     );
     assert_shape(&g, 1, &[2, 1]);
     assert!(
-        !g.nodes.iter().any(|n| matches!(n.op, AiOp::ReduceL1 { .. })),
+        !g.nodes
+            .iter()
+            .any(|n| matches!(n.op, AiOp::ReduceL1 { .. })),
         "ReduceL1 should have been decomposed"
     );
 }
@@ -464,7 +462,9 @@ fn conformance_reduce_l2_decomposed() {
     );
     assert_shape(&g, 1, &[3]);
     assert!(
-        !g.nodes.iter().any(|n| matches!(n.op, AiOp::ReduceL2 { .. })),
+        !g.nodes
+            .iter()
+            .any(|n| matches!(n.op, AiOp::ReduceL2 { .. })),
         "ReduceL2 should have been decomposed"
     );
 }
@@ -474,10 +474,7 @@ fn conformance_reduce_l2_decomposed() {
 #[test]
 fn conformance_clip() {
     let g = run_single_op(
-        AiOp::Clip {
-            min: 0.0,
-            max: 6.0,
-        },
+        AiOp::Clip { min: 0.0, max: 6.0 },
         vec![(0, DType::F32, &[2, 3])],
         vec![(1, DType::F32)],
         vec![],
@@ -540,9 +537,7 @@ fn conformance_softmax() {
 #[test]
 fn conformance_cast() {
     let g = run_single_op(
-        AiOp::Cast {
-            to: DType::INT32,
-        },
+        AiOp::Cast { to: DType::INT32 },
         vec![(0, DType::F32, &[4, 5])],
         vec![(1, DType::INT32)],
         vec![],
@@ -561,14 +556,26 @@ fn build_if_graph() -> AiGraph {
     let mut tensor_info = HashMap::new();
 
     // Main graph: condition (bool), x (f32 [2,3]) → If → output (f32 [2,3])
-    tensor_info.insert(0u32, TensorInfo::new(DType::BOOL, shape_from_concrete(&[1])));
+    tensor_info.insert(
+        0u32,
+        TensorInfo::new(DType::BOOL, shape_from_concrete(&[1])),
+    );
     tensor_info.insert(1, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 3])));
-    tensor_info.insert(10, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 3])));
+    tensor_info.insert(
+        10,
+        TensorInfo::new(DType::F32, shape_from_concrete(&[2, 3])),
+    );
 
     // Then branch: input(0) → Relu → output
     let mut then_ti = HashMap::new();
-    then_ti.insert(100u32, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 3])));
-    then_ti.insert(101, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 3])));
+    then_ti.insert(
+        100u32,
+        TensorInfo::new(DType::F32, shape_from_concrete(&[2, 3])),
+    );
+    then_ti.insert(
+        101,
+        TensorInfo::new(DType::F32, shape_from_concrete(&[2, 3])),
+    );
 
     let then_graph = AiGraph {
         name: "then_branch".into(),
@@ -585,13 +592,19 @@ fn build_if_graph() -> AiGraph {
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
         tensor_names: HashMap::new(),
-            topo_cache: Default::default(),
+        topo_cache: Default::default(),
     };
 
     // Else branch: input(0) → Neg → output
     let mut else_ti = HashMap::new();
-    else_ti.insert(200u32, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 3])));
-    else_ti.insert(201, TensorInfo::new(DType::F32, shape_from_concrete(&[2, 3])));
+    else_ti.insert(
+        200u32,
+        TensorInfo::new(DType::F32, shape_from_concrete(&[2, 3])),
+    );
+    else_ti.insert(
+        201,
+        TensorInfo::new(DType::F32, shape_from_concrete(&[2, 3])),
+    );
 
     let else_graph = AiGraph {
         name: "else_branch".into(),
@@ -608,7 +621,7 @@ fn build_if_graph() -> AiGraph {
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
         tensor_names: HashMap::new(),
-            topo_cache: Default::default(),
+        topo_cache: Default::default(),
     };
 
     let mut subgraphs = HashMap::new();
@@ -638,7 +651,7 @@ fn build_if_graph() -> AiGraph {
         shape_constraints: Default::default(),
         subgraphs,
         tensor_names: HashMap::new(),
-            topo_cache: Default::default(),
+        topo_cache: Default::default(),
     }
 }
 
@@ -650,11 +663,7 @@ fn subgraph_if_lowering() {
     let result = lower(&graph, &kv, &opts, &LowerPhase::Forward);
 
     // Lowering should succeed — both branches flatten + Where selects.
-    assert!(
-        result.is_ok(),
-        "If lowering failed: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "If lowering failed: {:?}", result.err());
 
     let output = result.unwrap();
     // The graph should have nodes from both branches + Where + I/O.
@@ -686,7 +695,10 @@ fn subgraph_if_then_only() {
 fn subgraph_loop_known_trip_count() {
     let mut tensor_info = HashMap::new();
     // Loop inputs: [max_trip_count, condition, ...carry_state]
-    tensor_info.insert(0u32, TensorInfo::new(DType::INT64, shape_from_concrete(&[1])));
+    tensor_info.insert(
+        0u32,
+        TensorInfo::new(DType::INT64, shape_from_concrete(&[1])),
+    );
     tensor_info.insert(1, TensorInfo::new(DType::BOOL, shape_from_concrete(&[1])));
     tensor_info.insert(2, TensorInfo::new(DType::F32, shape_from_concrete(&[4])));
     tensor_info.insert(10, TensorInfo::new(DType::F32, shape_from_concrete(&[4])));
@@ -695,7 +707,10 @@ fn subgraph_loop_known_trip_count() {
     // Body inputs: [iter_num, condition, carry_state]
     // Body outputs: [condition, updated_carry]
     let mut body_ti = HashMap::new();
-    body_ti.insert(300u32, TensorInfo::new(DType::INT64, shape_from_concrete(&[1])));
+    body_ti.insert(
+        300u32,
+        TensorInfo::new(DType::INT64, shape_from_concrete(&[1])),
+    );
     body_ti.insert(301, TensorInfo::new(DType::BOOL, shape_from_concrete(&[1])));
     body_ti.insert(302, TensorInfo::new(DType::F32, shape_from_concrete(&[4])));
     body_ti.insert(310, TensorInfo::new(DType::BOOL, shape_from_concrete(&[1])));
@@ -721,7 +736,7 @@ fn subgraph_loop_known_trip_count() {
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
         tensor_names: HashMap::new(),
-            topo_cache: Default::default(),
+        topo_cache: Default::default(),
     };
 
     let mut subgraphs = HashMap::new();
@@ -750,17 +765,13 @@ fn subgraph_loop_known_trip_count() {
         shape_constraints: Default::default(),
         subgraphs,
         tensor_names: HashMap::new(),
-            topo_cache: Default::default(),
+        topo_cache: Default::default(),
     };
 
     let kv = KvCacheLayout::none();
     let opts = LoweringOptions::default();
     let result = lower(&graph, &kv, &opts, &LowerPhase::Forward);
-    assert!(
-        result.is_ok(),
-        "Loop lowering failed: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Loop lowering failed: {:?}", result.err());
 
     let output = result.unwrap();
     // 3 iterations of unrolling: should have Relu nodes from each iteration.
@@ -774,14 +785,20 @@ fn subgraph_loop_known_trip_count() {
 #[test]
 fn subgraph_loop_zero_trip() {
     let mut tensor_info = HashMap::new();
-    tensor_info.insert(0u32, TensorInfo::new(DType::INT64, shape_from_concrete(&[1])));
+    tensor_info.insert(
+        0u32,
+        TensorInfo::new(DType::INT64, shape_from_concrete(&[1])),
+    );
     tensor_info.insert(1, TensorInfo::new(DType::BOOL, shape_from_concrete(&[1])));
     tensor_info.insert(2, TensorInfo::new(DType::F32, shape_from_concrete(&[4])));
     tensor_info.insert(10, TensorInfo::new(DType::F32, shape_from_concrete(&[4])));
 
     // Body is irrelevant for 0-trip loop.
     let mut body_ti = HashMap::new();
-    body_ti.insert(300u32, TensorInfo::new(DType::INT64, shape_from_concrete(&[1])));
+    body_ti.insert(
+        300u32,
+        TensorInfo::new(DType::INT64, shape_from_concrete(&[1])),
+    );
     body_ti.insert(301, TensorInfo::new(DType::BOOL, shape_from_concrete(&[1])));
     body_ti.insert(302, TensorInfo::new(DType::F32, shape_from_concrete(&[4])));
     body_ti.insert(310, TensorInfo::new(DType::BOOL, shape_from_concrete(&[1])));
@@ -805,7 +822,7 @@ fn subgraph_loop_zero_trip() {
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
         tensor_names: HashMap::new(),
-            topo_cache: Default::default(),
+        topo_cache: Default::default(),
     };
 
     let mut subgraphs = HashMap::new();
@@ -834,7 +851,7 @@ fn subgraph_loop_zero_trip() {
         shape_constraints: Default::default(),
         subgraphs,
         tensor_names: HashMap::new(),
-            topo_cache: Default::default(),
+        topo_cache: Default::default(),
     };
 
     let kv = KvCacheLayout::none();

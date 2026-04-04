@@ -69,7 +69,10 @@ impl LoweringStrategy for ConcreteStrategy {
                     Ok(None)
                 } else {
                     let graph_op = wrap_graph_op(op, float_op);
-                    Ok(Some(SymbolicLowering { graph_op, recipe: None }))
+                    Ok(Some(SymbolicLowering {
+                        graph_op,
+                        recipe: None,
+                    }))
                 }
             }
             None => Ok(None),
@@ -184,8 +187,11 @@ fn gemm_trans_b_recipes(
         .or_else(|| dim_recipe(last_dim_expr(inputs.get(1), tensor_info), dim_var_names))
         .unwrap_or(fallback.clone());
     // n = second_last_dim(B) when trans_b (B is [n, k])
-    let n_recipe = dim_recipe(second_last_dim_expr(inputs.get(1), tensor_info), dim_var_names)
-        .unwrap_or(fallback.clone());
+    let n_recipe = dim_recipe(
+        second_last_dim_expr(inputs.get(1), tensor_info),
+        dim_var_names,
+    )
+    .unwrap_or(fallback.clone());
     let m_recipe = dim_recipe(
         second_last_dim_expr(inputs.first(), tensor_info),
         dim_var_names,
@@ -217,15 +223,30 @@ fn gemm_trans_b_recipes(
 fn wrap_graph_op(ai_op: &AiOp, float_op: FloatOp) -> GraphOp {
     match ai_op {
         AiOp::MatMulRelu => match float_op {
-            FloatOp::MatMul { m, k, n } => GraphOp::FusedMatMulActivation { m, k, n, activation: FloatOp::Relu },
+            FloatOp::MatMul { m, k, n } => GraphOp::FusedMatMulActivation {
+                m,
+                k,
+                n,
+                activation: FloatOp::Relu,
+            },
             _ => GraphOp::Float(float_op),
         },
         AiOp::MatMulGelu => match float_op {
-            FloatOp::MatMul { m, k, n } => GraphOp::FusedMatMulActivation { m, k, n, activation: FloatOp::Gelu },
+            FloatOp::MatMul { m, k, n } => GraphOp::FusedMatMulActivation {
+                m,
+                k,
+                n,
+                activation: FloatOp::Gelu,
+            },
             _ => GraphOp::Float(float_op),
         },
         AiOp::MatMulSilu => match float_op {
-            FloatOp::MatMul { m, k, n } => GraphOp::FusedMatMulActivation { m, k, n, activation: FloatOp::Silu },
+            FloatOp::MatMul { m, k, n } => GraphOp::FusedMatMulActivation {
+                m,
+                k,
+                n,
+                activation: FloatOp::Silu,
+            },
             _ => GraphOp::Float(float_op),
         },
         _ => GraphOp::Float(float_op),
@@ -240,8 +261,11 @@ fn resolve_op(
 ) -> Result<Option<(FloatOp, Vec<ParamRecipe>)>> {
     let result = match op {
         // ── MatMul family ───────────────────────────────────────────────
-        AiOp::MatMul | AiOp::BatchMatMul
-        | AiOp::MatMulRelu | AiOp::MatMulGelu | AiOp::MatMulSilu
+        AiOp::MatMul
+        | AiOp::BatchMatMul
+        | AiOp::MatMulRelu
+        | AiOp::MatMulGelu
+        | AiOp::MatMulSilu
         | AiOp::ConcatMatMul { .. } => {
             // TODO: lower MatMulRelu/Gelu/Silu to fused FloatOp variants once
             // hologram base adds FloatOp::MatMulRelu etc. For now, lower as
@@ -272,19 +296,31 @@ fn resolve_op(
             };
             // Validate k against weight param size when available.
             if let Some(weight_info) = inputs.get(1).and_then(|tid| tensor_info.get(tid)) {
-                let weight_elems: u64 = weight_info.shape.iter()
+                let weight_elems: u64 = weight_info
+                    .shape
+                    .iter()
                     .filter_map(|d| d.as_concrete())
                     .product();
                 if k > 0 && n > 0 && weight_elems > 0 && (k as u64 * n as u64) != weight_elems {
-                    let a_shape: Vec<_> = inputs.first()
+                    let a_shape: Vec<_> = inputs
+                        .first()
                         .and_then(|tid| tensor_info.get(tid))
-                        .map(|i| i.shape.iter().filter_map(|d| d.as_concrete()).collect::<Vec<_>>())
+                        .map(|i| {
+                            i.shape
+                                .iter()
+                                .filter_map(|d| d.as_concrete())
+                                .collect::<Vec<_>>()
+                        })
                         .unwrap_or_default();
-                    let w_shape: Vec<_> = weight_info.shape.iter()
+                    let w_shape: Vec<_> = weight_info
+                        .shape
+                        .iter()
                         .filter_map(|d| d.as_concrete())
                         .collect();
                     tracing::warn!(
-                        m, k, n,
+                        m,
+                        k,
+                        n,
                         weight_elems,
                         ?a_shape,
                         ?w_shape,
@@ -538,14 +574,22 @@ fn resolve_op(
             // When axis_size=0 (dynamic/unknown sentinel), preserve positive indices
             // as-is rather than clamping to 0 — they'll be validated at runtime.
             let norm_start = if start < 0 {
-                if axis_size > 0 { (axis_size + start).max(0) as u32 } else { 0 }
+                if axis_size > 0 {
+                    (axis_size + start).max(0) as u32
+                } else {
+                    0
+                }
             } else if axis_size > 0 {
                 start.min(axis_size) as u32
             } else {
                 start as u32
             };
             let norm_end = if end < 0 {
-                if axis_size > 0 { (axis_size + end).max(0) as u32 } else { 0 }
+                if axis_size > 0 {
+                    (axis_size + end).max(0) as u32
+                } else {
+                    0
+                }
             } else if end > axis_size && axis_size > 0 {
                 axis_size as u32
             } else {
@@ -584,12 +628,17 @@ fn resolve_op(
                 .unwrap_or(0) as u32;
             (
                 FloatOp::Conv2d {
-                    kernel_h: kh as u32, kernel_w: kw as u32,
-                    stride_h: sh as u32, stride_w: sw as u32,
-                    pad_h: ph as u32, pad_w: pw as u32,
-                    dilation_h: dh as u32, dilation_w: dw as u32,
+                    kernel_h: kh as u32,
+                    kernel_w: kw as u32,
+                    stride_h: sh as u32,
+                    stride_w: sw as u32,
+                    pad_h: ph as u32,
+                    pad_w: pw as u32,
+                    dilation_h: dh as u32,
+                    dilation_w: dw as u32,
                     group: *group as u32,
-                    input_h: ih, input_w: iw,
+                    input_h: ih,
+                    input_w: iw,
                 },
                 vec![],
             )
@@ -616,13 +665,19 @@ fn resolve_op(
                 .unwrap_or(0) as u32;
             (
                 FloatOp::ConvTranspose {
-                    kernel_h: kh as u32, kernel_w: kw as u32,
-                    stride_h: sh as u32, stride_w: sw as u32,
-                    pad_h: ph as u32, pad_w: pw as u32,
-                    dilation_h: dh as u32, dilation_w: dw as u32,
+                    kernel_h: kh as u32,
+                    kernel_w: kw as u32,
+                    stride_h: sh as u32,
+                    stride_w: sw as u32,
+                    pad_h: ph as u32,
+                    pad_w: pw as u32,
+                    dilation_h: dh as u32,
+                    dilation_w: dw as u32,
                     group: *group as u32,
-                    output_pad_h: oph as u32, output_pad_w: opw as u32,
-                    input_h: ih, input_w: iw,
+                    output_pad_h: oph as u32,
+                    output_pad_w: opw as u32,
+                    input_h: ih,
+                    input_w: iw,
                 },
                 vec![],
             )
@@ -638,9 +693,12 @@ fn resolve_op(
             let (ph, pw) = get_pads_hw(pads);
             (
                 FloatOp::MaxPool2d {
-                    kernel_h: kh as u32, kernel_w: kw as u32,
-                    stride_h: sh as u32, stride_w: sw as u32,
-                    pad_h: ph as u32, pad_w: pw as u32,
+                    kernel_h: kh as u32,
+                    kernel_w: kw as u32,
+                    stride_h: sh as u32,
+                    stride_w: sw as u32,
+                    pad_h: ph as u32,
+                    pad_w: pw as u32,
                 },
                 vec![],
             )
@@ -656,9 +714,12 @@ fn resolve_op(
             let (ph, pw) = get_pads_hw(pads);
             (
                 FloatOp::AvgPool2d {
-                    kernel_h: kh as u32, kernel_w: kw as u32,
-                    stride_h: sh as u32, stride_w: sw as u32,
-                    pad_h: ph as u32, pad_w: pw as u32,
+                    kernel_h: kh as u32,
+                    kernel_w: kw as u32,
+                    stride_h: sh as u32,
+                    stride_w: sw as u32,
+                    pad_h: ph as u32,
+                    pad_w: pw as u32,
                 },
                 vec![],
             )
@@ -673,7 +734,14 @@ fn resolve_op(
             let spatial_w = dim_at_expr(inputs.first(), tensor_info, 3)
                 .and_then(|e| e.evaluate())
                 .unwrap_or(0) as u32;
-            (FloatOp::GlobalAvgPool { channels, spatial_h, spatial_w }, vec![])
+            (
+                FloatOp::GlobalAvgPool {
+                    channels,
+                    spatial_h,
+                    spatial_w,
+                },
+                vec![],
+            )
         }
         AiOp::Resize { mode, .. } => {
             let mode_u8 = match mode.as_str() {
@@ -706,10 +774,7 @@ fn resolve_op(
                             .filter_map(|d| d.as_concrete())
                             .product::<u64>() as u32
                     } else {
-                        info.shape
-                            .last()
-                            .and_then(|d| d.as_concrete())
-                            .unwrap_or(0) as u32
+                        info.shape.last().and_then(|d| d.as_concrete()).unwrap_or(0) as u32
                     }
                 })
                 .unwrap_or(0);
@@ -721,10 +786,22 @@ fn resolve_op(
                 vec![],
             )
         }
-        AiOp::GroupNorm { num_groups, epsilon } => {
-            (FloatOp::GroupNorm { num_groups: *num_groups, epsilon: f32_to_bits(*epsilon) }, vec![])
-        }
-        AiOp::LRN { alpha, beta, bias, size } => (
+        AiOp::GroupNorm {
+            num_groups,
+            epsilon,
+        } => (
+            FloatOp::GroupNorm {
+                num_groups: *num_groups,
+                epsilon: f32_to_bits(*epsilon),
+            },
+            vec![],
+        ),
+        AiOp::LRN {
+            alpha,
+            beta,
+            bias,
+            size,
+        } => (
             FloatOp::LRN {
                 size: *size as u32,
                 alpha: f32_to_bits(*alpha),
@@ -761,9 +838,17 @@ fn resolve_op(
             let norm_axis = axis
                 .map(|a| normalize_axis(a, inputs.first(), tensor_info))
                 .unwrap_or(0);
-            (FloatOp::Compress { axis: norm_axis as u32 }, vec![])
+            (
+                FloatOp::Compress {
+                    axis: norm_axis as u32,
+                },
+                vec![],
+            )
         }
-        AiOp::ReverseSequence { batch_axis, time_axis } => {
+        AiOp::ReverseSequence {
+            batch_axis,
+            time_axis,
+        } => {
             let ba = normalize_axis(*batch_axis, inputs.first(), tensor_info);
             let ta = normalize_axis(*time_axis, inputs.first(), tensor_info);
             (
@@ -776,19 +861,28 @@ fn resolve_op(
         }
 
         // ── KV cache ops ─────────────────────────────────────────────────
-        AiOp::KvSlotWrite { layer, is_key, n_kv_heads, head_dim, layout } => {
-            (
-                FloatOp::KvWrite {
-                    layer: *layer as u32,
-                    n_kv_heads: *n_kv_heads,
-                    head_dim: *head_dim,
-                    is_key: *is_key,
-                    heads_first: matches!(layout, crate::ir::KvLayout::HeadsFirst),
-                },
-                vec![],
-            )
-        }
-        AiOp::KvSlotRead { layer, n_kv_heads, head_dim, layout } => (
+        AiOp::KvSlotWrite {
+            layer,
+            is_key,
+            n_kv_heads,
+            head_dim,
+            layout,
+        } => (
+            FloatOp::KvWrite {
+                layer: *layer as u32,
+                n_kv_heads: *n_kv_heads,
+                head_dim: *head_dim,
+                is_key: *is_key,
+                heads_first: matches!(layout, crate::ir::KvLayout::HeadsFirst),
+            },
+            vec![],
+        ),
+        AiOp::KvSlotRead {
+            layer,
+            n_kv_heads,
+            head_dim,
+            layout,
+        } => (
             FloatOp::KvRead {
                 layer: *layer as u32,
                 n_kv_heads: *n_kv_heads,
@@ -867,7 +961,10 @@ fn get_pads_hw(pads: &[u64]) -> (u64, u64) {
         0 => (0, 0),
         2 => (pads[0], pads[1]),
         4 => (pads[0], pads[1]), // [h_begin, w_begin, h_end, w_end]
-        _ => (pads.first().copied().unwrap_or(0), pads.get(1).copied().unwrap_or(0)),
+        _ => (
+            pads.first().copied().unwrap_or(0),
+            pads.get(1).copied().unwrap_or(0),
+        ),
     }
 }
 
@@ -1027,10 +1124,7 @@ fn concrete_concat_row_size(
 }
 
 /// Get the quantization code for a tensor: 0=none, 1=Q4_0, 2=Q8_0.
-fn quant_code(
-    tid: Option<&TensorId>,
-    tensor_info: &HashMap<TensorId, TensorInfo>,
-) -> u8 {
+fn quant_code(tid: Option<&TensorId>, tensor_info: &HashMap<TensorId, TensorInfo>) -> u8 {
     use hologram_ai_quant::QuantScheme;
     tid.and_then(|t| tensor_info.get(t))
         .map(|info| match info.quant.scheme {

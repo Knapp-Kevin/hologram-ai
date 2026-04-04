@@ -202,12 +202,19 @@ mod tests {
         use crate::ort_runner::onnx_builder;
 
         let model_bytes = onnx_builder::rms_norm(2, 16, 1e-6);
-        let graph = hologram_ai_onnx::import_onnx(&model_bytes, Default::default())
-            .expect("import failed");
+        let graph =
+            hologram_ai_onnx::import_onnx(&model_bytes, Default::default()).expect("import failed");
 
-        eprintln!("Imported {} nodes, {} params", graph.nodes.len(), graph.params.len());
+        eprintln!(
+            "Imported {} nodes, {} params",
+            graph.nodes.len(),
+            graph.params.len()
+        );
         for node in &graph.nodes {
-            eprintln!("  id={} {:?} inputs={:?} outputs={:?}", node.id, node.op, node.inputs, node.outputs);
+            eprintln!(
+                "  id={} {:?} inputs={:?} outputs={:?}",
+                node.id, node.op, node.inputs, node.outputs
+            );
         }
         for (&tid, param) in &graph.params {
             match param {
@@ -217,7 +224,10 @@ mod tests {
                     } else {
                         format!("{} bytes", data.len())
                     };
-                    eprintln!("  param tid={}: dtype={:?} shape={:?} {}", tid, info.logical_dtype, info.shape, val_str);
+                    eprintln!(
+                        "  param tid={}: dtype={:?} shape={:?} {}",
+                        tid, info.logical_dtype, info.shape, val_str
+                    );
                 }
                 _ => eprintln!("  param tid={}: non-inline", tid),
             }
@@ -232,15 +242,19 @@ mod tests {
             eprintln!("  {:?} inputs={:?}", node.op, node.inputs);
         }
 
-        let has_rmsnorm = graph.nodes.iter().any(|n| matches!(n.op, hologram_ai_common::AiOp::RmsNorm { .. }));
-        assert!(has_rmsnorm, "RmsNorm fusion should have fired on ONNX-imported model");
+        let has_rmsnorm = graph
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, hologram_ai_common::AiOp::RmsNorm { .. }));
+        assert!(
+            has_rmsnorm,
+            "RmsNorm fusion should have fired on ONNX-imported model"
+        );
     }
 
     #[test]
     fn matching_outputs_pass() {
-        let ort = vec![
-            ("relu_out".to_string(), vec![1, 4], vec![0.0, 1.0, 2.0, 3.0]),
-        ];
+        let ort = vec![("relu_out".to_string(), vec![1, 4], vec![0.0, 1.0, 2.0, 3.0])];
         let mut holo = HashMap::new();
         holo.insert(
             2,
@@ -261,9 +275,7 @@ mod tests {
 
     #[test]
     fn shape_mismatch_detected() {
-        let ort = vec![
-            ("out".to_string(), vec![1, 4], vec![1.0, 2.0, 3.0, 4.0]),
-        ];
+        let ort = vec![("out".to_string(), vec![1, 4], vec![1.0, 2.0, 3.0, 4.0])];
         let mut holo = HashMap::new();
         holo.insert(
             0,
@@ -287,9 +299,7 @@ mod tests {
 
     #[test]
     fn missing_node_detected() {
-        let ort = vec![
-            ("unknown_tensor".to_string(), vec![1, 2], vec![1.0, 2.0]),
-        ];
+        let ort = vec![("unknown_tensor".to_string(), vec![1, 2], vec![1.0, 2.0])];
         let holo = HashMap::new();
         let debug_map = HashMap::new();
 
@@ -301,9 +311,7 @@ mod tests {
 
     #[test]
     fn value_mismatch_detected() {
-        let ort = vec![
-            ("out".to_string(), vec![1, 2], vec![1.0, 2.0]),
-        ];
+        let ort = vec![("out".to_string(), vec![1, 2], vec![1.0, 2.0])];
         let mut holo = HashMap::new();
         holo.insert(
             0,
@@ -333,17 +341,23 @@ mod tests {
             ("c".to_string(), vec![2], vec![5.0, 6.0]),
         ];
         let mut holo = HashMap::new();
-        holo.insert(0, HologramTensor {
-            data: bytemuck::cast_slice(&[1.0f32, 2.0]).to_vec(),
-            shape: vec![2],
-            elem_size: 4,
-        });
+        holo.insert(
+            0,
+            HologramTensor {
+                data: bytemuck::cast_slice(&[1.0f32, 2.0]).to_vec(),
+                shape: vec![2],
+                elem_size: 4,
+            },
+        );
         // "b" maps to idx 1 but idx 1 has wrong values
-        holo.insert(1, HologramTensor {
-            data: bytemuck::cast_slice(&[99.0f32, 100.0]).to_vec(),
-            shape: vec![2],
-            elem_size: 4,
-        });
+        holo.insert(
+            1,
+            HologramTensor {
+                data: bytemuck::cast_slice(&[99.0f32, 100.0]).to_vec(),
+                shape: vec![2],
+                elem_size: 4,
+            },
+        );
         // "c" is missing from holo
         let mut debug_map = HashMap::new();
         debug_map.insert("a".to_string(), 0);

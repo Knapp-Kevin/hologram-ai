@@ -64,13 +64,7 @@ impl Pass for PositionIdsInjection {
         }
 
         // Allocate a new TensorId for the position_ids input.
-        let next_tid = graph
-            .tensor_info
-            .keys()
-            .copied()
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let next_tid = graph.tensor_info.keys().copied().max().unwrap_or(0) + 1;
 
         // For each Range node, replace it with an Identity reading from
         // position_ids. The Range output shape and consumers stay the same.

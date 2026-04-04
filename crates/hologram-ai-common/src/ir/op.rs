@@ -285,7 +285,10 @@ pub enum AiOp {
     Round,
     /// Clip to [min, max]. Defaults: min=-inf, max=+inf.
     /// ONNX opset 11+: min/max come as optional tensor inputs, resolved at import.
-    Clip { min: f32, max: f32 },
+    Clip {
+        min: f32,
+        max: f32,
+    },
     Erf,
     Reciprocal,
     Cos,
@@ -413,7 +416,9 @@ pub enum AiOp {
     /// gate × up → silu(gate) × up
     FusedSwiGLU,
     /// x + residual → rmsnorm. Inputs: [x, residual, weight].
-    FusedLayerNormResidual { epsilon: f32 },
+    FusedLayerNormResidual {
+        epsilon: f32,
+    },
     /// MatMul + Relu fused: out = relu(A × B). Inputs: [a, b].
     MatMulRelu,
     /// MatMul + Gelu fused: out = gelu(A × B). Inputs: [a, b].
@@ -423,7 +428,9 @@ pub enum AiOp {
     /// Concat + MatMul fused: out = concat(inputs) × W.
     /// Avoids materializing the concatenated buffer.
     /// Inputs: [h1, h2, ..., hN, W]. Last input is the weight matrix.
-    ConcatMatMul { n_concat_inputs: u32 },
+    ConcatMatMul {
+        n_concat_inputs: u32,
+    },
 
     // ── Deep decode fusions (Plan 054) ─────────────────────────────────────
     /// Fused: [Add +] RmsNorm → multi-output projection.

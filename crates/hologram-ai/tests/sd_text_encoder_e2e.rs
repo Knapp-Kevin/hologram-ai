@@ -59,10 +59,8 @@ fn sd_text_encoder_executes() {
 
     let holo_path = text_encoder_holo_path();
     let loader = hologram::HoloLoader::open(&holo_path).expect("mmap open failed");
-    let pipeline = unsafe {
-        hologram::LoadedPipeline::from_bytes_zero_copy(loader.as_bytes())
-    }
-    .expect("loading pipeline failed");
+    let pipeline = unsafe { hologram::LoadedPipeline::from_bytes_zero_copy(loader.as_bytes()) }
+        .expect("loading pipeline failed");
     let plan = pipeline.into_first_model().expect("no model in pipeline");
 
     eprintln!("graph nodes: {}", plan.graph().nodes.len());
@@ -74,10 +72,7 @@ fn sd_text_encoder_executes() {
     // SD v1.5 uses max 77 tokens.
     let seq_len = 77;
     let input_ids: Vec<i64> = (0..seq_len).map(|i| (i % 49408) as i64).collect();
-    let input_bytes: Vec<u8> = input_ids
-        .iter()
-        .flat_map(|v| v.to_le_bytes())
-        .collect();
+    let input_bytes: Vec<u8> = input_ids.iter().flat_map(|v| v.to_le_bytes()).collect();
 
     let mut inputs = hologram::GraphInputs::new();
     inputs.set_with_shape(0, input_bytes, vec![1, seq_len]);

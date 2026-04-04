@@ -87,17 +87,19 @@ fn sd_vae_decoder_zero_input() {
 
     let holo_path = vae_holo_path();
     let loader = hologram::HoloLoader::open(&holo_path).expect("mmap open failed");
-    let pipeline = unsafe {
-        hologram::LoadedPipeline::from_bytes_zero_copy(loader.as_bytes())
-    }
-    .expect("loading pipeline failed");
+    let pipeline = unsafe { hologram::LoadedPipeline::from_bytes_zero_copy(loader.as_bytes()) }
+        .expect("loading pipeline failed");
     let plan = pipeline.into_first_model().expect("no model in pipeline");
     let tape = hologram::build_tape_from_plan(&plan).expect("building tape");
 
     // Zero input [1, 4, 64, 64]
     let input_data = vec![0.0f32; 1 * 4 * 64 * 64];
     let mut inputs = hologram::GraphInputs::new();
-    inputs.set_with_shape(0, bytemuck::cast_slice(&input_data).to_vec(), vec![1, 4, 64, 64]);
+    inputs.set_with_shape(
+        0,
+        bytemuck::cast_slice(&input_data).to_vec(),
+        vec![1, 4, 64, 64],
+    );
 
     let start = std::time::Instant::now();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -109,7 +111,10 @@ fn sd_vae_decoder_zero_input() {
         Ok(Ok(outputs)) => {
             let (_, out_bytes) = outputs.get(0).expect("no output");
             std::fs::write("/tmp/hologram_vae_zero.bin", out_bytes).expect("writing output");
-            eprintln!("wrote {} bytes to /tmp/hologram_vae_zero.bin", out_bytes.len());
+            eprintln!(
+                "wrote {} bytes to /tmp/hologram_vae_zero.bin",
+                out_bytes.len()
+            );
 
             let floats: Vec<f32> = out_bytes
                 .chunks_exact(4)
@@ -128,7 +133,9 @@ fn sd_vae_decoder_zero_input() {
         }
         Ok(Err(e)) => eprintln!("execution error: {e}"),
         Err(p) => {
-            let msg = p.downcast_ref::<String>().map(|s| s.as_str())
+            let msg = p
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
                 .or_else(|| p.downcast_ref::<&str>().copied())
                 .unwrap_or("unknown");
             eprintln!("panicked: {msg}");
@@ -162,10 +169,8 @@ fn sd_vae_decoder_executes_small() {
 
     let holo_path = vae_holo_small_path();
     let loader = hologram::HoloLoader::open(&holo_path).expect("mmap open failed");
-    let pipeline = unsafe {
-        hologram::LoadedPipeline::from_bytes_zero_copy(loader.as_bytes())
-    }
-    .expect("loading pipeline failed");
+    let pipeline = unsafe { hologram::LoadedPipeline::from_bytes_zero_copy(loader.as_bytes()) }
+        .expect("loading pipeline failed");
     let plan = pipeline.into_first_model().expect("no model in pipeline");
 
     eprintln!("graph nodes: {}", plan.graph().nodes.len());
@@ -238,7 +243,14 @@ fn sd_vae_decoder_executes_small() {
     );
 
     let finite = out_floats.iter().filter(|v| v.is_finite()).count();
-    assert_eq!(finite, out_floats.len(), "output contains non-finite values");
+    assert_eq!(
+        finite,
+        out_floats.len(),
+        "output contains non-finite values"
+    );
 
-    eprintln!("VAE decoder (small): {} output floats, all finite", out_floats.len());
+    eprintln!(
+        "VAE decoder (small): {} output floats, all finite",
+        out_floats.len()
+    );
 }

@@ -205,7 +205,11 @@ fn heal_shape(
             {
                 Some(vec![broadcast_shape(&input_shapes[0], &input_shapes[1])])
             } else {
-                input_shapes.first().filter(|s| !s.is_empty()).cloned().map(|s| vec![s])
+                input_shapes
+                    .first()
+                    .filter(|s| !s.is_empty())
+                    .cloned()
+                    .map(|s| vec![s])
             }
         }
 
@@ -214,10 +218,7 @@ fn heal_shape(
 
         // MatMul: [batch..., M, K] x [batch..., K, N] → [batch..., M, N]
         AiOp::MatMul | AiOp::BatchMatMul => {
-            if input_shapes.len() >= 2
-                && input_shapes[0].len() >= 2
-                && input_shapes[1].len() >= 2
-            {
+            if input_shapes.len() >= 2 && input_shapes[0].len() >= 2 && input_shapes[1].len() >= 2 {
                 let a = &input_shapes[0];
                 let b = &input_shapes[1];
                 // Output = a's batch + second-to-last dims, b's last dim.
@@ -230,11 +231,10 @@ fn heal_shape(
         }
 
         // Gemm: [M, K] x [K, N] → [M, N] (with optional transposes)
-        AiOp::Gemm { trans_a, trans_b, .. } => {
-            if input_shapes.len() >= 2
-                && input_shapes[0].len() >= 2
-                && input_shapes[1].len() >= 2
-            {
+        AiOp::Gemm {
+            trans_a, trans_b, ..
+        } => {
+            if input_shapes.len() >= 2 && input_shapes[0].len() >= 2 && input_shapes[1].len() >= 2 {
                 let a = &input_shapes[0];
                 let b = &input_shapes[1];
                 let m = if *trans_a {
@@ -301,7 +301,13 @@ fn heal_shape(
         }
 
         // Conv2d: output spatial dims from convolution arithmetic.
-        AiOp::Conv { kernel_shape, strides, pads, dilations, .. } => {
+        AiOp::Conv {
+            kernel_shape,
+            strides,
+            pads,
+            dilations,
+            ..
+        } => {
             if let Some(input) = input_shapes.first() {
                 if input.len() >= 4 {
                     // input: [N, C_in, H, W], weight: [C_out, C_in/groups, kH, kW]
@@ -343,13 +349,12 @@ fn heal_shape(
         | AiOp::RmsNorm { .. }
         | AiOp::LayerNorm { .. }
         | AiOp::GroupNorm { .. }
-        | AiOp::InstanceNorm { .. } => {
-            input_shapes.first().cloned().map(|s| vec![s])
-        }
+        | AiOp::InstanceNorm { .. } => input_shapes.first().cloned().map(|s| vec![s]),
 
         // Gather: replace indexed axis with indices shape.
         AiOp::Gather { axis } | AiOp::GatherElements { axis } => {
-            if input_shapes.len() >= 2 && !input_shapes[0].is_empty() && !input_shapes[1].is_empty() {
+            if input_shapes.len() >= 2 && !input_shapes[0].is_empty() && !input_shapes[1].is_empty()
+            {
                 let data = &input_shapes[0];
                 let indices = &input_shapes[1];
                 let norm_axis = if *axis < 0 {

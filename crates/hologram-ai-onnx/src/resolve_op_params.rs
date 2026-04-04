@@ -21,51 +21,85 @@ pub fn resolve_op_params(graph: &mut AiGraph) {
         .nodes
         .iter()
         .enumerate()
-        .filter_map(|(idx, node)| {
-            match &node.op {
-                AiOp::Conv { kernel_shape, strides, dilations, .. }
-                    if kernel_shape.is_empty() =>
-                {
-                    let spatial = weight_spatial_dims(node.inputs.get(1).copied(), graph)?;
-                    Some((idx, Resolution::Conv {
+        .filter_map(|(idx, node)| match &node.op {
+            AiOp::Conv {
+                kernel_shape,
+                strides,
+                dilations,
+                ..
+            } if kernel_shape.is_empty() => {
+                let spatial = weight_spatial_dims(node.inputs.get(1).copied(), graph)?;
+                Some((
+                    idx,
+                    Resolution::Conv {
                         kernel_shape: spatial.clone(),
-                        strides: if strides.is_empty() { vec![1; spatial.len()] } else { strides.clone() },
-                        dilations: if dilations.is_empty() { vec![1; spatial.len()] } else { dilations.clone() },
-                    }))
-                }
-                AiOp::ConvTranspose { kernel_shape, strides, dilations, .. }
-                    if kernel_shape.is_empty() =>
-                {
-                    let spatial = weight_spatial_dims(node.inputs.get(1).copied(), graph)?;
-                    Some((idx, Resolution::Conv {
-                        kernel_shape: spatial.clone(),
-                        strides: if strides.is_empty() { vec![1; spatial.len()] } else { strides.clone() },
-                        dilations: if dilations.is_empty() { vec![1; spatial.len()] } else { dilations.clone() },
-                    }))
-                }
-                _ => None,
+                        strides: if strides.is_empty() {
+                            vec![1; spatial.len()]
+                        } else {
+                            strides.clone()
+                        },
+                        dilations: if dilations.is_empty() {
+                            vec![1; spatial.len()]
+                        } else {
+                            dilations.clone()
+                        },
+                    },
+                ))
             }
+            AiOp::ConvTranspose {
+                kernel_shape,
+                strides,
+                dilations,
+                ..
+            } if kernel_shape.is_empty() => {
+                let spatial = weight_spatial_dims(node.inputs.get(1).copied(), graph)?;
+                Some((
+                    idx,
+                    Resolution::Conv {
+                        kernel_shape: spatial.clone(),
+                        strides: if strides.is_empty() {
+                            vec![1; spatial.len()]
+                        } else {
+                            strides.clone()
+                        },
+                        dilations: if dilations.is_empty() {
+                            vec![1; spatial.len()]
+                        } else {
+                            dilations.clone()
+                        },
+                    },
+                ))
+            }
+            _ => None,
         })
         .collect();
 
     // Apply resolutions.
     for (idx, res) in resolutions {
         match res {
-            Resolution::Conv { kernel_shape, strides, dilations } => {
-                match &mut graph.nodes[idx].op {
-                    AiOp::Conv {
-                        kernel_shape: ks, strides: st, dilations: dl, ..
-                    }
-                    | AiOp::ConvTranspose {
-                        kernel_shape: ks, strides: st, dilations: dl, ..
-                    } => {
-                        *ks = kernel_shape;
-                        *st = strides;
-                        *dl = dilations;
-                    }
-                    _ => {}
+            Resolution::Conv {
+                kernel_shape,
+                strides,
+                dilations,
+            } => match &mut graph.nodes[idx].op {
+                AiOp::Conv {
+                    kernel_shape: ks,
+                    strides: st,
+                    dilations: dl,
+                    ..
                 }
-            }
+                | AiOp::ConvTranspose {
+                    kernel_shape: ks,
+                    strides: st,
+                    dilations: dl,
+                    ..
+                } => {
+                    *ks = kernel_shape;
+                    *st = strides;
+                    *dl = dilations;
+                }
+                _ => {}
+            },
         }
     }
 }
@@ -102,4 +136,3 @@ fn weight_spatial_dims(
         None // Some dims weren't concrete
     }
 }
-

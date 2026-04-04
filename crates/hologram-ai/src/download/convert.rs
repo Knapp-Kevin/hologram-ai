@@ -168,8 +168,7 @@ pub fn convert_to_onnx(
 /// Python script that exports each diffusion pipeline component
 /// (text_encoder, unet, vae_decoder) to ONNX via torch.onnx.export.
 /// Embedded at compile time from scripts/export_diffusion_onnx.py.
-const DIFFUSION_EXPORT_SCRIPT: &str =
-    include_str!("../../../../scripts/export_diffusion_onnx.py");
+const DIFFUSION_EXPORT_SCRIPT: &str = include_str!("../../../../scripts/export_diffusion_onnx.py");
 
 pub fn convert_diffusion_to_onnx(
     model_id: &str,

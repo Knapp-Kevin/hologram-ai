@@ -101,12 +101,8 @@ impl Pass for MatMulActivationFusion {
             let matmul_inputs = graph.nodes[*matmul_idx].inputs.clone();
             let matmul_id = graph.nodes[*matmul_idx].id;
 
-            graph.nodes[*matmul_idx] = AiNode::new(
-                matmul_id,
-                fused_op.clone(),
-                matmul_inputs,
-                act_outputs,
-            );
+            graph.nodes[*matmul_idx] =
+                AiNode::new(matmul_id, fused_op.clone(), matmul_inputs, act_outputs);
             to_remove.insert(*act_idx);
         }
 

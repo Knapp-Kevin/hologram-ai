@@ -102,7 +102,9 @@ fn resolve_format(
 /// Detect diffusion pipelines by looking for `model_index.json` — the marker
 /// file that `diffusers` uses to describe a multi-component pipeline.
 fn is_diffusion_pipeline(info: &ModelInfo) -> bool {
-    info.siblings.iter().any(|f| f.filename == "model_index.json")
+    info.siblings
+        .iter()
+        .any(|f| f.filename == "model_index.json")
 }
 
 fn try_resolve_gguf(info: &ModelInfo, quantization: Option<&str>) -> Option<ResolvedDownload> {
@@ -206,7 +208,8 @@ async fn run_async(args: DownloadArgs) -> anyhow::Result<()> {
         }
         ResolvedDownload::ConvertDiffusionToOnnx => {
             eprintln!("Diffusion pipeline detected. Exporting components to ONNX via optimum...");
-            let result = convert::convert_diffusion_to_onnx(&args.model_id, &output_dir, args.keep_venv)?;
+            let result =
+                convert::convert_diffusion_to_onnx(&args.model_id, &output_dir, args.keep_venv)?;
             eprintln!("Exported: {}", result.model_path.display());
             for f in &result.companion_files {
                 eprintln!("  component: {}", f.display());

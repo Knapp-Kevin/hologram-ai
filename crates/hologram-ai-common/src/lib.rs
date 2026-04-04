@@ -14,9 +14,9 @@ pub mod sections;
 // Flat re-exports for convenience.
 pub use error::CommonError;
 pub use exec_context::{
-    ContextBundle, ExecContext, NodeShapeRecipe, ParamRecipe, RuntimeContext,
-    ShapeContextGraph, ShapeDimRepr, ShapeProjectionEntry, ShapeRecipeSection, ShapeSeed,
-    ShapeSpecRepr, SimpleRuntimeContext, SECTION_SHAPE_CONTEXT, SECTION_SHAPE_RECIPE,
+    ContextBundle, ExecContext, NodeShapeRecipe, ParamRecipe, RuntimeContext, ShapeContextGraph,
+    ShapeDimRepr, ShapeProjectionEntry, ShapeRecipeSection, ShapeSeed, ShapeSpecRepr,
+    SimpleRuntimeContext, SECTION_SHAPE_CONTEXT, SECTION_SHAPE_RECIPE,
 };
 pub use hologram_ai_quant::{QuantDescriptor, QuantScheme, ScaleDtype};
 pub use ir::{
