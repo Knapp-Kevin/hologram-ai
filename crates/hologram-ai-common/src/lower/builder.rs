@@ -493,10 +493,43 @@ pub fn lower(
                     }
                 }
 
+                // ── Early-quant: FusedSwiGluProjection → SwiGLU + MatMulLut4 ──
+                // If the down_proj weight was early-quantized, decompose the
+                // fused op into SwiGLU (activation) + MatMulLut4 (Q4 projection).
+                if matches!(node.op, AiOp::FusedSwiGluProjection) {
+                    let weight_tid = node.inputs.get(2).copied();
+                    if let Some(wt) = weight_tid {
+                        if let Some(q4_bytes) = early_quant_bytes.get(&wt) {
+                            // Step 1: emit FusedSwiGLU(gate, up) → activated
+                            builder = builder.node_with_inputs(
+                                GraphOp::Float(FloatOp::FusedSwiGLU),
+                                &[input_idxs[0], input_idxs[1]],
+                            );
+                            let swiglu_idx = builder.len() - 1;
+
+                            // Step 2: emit MatMulLut4(activated, Q4_down_weight) → output
+                            builder = builder.matmul_lut_4bit(
+                                ConstantData::Bytes(q4_bytes.clone()),
+                                &[swiglu_idx],
+                            );
+                            let idx = builder.len() - 1;
+                            if let Some(&tid) = node.outputs.first() {
+                                let out_shape = output_shape(Some(&tid), &ai_graph.tensor_info);
+                                if let Some(ref s) = out_shape {
+                                    builder = builder.set_node_shape(idx, s.clone());
+                                }
+                                let dtype = input_float_dtype(Some(&tid), &ai_graph.tensor_info);
+                                builder = builder.set_node_dtype(idx, dtype);
+                                tid_to_idx.insert(tid, idx);
+                            }
+                            continue;
+                        }
+                    }
+                }
+
                 // ── Early-quant interception in FloatNeedsShape ──────────
                 // If this node's weight was early-quantized, emit MatMulLut4.
-                // This catches MatMuls that the top-level interception missed
-                // (e.g., nodes lowered through strategy as Gemm/MatMul).
+                // This catches MatMuls that the top-level interception missed.
                 if matches!(result.graph_op, GraphOp::Float(FloatOp::MatMul { .. }) | GraphOp::Float(FloatOp::Gemm { .. })) {
                     let weight_tid = node.inputs.get(1).copied();
                     if let Some(wt) = weight_tid {
