@@ -70,6 +70,14 @@ pub struct RunArgs {
     /// the distribution for better quantization efficiency.
     #[arg(long)]
     pub kv_wht: bool,
+    /// Enable speculative decoding: generate N draft tokens greedily, then
+    /// verify against the target model. Accepted tokens are emitted as a
+    /// batch, giving up to N+1 tokens per cycle.
+    #[arg(long)]
+    pub speculative: bool,
+    /// Number of draft tokens per speculative decode cycle (default: 4).
+    #[arg(long, default_value = "4")]
+    pub draft_steps: usize,
 }
 
 // ── KV cache config parsing ───────────────────────────────────────────────
@@ -155,6 +163,8 @@ pub fn execute(args: RunArgs) -> anyhow::Result<()> {
             kv_cache: args.kv_cache.clone(),
             kv_boundary_layers: args.kv_boundary_layers,
             kv_wht: args.kv_wht,
+            speculative: args.speculative,
+            draft_steps: args.draft_steps,
         };
         run_generation(&runner, tok, prompt, &gen_config, model_meta.as_ref())?;
     } else {
@@ -193,6 +203,8 @@ struct GenerationConfig {
     kv_cache: String,
     kv_boundary_layers: usize,
     kv_wht: bool,
+    speculative: bool,
+    draft_steps: usize,
 }
 
 // ── Sequence mode ─────────────────────────────────────────────────────────
@@ -469,6 +481,60 @@ fn run_generation(
             let ttft_ms = start.elapsed().as_secs_f64() * 1000.0;
             info!("\n[TTFT {ttft_ms:.0}ms | prefill {step_ms:.1}ms]");
             decode_start = Some(std::time::Instant::now());
+
+            // Speculative decode: after prefill, switch to speculative loop.
+            if config.speculative && use_kv_cache {
+                let spec_config = crate::speculative::SpeculativeConfig {
+                    draft_steps: config.draft_steps,
+                    input_slot,
+                    pos_slot,
+                    mask_slot,
+                    mask_dtype,
+                    vocab_size,
+                    bytes_per_pos,
+                    input_dtype,
+                };
+                let kv = kv_state.as_mut().expect("kv initialized during prefill");
+                let remaining = max_tokens.saturating_sub(1); // prefill used 1 token
+                let mut speculative_tokens = 0usize;
+
+                for _cycle in 0..remaining {
+                    let last = *token_ids.last().expect("no tokens");
+                    let result = crate::speculative::speculative_decode_step(
+                        runner, kv, last, &spec_config,
+                    )?;
+
+                    if result.accepted_tokens.is_empty() {
+                        break;
+                    }
+
+                    for &tok in &result.accepted_tokens {
+                        if tok == encoder.eos_id() {
+                            // Stream what we have, then stop.
+                            break;
+                        }
+                        let prev_len = encoder.decode(&token_ids[prompt_len..]).len();
+                        token_ids.push(tok);
+                        let full = encoder.decode(&token_ids[prompt_len..]);
+                        let new_text = &full[prev_len..];
+                        print!("{new_text}");
+                        std::io::stdout().flush().ok();
+                        speculative_tokens += 1;
+                    }
+
+                    if result.accepted_tokens.iter().any(|&t| t == encoder.eos_id()) {
+                        break;
+                    }
+                    if token_ids.len() - prompt_len >= remaining {
+                        break;
+                    }
+                }
+
+                info!(
+                    "speculative: {speculative_tokens} tokens generated via speculative decoding"
+                );
+                break; // exit the standard decode loop
+            }
         } else if step < 5 || config.verbose {
             info!("[step {step}: {step_ms:.1}ms]");
         }
