@@ -493,17 +493,36 @@ pub fn lower(
                     }
                 }
 
-                // ── LUT-GEMM interception for plain f32 MatMul ──
-                // Fused variants (FusedMatMulActivation) keep their f32 fused kernel
-                // which already eliminates the intermediate buffer. Only plain MatMul
-                // benefits from LUT-GEMM quantization.
-                // Skip MatMuls that produce Q/K/V/O projections for attention.
-                // These have output N matching attention head dimensions AND input K
-                // matching hidden_size. FFN down_proj has K=ffn_intermediate (≠hidden_size)
-                // and is NOT skipped despite having N=hidden_size.
-                // Collect attention output dims AND hidden_size for precise filtering.
-                // A MatMul feeds attention iff N ∈ attn_dims AND K == hidden_size.
-                // FFN down_proj has N=hidden_size but K=ffn_intermediate → not blocked.
+                // ── Early-quant interception in FloatNeedsShape ──────────
+                // If this node's weight was early-quantized, emit MatMulLut4.
+                // This catches MatMuls that the top-level interception missed
+                // (e.g., nodes lowered through strategy as Gemm/MatMul).
+                if matches!(result.graph_op, GraphOp::Float(FloatOp::MatMul { .. }) | GraphOp::Float(FloatOp::Gemm { .. })) {
+                    let weight_tid = node.inputs.get(1).copied();
+                    if let Some(wt) = weight_tid {
+                        if let Some(q4_bytes) = early_quant_bytes.get(&wt) {
+                            builder = builder.matmul_lut_4bit(
+                                ConstantData::Bytes(q4_bytes.clone()),
+                                &[input_idxs[0]],
+                            );
+                            let idx = builder.len() - 1;
+                            if let Some(&tid) = node.outputs.first() {
+                                let out_shape = output_shape(Some(&tid), &ai_graph.tensor_info);
+                                if let Some(ref s) = out_shape {
+                                    builder = builder.set_node_shape(idx, s.clone());
+                                }
+                                let dtype = input_float_dtype(Some(&tid), &ai_graph.tensor_info);
+                                builder = builder.set_node_dtype(idx, dtype);
+                                tid_to_idx.insert(tid, idx);
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                // ── Legacy LUT-GEMM interception for non-early-quantized MatMuls ──
+                // Only fires when early-quant didn't apply (e.g., quant_strategy != Q4_0
+                // or weight not eligible). Uses feeds_attention guard.
                 let mut attn_dims: Vec<usize> = Vec::new();
                 let mut hidden_size: Option<usize> = None;
                 for n in &ai_graph.nodes {
@@ -511,7 +530,7 @@ pub fn lower(
                         let q_dim = *num_heads as usize * *head_dim as usize;
                         let kv_dim = *num_kv_heads as usize * *head_dim as usize;
                         attn_dims.extend_from_slice(&[q_dim, kv_dim, q_dim + 2 * kv_dim]);
-                        hidden_size = Some(q_dim); // hidden = num_q_heads * head_dim
+                        hidden_size = Some(q_dim);
                     }
                 }
                 let h = hidden_size.unwrap_or(0);
@@ -543,12 +562,6 @@ pub fn lower(
                             builder = builder.set_node_dtype(idx, dtype);
                             tid_to_idx.insert(tid, idx);
                         }
-                        tracing::info!(
-                            node_id = node.id,
-                            rows = lut_result.rows,
-                            cols = lut_result.cols,
-                            "LUT-GEMM: quantized f32 MatMul → MatMulLut4"
-                        );
                         continue;
                     }
                 }
