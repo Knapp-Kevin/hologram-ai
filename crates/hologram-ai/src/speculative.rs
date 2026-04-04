@@ -95,64 +95,99 @@ pub fn speculative_decode_step(
         });
     }
 
-    // ── Phase 2: Verify draft tokens ────────────────────────────────────
-    // Reset KV cache to the position before drafting.
-    // Then re-run each draft token through the target model, checking if
-    // the target's argmax matches the draft.
+    // ── Phase 2: Batch verify all draft tokens in ONE forward pass ─────
+    // Reset KV cache to pre-draft position. Run verify tape (seq=N) with
+    // all draft tokens as input. BLAS amortizes weight reads across N tokens.
     kv_state.truncate_to(initial_kv_pos);
 
-    let mut accepted: Vec<u32> = Vec::new();
-    let mut verify_token = last_token;
     let n_drafts = draft_tokens.len();
 
+    // Build verify input: [last_token, draft_0, draft_1, ..., draft_{N-1}]
+    let mut verify_tokens = Vec::with_capacity(n_drafts + 1);
+    verify_tokens.push(last_token);
+    verify_tokens.extend_from_slice(&draft_tokens);
+    let verify_len = verify_tokens.len();
+
+    let verify_bytes = verify_tokens.iter()
+        .flat_map(|&id| serialize_token(id, config.input_dtype))
+        .collect::<Vec<u8>>();
+    let mut inputs = GraphInputs::new();
+    inputs.set_with_shape(config.input_slot, verify_bytes, vec![1, verify_len]);
+
+    if let Some(slot) = config.mask_slot {
+        let mask_dtype = config.mask_dtype.unwrap_or(
+            hologram::hologram_archive::weight::WeightDType::I64,
+        );
+        let mask_bytes: Vec<u8> = (0..verify_len).flat_map(|_| {
+            match mask_dtype {
+                hologram::hologram_archive::weight::WeightDType::I64 => 1i64.to_le_bytes().to_vec(),
+                hologram::hologram_archive::weight::WeightDType::I32 => 1i32.to_le_bytes().to_vec(),
+                _ => 1i64.to_le_bytes().to_vec(),
+            }
+        }).collect();
+        inputs.set_with_shape(slot, mask_bytes, vec![1, verify_len]);
+    }
+
+    if let Some(slot) = config.pos_slot {
+        let base_pos = initial_kv_pos as i64;
+        let pos_bytes: Vec<u8> = (0..verify_len as i64)
+            .flat_map(|i| (base_pos + i).to_le_bytes().to_vec())
+            .collect();
+        inputs.set_with_shape(slot, pos_bytes, vec![1, verify_len]);
+    }
+
+    // Run batch verify — ONE forward pass for N+1 tokens.
+    let outputs = runner.execute_verify(&inputs, kv_state)?;
+
+    let logit_data = match outputs.get(0) {
+        Some((_, data)) => data,
+        None => {
+            return Ok(SpeculativeResult {
+                accepted_tokens: vec![],
+                n_accepted: 0,
+                n_forward_passes: n_drafts as usize,
+            });
+        }
+    };
+
+    // Accept/reject: compare target argmax at each position vs draft token.
+    let mut accepted: Vec<u32> = Vec::new();
     for (i, &draft_token) in draft_tokens.iter().enumerate() {
-        let outputs = run_single_token(
-            runner,
-            kv_state,
-            verify_token,
-            config,
-        )?;
-
-        let logit_data = match outputs.get(0) {
-            Some((_, data)) => data,
-            None => break,
-        };
-
-        let target_token = greedy_argmax(logit_data, config.vocab_size);
+        // Logits for position i are at position i in the batch output.
+        // The target's prediction for position i+1 is argmax(logits[i]).
+        let logit_start = i * config.bytes_per_pos;
+        let logit_end = logit_start + config.bytes_per_pos;
+        if logit_end > logit_data.len() {
+            break;
+        }
+        let target_token = greedy_argmax(&logit_data[logit_start..logit_end], config.vocab_size);
 
         match target_token {
             Some(target_id) if target_id == draft_token => {
-                // Accept: draft matches target.
                 accepted.push(draft_token);
-                verify_token = draft_token;
             }
             Some(target_id) => {
-                // Reject: use target's token instead, stop accepting drafts.
                 accepted.push(target_id);
                 break;
             }
             None => break,
         }
+    }
 
-        // If this was the last draft token, run one more forward pass
-        // to get the token after the last accepted draft.
-        if i == n_drafts - 1 {
-            let outputs = run_single_token(
-                runner,
-                kv_state,
-                draft_token,
-                config,
-            )?;
-            if let Some((_, data)) = outputs.get(0) {
-                if let Some(next_id) = greedy_argmax(data, config.vocab_size) {
-                    accepted.push(next_id);
-                }
+    // Get the bonus token from the last position's logits.
+    if accepted.len() == n_drafts {
+        let last_start = n_drafts * config.bytes_per_pos;
+        let last_end = last_start + config.bytes_per_pos;
+        if last_end <= logit_data.len() {
+            if let Some(bonus) = greedy_argmax(&logit_data[last_start..last_end], config.vocab_size) {
+                accepted.push(bonus);
             }
         }
     }
 
     let n_accepted = accepted.len();
-    let n_forward_passes = config.draft_steps + n_accepted; // draft + verify passes
+    // draft_steps individual passes + 1 batch verify pass
+    let n_forward_passes = n_drafts + 1;
 
     info!(
         n_drafts,

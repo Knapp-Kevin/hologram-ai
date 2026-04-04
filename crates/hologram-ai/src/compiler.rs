@@ -276,8 +276,9 @@ impl ModelCompiler {
             // ── LLM pipeline: prefill (seq=N) + decode (seq=1) ──────────────
             info!("compiling LLM pipeline: prefill + decode");
 
-            // Clone the optimized graph for the decode path (before concretization).
+            // Clone the optimized graph for decode and verify paths (before concretization).
             let decode_ai_graph = ai_graph.clone();
+            let verify_ai_graph = ai_graph.clone();
 
             // Prefill graph: concretize at prompt seq_len.
             let prefill_graph = concretize_all_dims(ai_graph, self.seq_len_override)
@@ -304,13 +305,25 @@ impl ModelCompiler {
                 .context("decode memory planning failed")?;
             let decode_nodes = decode_graph.nodes.len();
 
+            // Verification graph: concretize at seq=8 (for batch speculative decoding).
+            // This allows verifying up to 8 draft tokens in a single forward pass.
+            let verify_seq = 8u64;
+            let verify_graph = concretize_all_dims(verify_ai_graph, Some(verify_seq))
+                .context("verify concretization failed")?;
+            let verify_graph = post_concretization_repair(verify_graph)?;
+            let verify_mem = MemoryPlanner.plan(&verify_graph)
+                .context("verify memory planning failed")?;
+            let verify_nodes = verify_graph.nodes.len();
+
             info!(
                 prefill_nodes,
                 decode_nodes,
-                "LLM pipeline graphs ready"
+                verify_nodes,
+                verify_seq,
+                "LLM pipeline graphs ready (prefill + decode + verify)"
             );
 
-            // Compile both as a pipeline. Weights are shared (same weight_group).
+            // Compile all three as a pipeline. Weights are shared (same weight_group).
             self.compile_components(
                 vec![
                     ComponentSpec {
@@ -331,6 +344,17 @@ impl ModelCompiler {
                         opt_profile: hologram_ai_common::OptProfile::Llm,
                         graph: &decode_graph,
                         mem_plan: &decode_mem,
+                        phase: LowerPhase::Forward,
+                        weights: extra_weights,
+                        weight_index: Some(weight_index.clone()),
+                    },
+                    ComponentSpec {
+                        name: "verify".into(),
+                        role: ComponentRole::Prefill, // verification uses prefill-style execution
+                        weight_group: "model".into(),
+                        opt_profile: hologram_ai_common::OptProfile::Llm,
+                        graph: &verify_graph,
+                        mem_plan: &verify_mem,
                         phase: LowerPhase::Forward,
                         weights: extra_weights,
                         weight_index: Some(weight_index),
@@ -1866,6 +1890,10 @@ pub struct HoloRunner {
     /// When present, `execute_with_kv` switches to this after step 0.
     decode_plan: Option<hologram::LoadedPlan>,
     decode_tape: Option<hologram::hologram_exec::tape::EnumTape>,
+    /// Optional verification model (third component in LLM pipeline archives).
+    /// Compiled at seq=N for batch speculative decoding verification.
+    verify_plan: Option<hologram::LoadedPlan>,
+    verify_tape: Option<hologram::hologram_exec::tape::EnumTape>,
     /// Persistent weight cache for LUT-GEMM. Deserialized quantized weights
     /// are cached here across execution calls, avoiding per-step rkyv overhead.
     weight_cache: parking_lot::RwLock<hologram::WeightCache>,
@@ -2036,6 +2064,28 @@ impl HoloRunner {
                 (None, None)
             };
 
+            // Load verify model (third component) if present.
+            let (verify_plan, verify_tape) = if ph.models.len() >= 3 {
+                let third = &ph.models[2];
+                let v_start = weights_start + third.offset as usize;
+                let v_end = v_start + third.size as usize;
+                if v_end > bytes.len() {
+                    anyhow::bail!("verify sub-archive out of bounds");
+                }
+                let v_slice = &bytes[v_start..v_end];
+                let mut v_plan = unsafe { hologram::load_from_bytes_zero_copy(v_slice) }
+                    .map_err(|e| anyhow::anyhow!("loading verify plan: {e}"))?;
+                if v_plan.weights().is_empty() && !plan.weights().is_empty() {
+                    unsafe { v_plan.set_weights_borrowed(plan.weights()); }
+                }
+                let v_tape = hologram::build_tape_from_plan(&v_plan)
+                    .map_err(|e| anyhow::anyhow!("building verify tape: {e}"))?;
+                info!("loaded verify model (seq=8) for speculative decoding");
+                (Some(v_plan), Some(v_tape))
+            } else {
+                (None, None)
+            };
+
             let runner = Self {
                 _storage: storage,
                 plan,
@@ -2043,6 +2093,8 @@ impl HoloRunner {
                 tape,
                 decode_plan,
                 decode_tape,
+                verify_plan,
+                verify_tape,
                 weight_cache: parking_lot::RwLock::new(hologram::WeightCache::new()),
             };
             // Pre-warm dequant cache so decode steps never pay dequant overhead.
@@ -2080,6 +2132,8 @@ impl HoloRunner {
                 tape,
                 decode_plan: None,
                 decode_tape: None,
+                verify_plan: None,
+                verify_tape: None,
                 weight_cache: parking_lot::RwLock::new(hologram::WeightCache::new()),
             };
             #[cfg(target_os = "macos")]
@@ -2165,7 +2219,33 @@ impl HoloRunner {
         self.decode_tape.is_some()
     }
 
+    /// Whether this runner has a verification model for batch speculative decoding.
+    #[must_use]
+    pub fn has_verify_model(&self) -> bool {
+        self.verify_tape.is_some()
+    }
 
+    /// Execute a batch verification forward pass using the verify tape (seq=N).
+    ///
+    /// Used by speculative decoding: draft N tokens with decode tape (seq=1),
+    /// then verify all N in one forward pass through the verify tape (seq=N).
+    /// BLAS amortizes the weight read across N output tokens → N× throughput.
+    pub fn execute_verify(
+        &self,
+        inputs: &hologram::GraphInputs,
+        kv_state: &mut hologram::KvCacheState,
+    ) -> anyhow::Result<hologram::GraphOutputs> {
+        let (tape, plan) = if let (Some(ref vt), Some(ref vp)) = (&self.verify_tape, &self.verify_plan) {
+            (vt, vp)
+        } else {
+            // No verify tape — fall back to prefill tape.
+            (&self.tape, &self.plan)
+        };
+        hologram::execute_tape_with_kv_cached(
+            tape, plan, inputs, kv_state, &self.weight_cache,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))
+    }
 }
 
 /// Extract a named sub-archive's raw bytes from a pipeline archive.
