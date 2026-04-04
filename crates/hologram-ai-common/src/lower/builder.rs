@@ -134,69 +134,106 @@ pub fn lower(
     let mut sorted_params: Vec<_> = ai_graph.params.iter().collect();
     sorted_params.sort_by_key(|(&tid, _)| tid);
 
-    // Pre-scan: identify weight TensorIds that will be Q4-quantized.
-    // Their f32 bytes are not needed in the archive — the Q4 interception
-    // later creates a separate Q4 constant via matmul_lut_4bit().
-    // Skipping their f32 registration saves ~4 GB for TinyLlama-class models.
-    let q4_skip_tids: std::collections::HashSet<TensorId> = if matches!(opts.quant_strategy, QuantStrategy::Q2_0 | QuantStrategy::Q4_0 | QuantStrategy::Q8_0) {
-        let mut attn_dims: Vec<usize> = Vec::new();
-        let mut hidden_size: Option<usize> = None;
-        for n in &ai_graph.nodes {
-            if let AiOp::GroupedQueryAttention { num_heads, num_kv_heads, head_dim, .. } = &n.op {
-                let q_dim = *num_heads as usize * *head_dim as usize;
-                let kv_dim = *num_kv_heads as usize * *head_dim as usize;
-                attn_dims.extend_from_slice(&[q_dim, kv_dim, q_dim + 2 * kv_dim]);
-                hidden_size = Some(q_dim);
-            }
-        }
-        let h = hidden_size.unwrap_or(0);
-        let mut eligible = std::collections::HashSet::new();
-        for n in &ai_graph.nodes {
-            // Plain MatMul: will be Q4'd in FloatNeedsShape handler if eligible.
-            if matches!(n.op, AiOp::MatMul) {
-                if let Some(&weight_tid) = n.inputs.get(1) {
-                    if is_q4_eligible_weight(weight_tid, ai_graph, &attn_dims, h) {
-                        eligible.insert(weight_tid);
+    // ── Early quantization: quantize weights at registration time ────────
+    //
+    // Instead of registering f32 weights and then intercepting MatMul ops
+    // later, we quantize eligible weights RIGHT HERE and register the Q4
+    // constant directly. This ensures:
+    // 1. No f32 originals in the archive (saves ~4 GB for TinyLlama)
+    // 2. Works regardless of fusion passes (NormProjectionFusion, etc.)
+    // 3. Any node referencing this weight automatically gets Q4
+    //
+    // We track which TIDs became Q4 constants so node lowering emits
+    // MatMulLut4 instead of FloatOp::MatMul.
+    let do_early_quant = matches!(
+        opts.quant_strategy,
+        QuantStrategy::Q4_0 | QuantStrategy::Q2_0
+    );
+    // Store serialized Q4 bytes for weights quantized at registration time.
+    // During node lowering, any MatMul referencing a TID in this map will
+    // be emitted as MatMulLut4 using the stored bytes (via builder.matmul_lut_4bit).
+    let mut early_quant_bytes: std::collections::HashMap<TensorId, Vec<u8>> =
+        std::collections::HashMap::new();
+
+    let mut mmap_offset: u64 = 0;
+    for (&tid, param) in sorted_params.iter() {
+        // Try early quantization for eligible f32 weights.
+        if do_early_quant {
+            if let Some(info) = ai_graph.tensor_info.get(&tid) {
+                let dims: Vec<usize> = info
+                    .shape
+                    .iter()
+                    .filter_map(|d| d.as_concrete().map(|c| c as usize))
+                    .collect();
+                // Only quantize if this param is used exclusively as
+                // MatMul/Gemm weight inputs. If used by other ops (Embed,
+                // RmsNorm, etc.), keep the f32 data.
+                let used_only_as_matmul_weight = ai_graph.nodes.iter().all(|n| {
+                    if let Some(pos) = n.inputs.iter().position(|&t| t == tid) {
+                        // Must be input[1] of MatMul/Gemm/FusedNormProjection
+                        match &n.op {
+                            AiOp::MatMul | AiOp::Gemm { .. } => pos == 1,
+                            AiOp::FusedNormProjection { has_residual_add, .. } => {
+                                let w_start = if *has_residual_add { 3 } else { 2 };
+                                pos >= w_start
+                            }
+                            AiOp::FusedSwiGluProjection => pos == 2,
+                            _ => false, // other ops → don't quantize
+                        }
+                    } else {
+                        true // not referenced by this node
+                    }
+                });
+                if dims.len() == 2
+                    && dims[0] >= 256
+                    && dims[1] >= 256
+                    && info.storage_dtype == crate::ir::DType::F32
+                    && used_only_as_matmul_weight
+                {
+                    if let Ok(raw_bytes) = param_bytes_owned(param) {
+                        let expected = dims[0] * dims[1] * 4;
+                        if raw_bytes.len() == expected {
+                            use hologram::hologram_exec::lut_gemm::quantize::quantize_4bit;
+                            let f32_weights: Vec<f32> = raw_bytes
+                                .chunks_exact(4)
+                                .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
+                                .collect();
+                            let qw4 = quantize_4bit(&f32_weights, dims[0] as u32, dims[1] as u32);
+                            if let Ok(serialized) = rkyv::to_bytes::<rkyv::rancor::Error>(&qw4) {
+                                early_quant_bytes.insert(tid, serialized.to_vec());
+                                tracing::debug!(
+                                    tid,
+                                    rows = dims[0],
+                                    cols = dims[1],
+                                    "early-quant: f32 weight → Q4 ({} bytes)",
+                                    serialized.len(),
+                                );
+                                // Don't skip f32 registration — the f32 constant
+                                // is still needed as a fallback for non-MatMul consumers
+                                // and for ops that reference this weight but weren't
+                                // caught by the early-quant interception.
+                                // The Q4 bytes are stored in early_quant_bytes for
+                                // MatMul nodes to use via matmul_lut_4bit().
+                                // Fall through to normal f32 registration below.
+                            }
+                        }
                     }
                 }
             }
         }
-        eligible
-    } else {
-        std::collections::HashSet::new()
-    };
-    if !q4_skip_tids.is_empty() {
-        tracing::info!(
-            n_skipped = q4_skip_tids.len(),
-            "pre-scan: skipping f32 bytes for Q4-eligible weights"
-        );
-    }
 
-    let mut mmap_offset: u64 = 0;
-    for (&tid, param) in sorted_params.iter() {
         let constant = match param {
             crate::ir::AiParam::Mmap { len, .. } => {
-                if q4_skip_tids.contains(&tid) {
-                    // Q4-eligible mmap weight: skip archive space.
-                    // The Q4 interception will create a separate constant.
-                    ConstantData::Bytes(vec![])
-                } else {
-                    let d = ConstantData::Deferred {
-                        byte_size: *len,
-                        source_id: mmap_offset,
-                    };
-                    mmap_offset += *len;
-                    d
-                }
+                let d = ConstantData::Deferred {
+                    byte_size: *len,
+                    source_id: mmap_offset,
+                };
+                mmap_offset += *len;
+                d
             }
             _ => {
-                if q4_skip_tids.contains(&tid) {
-                    // Q4-eligible inline weight: register empty placeholder.
-                    ConstantData::Bytes(vec![])
-                } else {
-                    let data = param_bytes_owned(param)?;
-                    ConstantData::Bytes(data)
-                }
+                let data = param_bytes_owned(param)?;
+                ConstantData::Bytes(data)
             }
         };
         let shape = param_shape(param, tid, &ai_graph.tensor_info);
@@ -312,6 +349,32 @@ pub fn lower(
         // ONNX Gather has (data, indices) but hologram executor expects
         // (indices, data). Swap inputs for Gather/GatherElements.
         let input_idxs = swap_gather_inputs(&node.op, input_idxs);
+
+        // ── Early-quant interception: emit MatMulLut4 for pre-quantized weights ──
+        // If this is a MatMul and its weight input was quantized at registration,
+        // emit MatMulLut4 directly — bypasses the normal FloatNeedsShape path.
+        if matches!(node.op, AiOp::MatMul | AiOp::Gemm { .. }) {
+            let weight_tid = node.inputs.get(1).copied();
+            if let Some(wt) = weight_tid {
+                if let Some(q4_bytes) = early_quant_bytes.get(&wt) {
+                    builder = builder.matmul_lut_4bit(
+                        ConstantData::Bytes(q4_bytes.clone()),
+                        &[input_idxs[0]], // activation input only
+                    );
+                    let idx = builder.len() - 1;
+                    if let Some(&tid) = node.outputs.first() {
+                        let out_shape = output_shape(Some(&tid), &ai_graph.tensor_info);
+                        if let Some(ref s) = out_shape {
+                            builder = builder.set_node_shape(idx, s.clone());
+                        }
+                        let dtype = input_float_dtype(Some(&tid), &ai_graph.tensor_info);
+                        builder = builder.set_node_dtype(idx, dtype);
+                        tid_to_idx.insert(tid, idx);
+                    }
+                    continue; // skip normal dispatch
+                }
+            }
+        }
 
         match dispatch(&node.op) {
             DispatchTarget::GraphOp(graph_op) => {
@@ -750,12 +813,26 @@ pub fn lower(
                         if i >= n_projections { break; }
                         let weight_input_pos = weight_start + i;
                         if weight_input_pos >= input_idxs.len() { break; }
-                        let _weight_tid = node.inputs[weight_input_pos];
+                        let weight_tid = node.inputs[weight_input_pos];
 
-                        // Q4 quantization of NormProjection weights is deferred
-                        // to a future iteration — compile-time k-means Q4 on
-                        // attention/FFN projections needs quality validation.
-                        // For now, emit as plain f32 MatMul.
+                        // Check if this weight was early-quantized at registration.
+                        if let Some(q4_bytes) = early_quant_bytes.get(&weight_tid) {
+                            builder = builder.matmul_lut_4bit(
+                                ConstantData::Bytes(q4_bytes.clone()),
+                                &[norm_idx],
+                            );
+                            let proj_idx = builder.len() - 1;
+                            let out_shape = output_shape(Some(&out_tid), &ai_graph.tensor_info);
+                            if let Some(ref s) = out_shape {
+                                builder = builder.set_node_shape(proj_idx, s.clone());
+                            }
+                            let dtype = input_float_dtype(Some(&out_tid), &ai_graph.tensor_info);
+                            builder = builder.set_node_dtype(proj_idx, dtype);
+                            tid_to_idx.insert(out_tid, proj_idx);
+                            continue;
+                        }
+
+                        // No early-quant — emit as plain f32 MatMul.
                         {
                             let n_val = split_sizes[i] as u32;
                             let matmul_op = GraphOp::Float(FloatOp::MatMul {
