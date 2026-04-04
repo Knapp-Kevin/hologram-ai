@@ -62,9 +62,6 @@ jobs:
       - name: Run unit tests
         run: cargo test --workspace
 
-      - name: Run integration tests
-        run: cargo test --test pipeline
-
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
 
