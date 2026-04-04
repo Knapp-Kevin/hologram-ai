@@ -409,7 +409,6 @@ fn concat_4d_last_axis_matches_ort() {
 /// This is the core attention pattern from TinyLlama. A failure indicates a bug in
 /// one or more of: 4D transpose lowering, 4D batched matmul shape tracking, or softmax.
 #[test]
-#[ignore] // TODO(conformance): length mismatch: actual=3072 expected=192
 fn scaled_dot_product_attention_matches_ort() {
     let batch = 1;
     let heads = 4;
@@ -480,7 +479,6 @@ fn scaled_dot_product_attention_matches_ort() {
 ///
 /// Dimensions scaled down for test speed; ratio matches TinyLlama (8:2 = 4:1 ratio).
 #[test]
-#[ignore] // TODO(conformance): length mismatch: actual=1536 expected=384
 fn gqa_expand_attention_matches_ort() {
     let batch = 1;
     let n_heads = 8;
@@ -642,7 +640,7 @@ fn gqa_tinyllama_dims_seq1_and_seq2_match_ort() {
 /// Test: KV head expansion (Unsqueeze→Expand→Reshape) at TinyLlama dims.
 /// Isolates the first 3 ops of the GQA pattern to find where seq>1 diverges.
 #[test]
-#[ignore] // TODO(conformance): length mismatch: actual=65536 expected=4096
+#[ignore] // TODO(conformance): numerical mismatch 3072/4096 elements — batched attention value errors
 fn kv_expand_tinyllama_dims_matches_ort() {
     use hologram_ai_conformance::ort_runner::onnx_builder::{Initializer, Node as ONode};
 
