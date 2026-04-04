@@ -145,7 +145,7 @@ pub fn speculative_decode_step(
             return Ok(SpeculativeResult {
                 accepted_tokens: vec![],
                 n_accepted: 0,
-                n_forward_passes: n_drafts as usize,
+                n_forward_passes: n_drafts,
             });
         }
     };
