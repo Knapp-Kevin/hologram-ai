@@ -16,11 +16,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Checkout hologram (sibling dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: Hologram-Technologies/hologram
-          token: ${{ secrets.HOLOGRAM_PAT }}
-          path: ../hologram
+        run: git clone --depth 1 "https://x-access-token:${HOLOGRAM_PAT}@github.com/Hologram-Technologies/hologram.git" ../hologram
+        env:
+          HOLOGRAM_PAT: ${{ secrets.HOLOGRAM_PAT }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -65,11 +63,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Checkout hologram (sibling dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: Hologram-Technologies/hologram
-          token: ${{ secrets.HOLOGRAM_PAT }}
-          path: ../hologram
+        run: git clone --depth 1 "https://x-access-token:${HOLOGRAM_PAT}@github.com/Hologram-Technologies/hologram.git" ../hologram
+        env:
+          HOLOGRAM_PAT: ${{ secrets.HOLOGRAM_PAT }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
