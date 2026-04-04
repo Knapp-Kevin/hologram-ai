@@ -131,20 +131,69 @@ pub fn lower(
     let mut sorted_params: Vec<_> = ai_graph.params.iter().collect();
     sorted_params.sort_by_key(|(&tid, _)| tid);
 
+    // Pre-scan: identify weight TensorIds that will be Q4-quantized.
+    // Their f32 bytes are not needed in the archive — the Q4 interception
+    // later creates a separate Q4 constant via matmul_lut_4bit().
+    // Skipping their f32 registration saves ~4 GB for TinyLlama-class models.
+    let q4_skip_tids: std::collections::HashSet<TensorId> = if matches!(opts.quant_strategy, QuantStrategy::Q4_0 | QuantStrategy::Q8_0) {
+        let mut attn_dims: Vec<usize> = Vec::new();
+        let mut hidden_size: Option<usize> = None;
+        for n in &ai_graph.nodes {
+            if let AiOp::GroupedQueryAttention { num_heads, num_kv_heads, head_dim, .. } = &n.op {
+                let q_dim = *num_heads as usize * *head_dim as usize;
+                let kv_dim = *num_kv_heads as usize * *head_dim as usize;
+                attn_dims.extend_from_slice(&[q_dim, kv_dim, q_dim + 2 * kv_dim]);
+                hidden_size = Some(q_dim);
+            }
+        }
+        let h = hidden_size.unwrap_or(0);
+        let mut eligible = std::collections::HashSet::new();
+        for n in &ai_graph.nodes {
+            // Plain MatMul: will be Q4'd in FloatNeedsShape handler if eligible.
+            if matches!(n.op, AiOp::MatMul) {
+                if let Some(&weight_tid) = n.inputs.get(1) {
+                    if is_q4_eligible_weight(weight_tid, ai_graph, &attn_dims, h) {
+                        eligible.insert(weight_tid);
+                    }
+                }
+            }
+        }
+        eligible
+    } else {
+        std::collections::HashSet::new()
+    };
+    if !q4_skip_tids.is_empty() {
+        tracing::info!(
+            n_skipped = q4_skip_tids.len(),
+            "pre-scan: skipping f32 bytes for Q4-eligible weights"
+        );
+    }
+
     let mut mmap_offset: u64 = 0;
     for (&tid, param) in sorted_params.iter() {
         let constant = match param {
             crate::ir::AiParam::Mmap { len, .. } => {
-                let d = ConstantData::Deferred {
-                    byte_size: *len,
-                    source_id: mmap_offset,
-                };
-                mmap_offset += *len;
-                d
+                if q4_skip_tids.contains(&tid) {
+                    // Q4-eligible mmap weight: skip archive space.
+                    // The Q4 interception will create a separate constant.
+                    ConstantData::Bytes(vec![])
+                } else {
+                    let d = ConstantData::Deferred {
+                        byte_size: *len,
+                        source_id: mmap_offset,
+                    };
+                    mmap_offset += *len;
+                    d
+                }
             }
             _ => {
-                let data = param_bytes_owned(param)?;
-                ConstantData::Bytes(data)
+                if q4_skip_tids.contains(&tid) {
+                    // Q4-eligible inline weight: register empty placeholder.
+                    ConstantData::Bytes(vec![])
+                } else {
+                    let data = param_bytes_owned(param)?;
+                    ConstantData::Bytes(data)
+                }
             }
         };
         let shape = param_shape(param, tid, &ai_graph.tensor_info);
@@ -386,21 +435,22 @@ pub fn lower(
                 // These have output N matching attention head dimensions AND input K
                 // matching hidden_size. FFN down_proj has K=ffn_intermediate (≠hidden_size)
                 // and is NOT skipped despite having N=hidden_size.
-                let attn_dims: Vec<usize> = ai_graph.nodes.iter()
-                    .filter_map(|n| match &n.op {
-                        AiOp::GroupedQueryAttention { num_heads, num_kv_heads, head_dim, .. } => {
-                            let q_dim = *num_heads as usize * *head_dim as usize;
-                            let kv_dim = *num_kv_heads as usize * *head_dim as usize;
-                            // Include individual dims AND fused QKV dim (from
-                            // SharedInputProjectionFusion: N_q + N_k + N_v).
-                            Some(vec![q_dim, kv_dim, q_dim + 2 * kv_dim])
-                        }
-                        _ => None,
-                    })
-                    .flatten()
-                    .collect();
-                let feeds_attention = if let GraphOp::Float(FloatOp::MatMul { n, .. }) = &result.graph_op {
-                    attn_dims.contains(&(*n as usize))
+                // Collect attention output dims AND hidden_size for precise filtering.
+                // A MatMul feeds attention iff N ∈ attn_dims AND K == hidden_size.
+                // FFN down_proj has N=hidden_size but K=ffn_intermediate → not blocked.
+                let mut attn_dims: Vec<usize> = Vec::new();
+                let mut hidden_size: Option<usize> = None;
+                for n in &ai_graph.nodes {
+                    if let AiOp::GroupedQueryAttention { num_heads, num_kv_heads, head_dim, .. } = &n.op {
+                        let q_dim = *num_heads as usize * *head_dim as usize;
+                        let kv_dim = *num_kv_heads as usize * *head_dim as usize;
+                        attn_dims.extend_from_slice(&[q_dim, kv_dim, q_dim + 2 * kv_dim]);
+                        hidden_size = Some(q_dim); // hidden = num_q_heads * head_dim
+                    }
+                }
+                let h = hidden_size.unwrap_or(0);
+                let feeds_attention = if let GraphOp::Float(FloatOp::MatMul { k, n, .. }) = &result.graph_op {
+                    attn_dims.contains(&(*n as usize)) && (*k as usize == h || *k == 0)
                 } else {
                     false
                 };
@@ -642,31 +692,52 @@ pub fn lower(
                     let norm_dtype = input_float_dtype(node.inputs.first(), &ai_graph.tensor_info);
                     builder = builder.set_node_dtype(norm_idx, norm_dtype);
 
+                    // Collect attention dims for Q4 eligibility (same as FloatNeedsShape path).
+                    let _proj_attn_dims: Vec<usize> = ai_graph.nodes.iter()
+                        .filter_map(|n| match &n.op {
+                            AiOp::GroupedQueryAttention { num_heads, num_kv_heads, head_dim, .. } => {
+                                let q_dim = *num_heads as usize * *head_dim as usize;
+                                let kv_dim = *num_kv_heads as usize * *head_dim as usize;
+                                Some(vec![q_dim, kv_dim, q_dim + 2 * kv_dim])
+                            }
+                            _ => None,
+                        })
+                        .flatten()
+                        .collect();
+
                     // Step 2: Emit N MatMul nodes, one per projection.
+                    // Each projection may be Q4-quantized if eligible.
+                    // Skip Q4 for attention projections (Q/K/V) — quality-sensitive.
                     for (i, &out_tid) in node.outputs.iter().enumerate() {
                         if i >= n_projections { break; }
                         let weight_input_pos = weight_start + i;
                         if weight_input_pos >= input_idxs.len() { break; }
+                        let _weight_tid = node.inputs[weight_input_pos];
 
-                        let n_val = split_sizes[i] as u32;
-                        let matmul_op = GraphOp::Float(FloatOp::MatMul {
-                            m: 0, // runtime-inferred
-                            k: norm_size,
-                            n: n_val,
-                        });
-                        builder = builder.node_with_inputs(
-                            matmul_op,
-                            &[norm_idx, input_idxs[weight_input_pos]],
-                        );
-                        let proj_idx = builder.len() - 1;
-
-                        let out_shape = output_shape(Some(&out_tid), &ai_graph.tensor_info);
-                        if let Some(ref s) = out_shape {
-                            builder = builder.set_node_shape(proj_idx, s.clone());
+                        // Q4 quantization of NormProjection weights is deferred
+                        // to a future iteration — compile-time k-means Q4 on
+                        // attention/FFN projections needs quality validation.
+                        // For now, emit as plain f32 MatMul.
+                        {
+                            let n_val = split_sizes[i] as u32;
+                            let matmul_op = GraphOp::Float(FloatOp::MatMul {
+                                m: 0,
+                                k: norm_size,
+                                n: n_val,
+                            });
+                            builder = builder.node_with_inputs(
+                                matmul_op,
+                                &[norm_idx, input_idxs[weight_input_pos]],
+                            );
+                            let proj_idx = builder.len() - 1;
+                            let out_shape = output_shape(Some(&out_tid), &ai_graph.tensor_info);
+                            if let Some(ref s) = out_shape {
+                                builder = builder.set_node_shape(proj_idx, s.clone());
+                            }
+                            let dtype = input_float_dtype(Some(&out_tid), &ai_graph.tensor_info);
+                            builder = builder.set_node_dtype(proj_idx, dtype);
+                            tid_to_idx.insert(out_tid, proj_idx);
                         }
-                        let dtype = input_float_dtype(Some(&out_tid), &ai_graph.tensor_info);
-                        builder = builder.set_node_dtype(proj_idx, dtype);
-                        tid_to_idx.insert(out_tid, proj_idx);
                     }
 
                     tracing::info!(
@@ -1551,6 +1622,68 @@ fn try_convert_f32_to_lut4(
         .map_err(|e| anyhow::anyhow!("rkyv serialize QuantizedWeights4: {e}"))?
         .to_vec();
 
+    Ok(Some(Lut4ConversionResult {
+        serialized_weights: serialized,
+        rows: rows as u32,
+        cols: cols as u32,
+    }))
+}
+
+/// Check if a weight tensor is eligible for Q4 quantization.
+fn is_q4_eligible_weight(
+    weight_tid: TensorId,
+    ai_graph: &AiGraph,
+    attn_dims: &[usize],
+    hidden_size: usize,
+) -> bool {
+    if !ai_graph.params.contains_key(&weight_tid) {
+        return false;
+    }
+    let info = match ai_graph.tensor_info.get(&weight_tid) {
+        Some(i) => i,
+        None => return false,
+    };
+    let dims: Vec<usize> = info
+        .shape
+        .iter()
+        .filter_map(|d| d.as_concrete().map(|c| c as usize))
+        .collect();
+    if dims.len() != 2 || dims[0] < 256 || dims[1] < 256 {
+        return false;
+    }
+    // feeds_attention: N ∈ attn_dims AND K == hidden_size → skip.
+    let k_val = dims[0];
+    let n_val = dims[1];
+    if attn_dims.contains(&n_val) && k_val == hidden_size {
+        return false;
+    }
+    true
+}
+
+/// Simplified Q4 conversion from a param + known dimensions.
+/// Used by NormProjectionFusion's MultiOutput path where we already
+/// know the weight param and its shape.
+#[allow(dead_code)] // Will be used when NormProjection Q4 path is enabled.
+fn try_convert_f32_to_lut4_from_param(
+    param: &crate::ir::AiParam,
+    rows: usize,
+    cols: usize,
+) -> anyhow::Result<Option<Lut4ConversionResult>> {
+    use hologram::hologram_exec::lut_gemm::quantize::quantize_4bit;
+
+    let raw_bytes = param_bytes_owned(param)?;
+    let expected_bytes = rows * cols * 4;
+    if raw_bytes.len() != expected_bytes {
+        return Ok(None);
+    }
+    let f32_weights: Vec<f32> = raw_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
+        .collect();
+    let qw4 = quantize_4bit(&f32_weights, rows as u32, cols as u32);
+    let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&qw4)
+        .map_err(|e| anyhow::anyhow!("rkyv serialize QuantizedWeights4: {e}"))?
+        .to_vec();
     Ok(Some(Lut4ConversionResult {
         serialized_weights: serialized,
         rows: rows as u32,
