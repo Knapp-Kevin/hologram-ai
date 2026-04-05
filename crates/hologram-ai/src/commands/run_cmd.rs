@@ -251,11 +251,6 @@ fn resolve_seq_mode(runner: &HoloRunner, prompt_len: Option<usize>) -> SeqMode {
 
     // When a ShapeContextGraph is available AND the prompt fits within the
     // compiled seq_len, use variable-length mode (no padding waste).
-    //
-    // For prompts LONGER than compiled seq_len, shape context alone can't fix
-    // ops that embed the compiled seq dimension in their parameters (Reshape,
-    // Expand). Fall back to FixedPad until 0-sentinel lowering is implemented
-    // (Plan 045 Option A).
     if runner.has_shape_context() {
         let prompt = prompt_len.unwrap_or(0);
         let fits = compiled_seq.is_none_or(|c| prompt <= c);
@@ -265,7 +260,7 @@ fn resolve_seq_mode(runner: &HoloRunner, prompt_len: Option<usize>) -> SeqMode {
         }
         warn!(
             "prompt length={prompt} exceeds compiled seq_len={}. \
-             Recompile with `--seq-len {prompt}` or larger for correct results.",
+             Recompile with a larger `--seq-len` for correct results.",
             compiled_seq.unwrap_or(0),
         );
     }

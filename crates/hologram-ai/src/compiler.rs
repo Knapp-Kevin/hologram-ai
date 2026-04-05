@@ -2401,8 +2401,6 @@ impl HoloRunner {
         // Map graph input names to their node indices and inject runtime shapes.
         for (slot, name) in sg.input_names.iter().enumerate() {
             if let Some(shape) = inputs.shape(slot as u32) {
-                // Find the node index for this input slot.
-                // Input nodes are typically the first N nodes in the serialized graph.
                 for node in &sg.nodes {
                     if matches!(node.op, hologram::hologram_graph::graph::GraphOp::Input)
                         && node.id.index() == slot as u32
@@ -2411,12 +2409,11 @@ impl HoloRunner {
                         break;
                     }
                 }
-                // Also try the slot index directly (common for builder-generated graphs).
                 runtime_inputs
                     .entry(slot as u32)
                     .or_insert_with(|| shape.to_vec());
             }
-            let _ = name; // suppress unused warning
+            let _ = name;
         }
 
         let mut shape_map = std::collections::HashMap::new();
