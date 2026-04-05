@@ -117,17 +117,23 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Persistent WeightCache in CLI `run` — eliminate per-step Q4 rkyv overhead
 - [x] `concretize_all_dims` returns `seq_dim_positions: HashSet<(TensorId, axis)>`
   identifying seq-dependent dims before concretization (infrastructure for Plan 045)
-- [ ] **Post-fusion shape projections (Plan 059)** — add `project_shape()`
-  to hologram-core that computes output shape from input shapes + op params
-  for every `GraphOp`/`FloatOp` variant. Call in `emit_stage()` after fusion
-  to produce complete `node_shapes` covering 100% of tape nodes. Wire into
-  `CompilationOutput` → archive → `HoloRunner.resolve_shapes()`.
-  - [ ] Phase 1: `shape_projection.rs` in hologram-core (~200 lines)
-  - [ ] Phase 2: `compute_post_fusion_shapes()` in emit_stage
-  - [ ] Phase 3: Archive embedding (verify `node_shapes` populated)
-  - [ ] Phase 4: HoloRunner uses post-fusion shapes for overrides
-  - [ ] Phase 5: Remove pre-fusion ShapeContextGraph + prompt guard
-  - [ ] Phase 6: Conformance test (seq=24, prompts 10/18/24/36)
+- [x] **Post-fusion shape projections (Plan 059 Phases 1-2)** — `float_output_shape()`
+  in hologram-core covers all FloatOp variants. `compute_post_fusion_shapes()` in
+  `emit_stage()` walks post-fusion graph and produces 100% node_shapes coverage.
+  **Finding:** Shape metadata overrides can't fix baked op parameters (MatMul m/k/n,
+  Softmax size). Shape overrides tell the *next* op what shape a buffer has, but
+  the *current* op still computes with its baked parameter values.
+- [ ] **0-sentinel op parameters (Plan 045)** — zero seq-dependent values in
+  Reshape/Expand shape constants AND set seq axis to Dynamic for MatMul/norm
+  input tensors. Runs after `post_concretization_repair`, before `lower()`.
+  This makes DeferredStrategy emit 0-sentinels that the runtime resolves
+  from buffer sizes. See Plan 045 "Implementation: Shape Tensor Zeroing Pass".
+  - [ ] `zero_seq_dims_for_lowering()` — new function in compiler.rs
+    - Zero `known_i64_values[axis]` on Reshape/Flatten output tensors
+    - Zero seq dims on Expand shape input tensors
+    - Set seq axis to `Dim::Dynamic` on MatMul/norm input tensor shapes
+  - [ ] Remove prompt-length guard in `resolve_seq_mode()`
+  - [ ] Conformance test (seq=24, prompts 10/18/24/36)
   **Workaround:** Compile at model's full context length (default). Variable-
   length works correctly for any prompt <= compiled seq_len.
   - [ ] Conformance test: compile at seq=24, run with 18 and 36 token prompts
