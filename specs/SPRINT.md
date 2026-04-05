@@ -117,17 +117,17 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Persistent WeightCache in CLI `run` — eliminate per-step Q4 rkyv overhead
 - [x] `concretize_all_dims` returns `seq_dim_positions: HashSet<(TensorId, axis)>`
   identifying seq-dependent dims before concretization (infrastructure for Plan 045)
-- [ ] **0-sentinel for Reshape/Expand shape constants (Plan 045)** — trace
-  Shape→Gather→Concat→Reshape chains to find shape tensor constants that
-  contain seq-dependent values, zero those specific elements. Current
-  approach (skipping concretization or zeroing by axis) breaks because
-  shape tensor element indices ≠ target tensor axis indices.
-  - [ ] Graph analysis: find Reshape nodes, trace shape tensor inputs,
-    identify which i64 elements are seq-dependent
-  - [ ] Zero those elements in shape tensor `known_i64_values`
-  - [ ] Handle Expand target_shape similarly
-  - [ ] Runtime Reshape: infer 0-element dims from total buffer size
-  - [ ] Remove prompt-length guard in `resolve_seq_mode()`
+- [ ] **Post-fusion ShapeContextGraph (Plan 033 Option A)** — the pre-fusion
+  ShapeContextGraph loses ~28% of nodes after fusion pruning, breaking the
+  projection chain. Reshape/Expand shape tensors and MatMul baked params
+  contain the compiled seq_len. Shape overrides alone can't fix all 824
+  tape nodes when only 595 have projections.
+  **Root cause:** ShapeContextGraph is computed pre-fusion; hologram::compile()
+  fusion removes nodes, breaking projection chains.
+  **Fix:** Compute ShapeContextGraph post-fusion in hologram base, or
+  maintain a pre→post node mapping through compilation.
+  **Workaround:** Compile at model's full context length (seq=2048). Variable-
+  length works correctly for any prompt <= compiled seq_len.
   - [ ] Conformance test: compile at seq=24, run with 18 and 36 token prompts
 
 ### P6: Performance deep clean (Plan 024 — active)
