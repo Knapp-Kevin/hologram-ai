@@ -297,7 +297,6 @@ fn layernorm_composite_matches_ort() {
 /// that shape tracking through the pipeline produces correct outputs. A failure here
 /// indicates a bug in shape propagation or batched matmul dispatch for attention ops.
 #[test]
-#[ignore] // TODO(conformance): numerical mismatch in batched matmul dispatch — pre-existing
 fn batched_4d_matmul_matches_ort() {
     let batch = 1;
     let heads = 4;
@@ -640,7 +639,6 @@ fn gqa_tinyllama_dims_seq1_and_seq2_match_ort() {
 /// Test: KV head expansion (Unsqueeze→Expand→Reshape) at TinyLlama dims.
 /// Isolates the first 3 ops of the GQA pattern to find where seq>1 diverges.
 #[test]
-#[ignore] // TODO(conformance): numerical mismatch 3072/4096 elements — batched attention value errors
 fn kv_expand_tinyllama_dims_matches_ort() {
     use hologram_ai_conformance::ort_runner::onnx_builder::{Initializer, Node as ONode};
 
@@ -3493,7 +3491,6 @@ fn resnet50_matches_ort() {
 /// BERT uses bidirectional attention (non-causal), LayerNorm, and GELU which
 /// may have different error accumulation characteristics than the LLM path.
 #[test]
-#[ignore]
 fn bert_matches_ort() {
     let model = workspace_path("models/bert-base-uncased/model.onnx");
     if !model.exists() {
