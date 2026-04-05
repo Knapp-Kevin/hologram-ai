@@ -2262,13 +2262,21 @@ impl HoloRunner {
 
     /// Execute the compiled graph with the given inputs.
     ///
-    /// Variable-length execution is handled by the runtime's per-op dimension
-    /// resolution from actual buffer sizes.
+    /// When a `ShapeContextGraph` is available, projects runtime input shapes
+    /// through the graph to produce correct per-node shapes. This enables
+    /// variable-length execution (runtime seq_len != compiled seq_len).
     pub fn execute(
         &self,
         inputs: &hologram::GraphInputs,
     ) -> anyhow::Result<hologram::GraphOutputs> {
-        hologram::execute_tape(&self.tape, &self.plan, inputs).map_err(|e| anyhow::anyhow!("{e}"))
+        if let Some(ref ctx) = self.shape_ctx {
+            let shape_map = self.resolve_shapes(ctx, &self.plan, inputs);
+            hologram::execute_tape_with_shapes(&self.tape, &self.plan, inputs, &shape_map)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        } else {
+            hologram::execute_tape(&self.tape, &self.plan, inputs)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
     }
 
     /// Access the underlying loaded plan (for layer headers, weights, etc.).
@@ -2296,6 +2304,48 @@ impl HoloRunner {
         self.shape_ctx.is_some()
     }
 
+    /// Project runtime input shapes through the `ShapeContextGraph` to produce
+    /// per-node shape overrides for the executor.
+    fn resolve_shapes(
+        &self,
+        ctx: &ShapeContextGraph,
+        plan: &hologram::LoadedPlan,
+        inputs: &hologram::GraphInputs,
+    ) -> std::collections::HashMap<u32, Vec<usize>> {
+        let mut runtime_inputs = std::collections::HashMap::new();
+        let sg = plan.graph();
+
+        // Map graph input names to their node indices and inject runtime shapes.
+        for (slot, name) in sg.input_names.iter().enumerate() {
+            if let Some(shape) = inputs.shape(slot as u32) {
+                // Find the node index for this input slot.
+                // Input nodes are typically the first N nodes in the serialized graph.
+                for node in &sg.nodes {
+                    if matches!(node.op, hologram::hologram_graph::graph::GraphOp::Input)
+                        && node.id.index() == slot as u32
+                    {
+                        runtime_inputs.insert(node.id.index(), shape.to_vec());
+                        break;
+                    }
+                }
+                // Also try the slot index directly (common for builder-generated graphs).
+                runtime_inputs
+                    .entry(slot as u32)
+                    .or_insert_with(|| shape.to_vec());
+            }
+            let _ = name; // suppress unused warning
+        }
+
+        let mut shape_map = std::collections::HashMap::new();
+        hologram_ai_common::walk_shape_context(
+            ctx,
+            &runtime_inputs,
+            &std::collections::HashMap::new(),
+            &mut shape_map,
+        );
+        shape_map
+    }
+
     /// Execute with a mutable KV cache state for autoregressive generation.
     ///
     /// For LLM pipeline archives: uses the prefill tape for step 0 (write_pos == 0)
@@ -2319,8 +2369,27 @@ impl HoloRunner {
             (&self.tape, &self.plan)
         };
 
-        hologram::execute_tape_with_kv_cached(tape, plan, inputs, kv_state, &self.weight_cache)
+        if let Some(ref ctx) = self.shape_ctx {
+            let shape_map = self.resolve_shapes(ctx, plan, inputs);
+            hologram::execute_tape_with_kv_shapes_cached(
+                tape,
+                plan,
+                inputs,
+                kv_state,
+                &shape_map,
+                &self.weight_cache,
+            )
             .map_err(|e| anyhow::anyhow!("{e}"))
+        } else {
+            hologram::execute_tape_with_kv_cached(
+                tape,
+                plan,
+                inputs,
+                kv_state,
+                &self.weight_cache,
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))
+        }
     }
 
     /// Whether this runner has a separate decode model for fast autoregressive generation.

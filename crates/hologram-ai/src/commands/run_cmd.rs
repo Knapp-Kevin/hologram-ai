@@ -239,6 +239,15 @@ enum SeqMode {
 }
 
 fn resolve_seq_mode(runner: &HoloRunner, prompt_len: Option<usize>) -> SeqMode {
+    let max_seq = load_meta_seq_len(runner).unwrap_or(2048);
+
+    // When a ShapeContextGraph is available, the executor can resolve shapes
+    // at runtime for any sequence length. Use variable-length mode.
+    if runner.has_shape_context() {
+        info!("shape context available — using variable-length execution");
+        return SeqMode::Variable { max_seq };
+    }
+
     // Detect compiled seq_len from the graph's first 2D input shape [1, seq].
     let graph = runner.plan().graph();
     let compiled_seq: Option<usize> = graph
@@ -257,13 +266,12 @@ fn resolve_seq_mode(runner: &HoloRunner, prompt_len: Option<usize>) -> SeqMode {
         }
     }
 
-    // Use FixedPad matching compiled seq_len when known. Variable-length
-    // execution has known shape resolution bugs when compiled_seq != runtime_seq.
+    // Use FixedPad matching compiled seq_len when known. Without shape context,
+    // variable-length has known shape resolution bugs when compiled_seq != runtime_seq.
     // KV cache decode (seq=1) works correctly in both modes.
     if let Some(seq) = compiled_seq {
         SeqMode::FixedPad(seq)
     } else {
-        let max_seq = load_meta_seq_len(runner).unwrap_or(2048);
         SeqMode::Variable { max_seq }
     }
 }
