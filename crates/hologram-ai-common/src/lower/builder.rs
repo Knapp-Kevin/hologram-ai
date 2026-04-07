@@ -212,7 +212,9 @@ pub fn lower(
                     if let Ok(raw_bytes) = param_bytes_owned(param) {
                         let expected = dims[0] * dims[1] * 4;
                         if raw_bytes.len() == expected {
-                            use hologram::hologram_exec::lut_gemm::quantize::{quantize_4bit, dequantize_error_q4};
+                            use hologram::hologram_exec::lut_gemm::quantize::{
+                                dequantize_error_q4, quantize_4bit,
+                            };
                             let f32_weights: Vec<f32> = raw_bytes
                                 .chunks_exact(4)
                                 .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
@@ -228,7 +230,9 @@ pub fn lower(
                                     rel_err,
                                     "early-quant: skipping Q4 (error too high)"
                                 );
-                            } else if let Ok(serialized) = rkyv::to_bytes::<rkyv::rancor::Error>(&qw4) {
+                            } else if let Ok(serialized) =
+                                rkyv::to_bytes::<rkyv::rancor::Error>(&qw4)
+                            {
                                 early_quant_bytes.insert(tid, serialized.to_vec());
                                 tracing::debug!(
                                     tid,

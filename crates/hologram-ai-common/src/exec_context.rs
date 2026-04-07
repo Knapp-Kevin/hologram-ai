@@ -334,8 +334,7 @@ impl ShapeContextGraph {
     pub fn retain_live_nodes(&mut self, live_ids: &std::collections::HashSet<u32>) {
         self.seeds.retain(|s| live_ids.contains(&s.node_id));
         self.projections.retain(|p| {
-            live_ids.contains(&p.node_id)
-                && p.input_node_ids.iter().all(|id| live_ids.contains(id))
+            live_ids.contains(&p.node_id) && p.input_node_ids.iter().all(|id| live_ids.contains(id))
         });
     }
 

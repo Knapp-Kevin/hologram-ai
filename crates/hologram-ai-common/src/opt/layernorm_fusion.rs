@@ -80,10 +80,7 @@ impl Pass for LayerNormFusion {
 
                     let fused = AiNode::new(
                         next_id,
-                        AiOp::LayerNorm {
-                            axis: -1,
-                            epsilon,
-                        },
+                        AiOp::LayerNorm { axis: -1, epsilon },
                         vec![x_tid, weight_tid, bias_tid],
                         vec![out_tid],
                     );
@@ -282,8 +279,7 @@ fn match_layernorm_core(
     // mean <- ReduceMean(X)
     let mean_reduce_idx = *tid_to_node.get(&mean_tid)?;
     let mean_reduce_node = &graph.nodes[mean_reduce_idx];
-    if !matches!(mean_reduce_node.op, AiOp::ReduceMean { .. })
-        || mean_reduce_node.inputs.is_empty()
+    if !matches!(mean_reduce_node.op, AiOp::ReduceMean { .. }) || mean_reduce_node.inputs.is_empty()
     {
         return None;
     }
@@ -366,22 +362,16 @@ mod tests {
 
         let mut tensor_info: HashMap<TensorId, TensorInfo> = HashMap::new();
         tensor_info.insert(x_tid, TensorInfo::new(DType::F32, x_shape.clone()));
-        tensor_info.insert(
-            mean_tid,
-            TensorInfo::new(DType::F32, reduced_shape.clone()),
-        );
-        tensor_info.insert(
-            centered_tid,
-            TensorInfo::new(DType::F32, x_shape.clone()),
-        );
+        tensor_info.insert(mean_tid, TensorInfo::new(DType::F32, reduced_shape.clone()));
+        tensor_info.insert(centered_tid, TensorInfo::new(DType::F32, x_shape.clone()));
         tensor_info.insert(two_tid, TensorInfo::new(DType::F32, scalar_shape.clone()));
         tensor_info.insert(pow2_tid, TensorInfo::new(DType::F32, x_shape.clone()));
+        tensor_info.insert(var_tid, TensorInfo::new(DType::F32, reduced_shape.clone()));
+        tensor_info.insert(eps_tid, TensorInfo::new(DType::F32, scalar_shape));
         tensor_info.insert(
-            var_tid,
+            biased_tid,
             TensorInfo::new(DType::F32, reduced_shape.clone()),
         );
-        tensor_info.insert(eps_tid, TensorInfo::new(DType::F32, scalar_shape));
-        tensor_info.insert(biased_tid, TensorInfo::new(DType::F32, reduced_shape.clone()));
         tensor_info.insert(std_tid, TensorInfo::new(DType::F32, reduced_shape));
         tensor_info.insert(normed_tid, TensorInfo::new(DType::F32, x_shape.clone()));
         tensor_info.insert(w_tid, TensorInfo::new(DType::F32, hidden_shape.clone()));
@@ -406,12 +396,7 @@ mod tests {
                 vec![mean_tid],
             ),
             AiNode::new(1, AiOp::Sub, vec![x_tid, mean_tid], vec![centered_tid]),
-            AiNode::new(
-                2,
-                AiOp::Pow,
-                vec![centered_tid, two_tid],
-                vec![pow2_tid],
-            ),
+            AiNode::new(2, AiOp::Pow, vec![centered_tid, two_tid], vec![pow2_tid]),
             AiNode::new(
                 3,
                 AiOp::ReduceMean {
@@ -423,12 +408,7 @@ mod tests {
             ),
             AiNode::new(4, AiOp::Add, vec![var_tid, eps_tid], vec![biased_tid]),
             AiNode::new(5, AiOp::Sqrt, vec![biased_tid], vec![std_tid]),
-            AiNode::new(
-                6,
-                AiOp::Div,
-                vec![centered_tid, std_tid],
-                vec![normed_tid],
-            ),
+            AiNode::new(6, AiOp::Div, vec![centered_tid, std_tid], vec![normed_tid]),
             AiNode::new(7, AiOp::Mul, vec![normed_tid, w_tid], vec![scaled_tid]),
             AiNode::new(8, AiOp::Add, vec![scaled_tid, b_tid], vec![out_tid]),
         ];

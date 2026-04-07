@@ -522,7 +522,10 @@ fn run_generation(
         // The stop string is not stripped from output; the user sees it and
         // can split on it in post-processing.
         if !config.stop.is_empty()
-            && config.stop.iter().any(|s| !s.is_empty() && full.ends_with(s))
+            && config
+                .stop
+                .iter()
+                .any(|s| !s.is_empty() && full.ends_with(s))
         {
             break;
         }

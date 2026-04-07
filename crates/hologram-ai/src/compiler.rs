@@ -473,9 +473,8 @@ impl ModelCompiler {
         // Infer LLM metadata from GQA nodes (same as compile()).
         infer_llm_metadata_from_graph(&mut ai_graph);
 
-        let (ai_graph, seq_dim_positions) =
-            concretize_all_dims(ai_graph, self.seq_len_override)
-                .context("shape concretization failed")?;
+        let (ai_graph, seq_dim_positions) = concretize_all_dims(ai_graph, self.seq_len_override)
+            .context("shape concretization failed")?;
 
         // Post-concretization repair (same as compile()).
         let mut ai_graph = post_concretization_repair(ai_graph)?;
@@ -575,9 +574,8 @@ impl ModelCompiler {
         let ai_graph = OptPipeline::mvp()
             .run(ai_graph)
             .context("optimization pass failed")?;
-        let (ai_graph, seq_dim_positions) =
-            concretize_all_dims(ai_graph, self.seq_len_override)
-                .context("shape concretization failed")?;
+        let (ai_graph, seq_dim_positions) = concretize_all_dims(ai_graph, self.seq_len_override)
+            .context("shape concretization failed")?;
 
         let mut ai_graph = post_concretization_repair(ai_graph)?;
         zero_seq_dims_for_lowering(&mut ai_graph, &seq_dim_positions);
@@ -1175,12 +1173,7 @@ fn compile_one_component(
     let unpacked = unpack_archive(&compiled.archive)?;
 
     // Prune shape context entries referencing nodes removed by fusion.
-    if let Some(mut ctx) = lower_out
-        .context
-        .get::<ShapeContextGraph>()
-        .ok()
-        .flatten()
-    {
+    if let Some(mut ctx) = lower_out.context.get::<ShapeContextGraph>().ok().flatten() {
         let live_ids: std::collections::HashSet<u32> = unpacked
             .plan
             .graph()
@@ -1801,7 +1794,10 @@ fn zero_seq_dims_for_lowering(
 fn concretize_all_dims(
     mut graph: AiGraph,
     seq_len_override: Option<u64>,
-) -> anyhow::Result<(AiGraph, std::collections::HashSet<(hologram_ai_common::TensorId, usize)>)> {
+) -> anyhow::Result<(
+    AiGraph,
+    std::collections::HashSet<(hologram_ai_common::TensorId, usize)>,
+)> {
     use hologram_ai_common::Dim;
 
     // Use override if provided, otherwise extract from model metadata.

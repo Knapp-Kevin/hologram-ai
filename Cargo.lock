@@ -916,6 +916,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hologram-cascade"
+version = "0.4.1"
+dependencies = [
+ "blake3",
+ "hologram-archive",
+ "hologram-core",
+ "hologram-exec",
+ "hologram-graph",
+ "smallvec",
+ "uor-foundation",
+]
+
+[[package]]
 name = "hologram-cli"
 version = "0.4.1"
 dependencies = [
@@ -935,10 +948,13 @@ dependencies = [
 name = "hologram-compiler"
 version = "0.4.1"
 dependencies = [
+ "blake3",
  "hologram-archive",
+ "hologram-cascade",
  "hologram-core",
  "hologram-graph",
  "rayon",
+ "uor-foundation",
 ]
 
 [[package]]
@@ -2788,9 +2804,23 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "uor-foundation"
-version = "0.1.1"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fff0509ed9b1968543e51c952c0221c389d830d559376f03833f9b94fe9fc8ad"
+checksum = "7288701324f04949c717eb0d3947a396829699b10d896463e646628f0156bf26"
+dependencies = [
+ "uor-foundation-macros",
+]
+
+[[package]]
+name = "uor-foundation-macros"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46799b53869e7321d93b4b14624ba987823e6a1edfa5783409e65f621a59ade2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "ureq"

@@ -653,6 +653,27 @@ See Plan 057 for full session summary.
 - [ ] Mixed-precision attention — FP8 scores + f32 softmax (future, needs FP8 dtype)
 - [ ] Calibration-based precision assignment — measurement-driven, not search (future)
 
+### Host-facing metadata (Plan 060)
+Bake host-facing fields (chat template, sampling defaults, port names,
+model card) into a new `HostMetaSection`, sibling to `ModelMetaSection`.
+Closes the documented papercut where chat models require users to type
+the full chat template into `--prompt` on every invocation. Two-repo
+change: hologram base lands the section type (Phase 1), hologram-ai lands
+manifest extension + CLI flags + writer + `info` printer + GGUF v3
+auto-population (Phases 2–4). hologram base reader-side wiring is a
+follow-up that fully closes the papercut.
+- [ ] Phase 1 (hologram base): `host_meta.rs` rkyv struct + `SECTION_HOST_META` kind
+- [ ] Phase 2: extend TOML `Manifest` with `[host]`, add `--prompt-template`/
+  `--chat-template`/`--temperature`/`--top-k`/`--top-p`/`--repetition-penalty`/
+  `--license`/`--author`/`--source-url`/`--tag` flags, write section during compile
+- [ ] Phase 3: `holo info` prints "Host metadata" block
+- [ ] Phase 4: GGUF v3 importer auto-populates `chat_template` from
+  `tokenizer.chat_template` key
+- [ ] Phase 5 (follow-up, separate plan in hologram base): `run_cmd.rs` reads
+  `HostMetaSection` and applies `chat_template` automatically
+- [ ] schemars-generated `specs/schemas/manifest.schema.json` checked in
+- [ ] Round-trip + precedence + GGUF auto-population conformance tests
+
 ### Architecture
 - [x] Simplify post-concretization pipeline — extracted shared
   `post_concretization_repair()` with early convergence detection

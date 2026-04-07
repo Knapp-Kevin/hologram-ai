@@ -948,10 +948,8 @@ fn resolve_op(
                 .and_then(|tid| tensor_info.get(tid))
                 .and_then(|info| info.known_i64_values.as_ref())
                 .and_then(|vals| {
-                    let concrete: Vec<u32> = vals
-                        .iter()
-                        .filter_map(|v| v.map(|x| x as u32))
-                        .collect();
+                    let concrete: Vec<u32> =
+                        vals.iter().filter_map(|v| v.map(|x| x as u32)).collect();
                     if concrete.len() == vals.len() {
                         Some(concrete)
                     } else {
