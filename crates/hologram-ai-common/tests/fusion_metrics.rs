@@ -86,8 +86,13 @@ fn op_counts(graph: &AiGraph) -> HashMap<String, usize> {
     counts
 }
 
-/// Tensor IDs and dimensions for a single FFN block, grouped into one struct
-/// so the test helper doesn't trip `clippy::too_many_arguments`.
+/// Tensor IDs and dimensions for a single FFN block.
+///
+/// Uses the Rust builder pattern so the test helper doesn't take ten
+/// positional arguments: [`FfnBlockSpec::new`] fixes the five weight
+/// tensor IDs + the two dimensions, and the intermediate tensor/node ID
+/// bases default to 100 / 0 and can be overridden via
+/// [`Self::with_base_tid`] / [`Self::with_base_node_id`].
 struct FfnBlockSpec {
     hidden_tid: u32,
     norm_weight_tid: u32,
@@ -101,6 +106,43 @@ struct FfnBlockSpec {
     base_node_id: u32,
     hidden_dim: usize,
     ffn_dim: usize,
+}
+
+impl FfnBlockSpec {
+    /// New spec with the five weight tensor IDs and the FFN shape. The
+    /// `base_tid` (first intermediate tensor ID) defaults to `100` and
+    /// `base_node_id` defaults to `0`.
+    fn new(
+        hidden_tid: u32,
+        norm_weight_tid: u32,
+        w_gate_tid: u32,
+        w_up_tid: u32,
+        w_down_tid: u32,
+        hidden_dim: usize,
+        ffn_dim: usize,
+    ) -> Self {
+        Self {
+            hidden_tid,
+            norm_weight_tid,
+            w_gate_tid,
+            w_up_tid,
+            w_down_tid,
+            base_tid: 100,
+            base_node_id: 0,
+            hidden_dim,
+            ffn_dim,
+        }
+    }
+
+    fn with_base_tid(mut self, base_tid: u32) -> Self {
+        self.base_tid = base_tid;
+        self
+    }
+
+    fn with_base_node_id(mut self, base_node_id: u32) -> Self {
+        self.base_node_id = base_node_id;
+        self
+    }
 }
 
 /// Build a single transformer FFN block:
@@ -254,17 +296,9 @@ fn ffn_block_swiglu_projection_fusion() {
 
     let (ffn_out, _) = build_ffn_block(
         &mut g,
-        FfnBlockSpec {
-            hidden_tid,
-            norm_weight_tid: norm_w_tid,
-            w_gate_tid,
-            w_up_tid,
-            w_down_tid,
-            base_tid: 100,
-            base_node_id: 0,
-            hidden_dim,
-            ffn_dim,
-        },
+        FfnBlockSpec::new(
+            hidden_tid, norm_w_tid, w_gate_tid, w_up_tid, w_down_tid, hidden_dim, ffn_dim,
+        ),
     );
     g.outputs = vec![ffn_out];
 
@@ -408,17 +442,17 @@ fn multi_layer_ffn_fusion_scaling() {
 
         let (out, nid) = build_ffn_block(
             &mut g,
-            FfnBlockSpec {
-                hidden_tid: current_hidden,
-                norm_weight_tid: norm_w,
-                w_gate_tid: w_gate,
-                w_up_tid: w_up,
-                w_down_tid: w_down,
-                base_tid: next_tid,
-                base_node_id: next_nid,
+            FfnBlockSpec::new(
+                current_hidden,
+                norm_w,
+                w_gate,
+                w_up,
+                w_down,
                 hidden_dim,
                 ffn_dim,
-            },
+            )
+            .with_base_tid(next_tid)
+            .with_base_node_id(next_nid),
         );
         next_tid += 10;
         next_nid = nid;

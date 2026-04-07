@@ -733,17 +733,13 @@ pub fn lower(
                         builder = builder.conv2d_lut_4bit(
                             ConstantData::Bytes(lut_result.serialized_weights),
                             &input_idxs,
-                            *kernel_h,
-                            *kernel_w,
-                            *stride_h,
-                            *stride_w,
-                            *pad_h,
-                            *pad_w,
-                            *dilation_h,
-                            *dilation_w,
-                            *group,
-                            *input_h,
-                            *input_w,
+                            hologram::hologram_graph::builder::Conv2dLut4Params::new(
+                                *kernel_h, *kernel_w, *input_h, *input_w,
+                            )
+                            .with_stride(*stride_h, *stride_w)
+                            .with_padding(*pad_h, *pad_w)
+                            .with_dilation(*dilation_h, *dilation_w)
+                            .with_group(*group),
                         );
                         let idx = builder.len() - 1;
                         if let Some(&tid) = node.outputs.first() {
