@@ -184,12 +184,10 @@ pub fn lower(
                     .iter()
                     .filter_map(|d| d.as_concrete().map(|c| c as usize))
                     .collect();
-                // Only quantize if this param is used exclusively as
-                // MatMul/Gemm weight inputs. If used by other ops (Embed,
-                // RmsNorm, etc.), keep the f32 data.
+                // Only quantize weights used exclusively as MatMul/Gemm/fused-op
+                // weight inputs.
                 let used_only_as_matmul_weight = ai_graph.nodes.iter().all(|n| {
                     if let Some(pos) = n.inputs.iter().position(|&t| t == tid) {
-                        // Must be input[1] of MatMul/Gemm/FusedNormProjection
                         match &n.op {
                             AiOp::MatMul | AiOp::Gemm { .. } => pos == 1,
                             AiOp::FusedNormProjection {
@@ -199,10 +197,10 @@ pub fn lower(
                                 pos >= w_start
                             }
                             AiOp::FusedSwiGluProjection => pos == 2,
-                            _ => false, // other ops → don't quantize
+                            _ => false,
                         }
                     } else {
-                        true // not referenced by this node
+                        true
                     }
                 });
                 if dims.len() == 2
@@ -214,13 +212,23 @@ pub fn lower(
                     if let Ok(raw_bytes) = param_bytes_owned(param) {
                         let expected = dims[0] * dims[1] * 4;
                         if raw_bytes.len() == expected {
-                            use hologram::hologram_exec::lut_gemm::quantize::quantize_4bit;
+                            use hologram::hologram_exec::lut_gemm::quantize::{quantize_4bit, dequantize_error_q4};
                             let f32_weights: Vec<f32> = raw_bytes
                                 .chunks_exact(4)
                                 .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
                                 .collect();
                             let qw4 = quantize_4bit(&f32_weights, dims[0] as u32, dims[1] as u32);
-                            if let Ok(serialized) = rkyv::to_bytes::<rkyv::rancor::Error>(&qw4) {
+                            let rel_err = dequantize_error_q4(&f32_weights, &qw4);
+                            // Skip Q4 if relative error > 15% — quality guard.
+                            if rel_err > 0.15 {
+                                tracing::debug!(
+                                    tid,
+                                    rows = dims[0],
+                                    cols = dims[1],
+                                    rel_err,
+                                    "early-quant: skipping Q4 (error too high)"
+                                );
+                            } else if let Ok(serialized) = rkyv::to_bytes::<rkyv::rancor::Error>(&qw4) {
                                 early_quant_bytes.insert(tid, serialized.to_vec());
                                 tracing::debug!(
                                     tid,
@@ -898,7 +906,8 @@ pub fn lower(
                     let norm_dtype = input_float_dtype(node.inputs.first(), &ai_graph.tensor_info);
                     builder = builder.set_node_dtype(norm_idx, norm_dtype);
 
-                    // Collect attention dims for Q4 eligibility (same as FloatNeedsShape path).
+                    // Collect attention dims (unused now — eligibility check at
+                    // registration time already skips attention weights).
                     let _proj_attn_dims: Vec<usize> = ai_graph
                         .nodes
                         .iter()

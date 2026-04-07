@@ -78,6 +78,11 @@ pub struct RunArgs {
     /// Number of draft tokens per speculative decode cycle (default: 4).
     #[arg(long, default_value = "4")]
     pub draft_steps: usize,
+    /// Stop generation when the decoded output ends with this string. Can be
+    /// passed multiple times for multiple stop sequences. The EOS token from
+    /// the tokenizer is always a stop condition in addition to these.
+    #[arg(long = "stop", value_name = "STRING")]
+    pub stop: Vec<String>,
 }
 
 // ── KV cache config parsing ───────────────────────────────────────────────
@@ -180,6 +185,7 @@ pub fn execute(args: RunArgs) -> anyhow::Result<()> {
             kv_wht: args.kv_wht,
             speculative: args.speculative,
             draft_steps: args.draft_steps,
+            stop: args.stop.clone(),
         };
         run_generation(&runner, tok, prompt, &gen_config, model_meta.as_ref())?;
     } else {
@@ -220,6 +226,7 @@ struct GenerationConfig {
     kv_wht: bool,
     speculative: bool,
     draft_steps: usize,
+    stop: Vec<String>,
 }
 
 // ── Sequence mode ─────────────────────────────────────────────────────────
@@ -511,10 +518,19 @@ fn run_generation(
         print!("{new_text}");
         std::io::stdout().flush().ok();
 
+        // Stop if the decoded output ends with any user-provided stop string.
+        // The stop string is not stripped from output; the user sees it and
+        // can split on it in post-processing.
+        if !config.stop.is_empty()
+            && config.stop.iter().any(|s| !s.is_empty() && full.ends_with(s))
+        {
+            break;
+        }
+
         let step_ms = step_start.elapsed().as_secs_f64() * 1000.0;
         if step == 0 {
             let ttft_ms = start.elapsed().as_secs_f64() * 1000.0;
-            info!("\n[TTFT {ttft_ms:.0}ms | prefill {step_ms:.1}ms]");
+            debug!("TTFT {ttft_ms:.0}ms | prefill {step_ms:.1}ms");
             decode_start = Some(std::time::Instant::now());
 
             // Speculative decode: after prefill, switch to speculative loop.
@@ -546,6 +562,7 @@ fn run_generation(
                         break;
                     }
 
+                    let mut hit_stop = false;
                     for &tok in &result.accepted_tokens {
                         if tok == encoder.eos_id() {
                             // Stream what we have, then stop.
@@ -558,12 +575,22 @@ fn run_generation(
                         print!("{new_text}");
                         std::io::stdout().flush().ok();
                         speculative_tokens += 1;
+                        if !config.stop.is_empty()
+                            && config
+                                .stop
+                                .iter()
+                                .any(|s| !s.is_empty() && full.ends_with(s))
+                        {
+                            hit_stop = true;
+                            break;
+                        }
                     }
 
-                    if result
-                        .accepted_tokens
-                        .iter()
-                        .any(|&t| t == encoder.eos_id())
+                    if hit_stop
+                        || result
+                            .accepted_tokens
+                            .iter()
+                            .any(|&t| t == encoder.eos_id())
                     {
                         break;
                     }
@@ -577,8 +604,8 @@ fn run_generation(
                 );
                 break; // exit the standard decode loop
             }
-        } else if step < 5 || config.verbose {
-            info!("[step {step}: {step_ms:.1}ms]");
+        } else if config.verbose {
+            debug!("step {step}: {step_ms:.1}ms");
         }
     }
 
@@ -593,8 +620,8 @@ fn run_generation(
     } else {
         0.0
     };
-    info!(
-        "\n[{generated} tokens | TTFT {:.0}ms | decode {decode_tokens} tok in {decode_elapsed:.2}s ({decode_tok_s:.1} tok/s) | weights {}]",
+    println!(
+        "\n\n[{generated} tokens | TTFT {:.0}ms | decode {decode_tokens} tok in {decode_elapsed:.2}s ({decode_tok_s:.1} tok/s) | weights {}]",
         start.elapsed().as_secs_f64() * 1000.0 - decode_elapsed * 1000.0,
         format_bytes(runner.plan().weights().len() as u64),
     );

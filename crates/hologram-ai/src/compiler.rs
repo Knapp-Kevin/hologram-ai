@@ -292,10 +292,8 @@ impl ModelCompiler {
             let (prefill_graph, seq_dim_positions) =
                 concretize_all_dims(ai_graph, self.seq_len_override)
                     .context("prefill concretization failed")?;
-            let prefill_graph = post_concretization_repair(prefill_graph)?;
-            // TODO(Plan 045): zero seq-dependent i64 values in shape constants
-            // for Reshape/Expand to support prompt > compiled seq_len.
-            let _ = &seq_dim_positions;
+            let mut prefill_graph = post_concretization_repair(prefill_graph)?;
+            zero_seq_dims_for_lowering(&mut prefill_graph, &seq_dim_positions);
             log_post_repair_diagnostics(&prefill_graph);
             let errs = prefill_graph.validate();
             if !errs.is_empty() {
@@ -390,10 +388,8 @@ impl ModelCompiler {
             let (ai_graph, seq_dim_positions) =
                 concretize_all_dims(ai_graph, self.seq_len_override)
                     .context("shape concretization failed")?;
-            let ai_graph = post_concretization_repair(ai_graph)?;
-            // TODO(Plan 045): zero seq-dependent i64 values in shape constants
-            // for Reshape/Expand to support prompt > compiled seq_len.
-            let _ = &seq_dim_positions;
+            let mut ai_graph = post_concretization_repair(ai_graph)?;
+            zero_seq_dims_for_lowering(&mut ai_graph, &seq_dim_positions);
             log_post_repair_diagnostics(&ai_graph);
             let errs = ai_graph.validate();
             if !errs.is_empty() {
@@ -482,9 +478,8 @@ impl ModelCompiler {
                 .context("shape concretization failed")?;
 
         // Post-concretization repair (same as compile()).
-        let ai_graph = post_concretization_repair(ai_graph)?;
-        // TODO(Plan 045): zero seq-dependent i64 values in shape constants
-        let _ = &seq_dim_positions;
+        let mut ai_graph = post_concretization_repair(ai_graph)?;
+        zero_seq_dims_for_lowering(&mut ai_graph, &seq_dim_positions);
 
         // Validate.
         let errs = ai_graph.validate();
@@ -583,9 +578,9 @@ impl ModelCompiler {
         let (ai_graph, seq_dim_positions) =
             concretize_all_dims(ai_graph, self.seq_len_override)
                 .context("shape concretization failed")?;
-        let _ = &seq_dim_positions; // used only in main compile path
 
-        let ai_graph = post_concretization_repair(ai_graph)?;
+        let mut ai_graph = post_concretization_repair(ai_graph)?;
+        zero_seq_dims_for_lowering(&mut ai_graph, &seq_dim_positions);
 
         let errs = ai_graph.validate();
         if !errs.is_empty() {
@@ -1701,6 +1696,92 @@ fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGraph> 
     Ok(ai_graph)
 }
 
+/// Zero seq-dependent dimensions in shape tensor constants for lowering.
+///
+/// After `post_concretization_repair` all dims are concrete, which means
+/// Reshape/Expand ops bake the compiled seq length into their target shapes.
+/// This pass zeroes seq-dependent values in `known_i64_values` so the
+/// lowering emits 0-sentinels that the runtime resolves from buffer sizes.
+///
+/// Two categories:
+/// - **Reshape/Flatten outputs**: zero `known_i64_values[axis]` so
+///   `infer_reshape_shape` emits 0-sentinels in the target shape.
+/// - **Expand shape inputs**: zero `known_i64_values[axis]` on input\[1\]
+///   so `resolve_op` emits 0-sentinels in `target_shape`.
+///
+/// MatMul/Softmax/RmsNorm/LayerNorm are NOT modified here — their baked
+/// sizes are overridden at runtime via ShapeContextGraph + `input_metas`.
+/// Setting their tensor shapes to Dynamic would remove them from the shape
+/// context graph seeds (builder.rs filters `shape.contains(&0)`), breaking
+/// runtime shape resolution.
+fn zero_seq_dims_for_lowering(
+    graph: &mut AiGraph,
+    seq_dim_positions: &std::collections::HashSet<(hologram_ai_common::TensorId, usize)>,
+) {
+    use hologram_ai_common::AiOp;
+
+    if seq_dim_positions.is_empty() {
+        return;
+    }
+
+    // ── Collect pass: gather mutations without borrowing tensor_info mutably ──
+    let mut reshape_zeros: Vec<(hologram_ai_common::TensorId, usize)> = Vec::new();
+    let mut expand_zeros: Vec<(hologram_ai_common::TensorId, usize)> = Vec::new();
+
+    for node in &graph.nodes {
+        match &node.op {
+            AiOp::Reshape { .. } | AiOp::Flatten { .. } => {
+                if let Some(&out_tid) = node.outputs.first() {
+                    for &(tid, axis) in seq_dim_positions {
+                        if tid == out_tid {
+                            reshape_zeros.push((tid, axis));
+                        }
+                    }
+                }
+            }
+            AiOp::Expand => {
+                let out_tid = node.outputs.first().copied();
+                let shape_tid = node.inputs.get(1).copied();
+                if let (Some(out), Some(shape_in)) = (out_tid, shape_tid) {
+                    for &(tid, axis) in seq_dim_positions {
+                        if tid == out {
+                            expand_zeros.push((shape_in, axis));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ── Apply pass: mutate tensor_info ──────────────────────────────────────
+    let mut zeroed_i64 = 0usize;
+
+    for (tid, axis) in reshape_zeros {
+        if let Some(info) = graph.tensor_info.get_mut(&tid) {
+            if let Some(ref mut vals) = info.known_i64_values {
+                if axis < vals.len() {
+                    vals[axis] = Some(0);
+                    zeroed_i64 += 1;
+                }
+            }
+        }
+    }
+
+    for (tid, axis) in expand_zeros {
+        if let Some(info) = graph.tensor_info.get_mut(&tid) {
+            if let Some(ref mut vals) = info.known_i64_values {
+                if axis < vals.len() {
+                    vals[axis] = Some(0);
+                    zeroed_i64 += 1;
+                }
+            }
+        }
+    }
+
+    debug!(zeroed_i64, "zero_seq_dims_for_lowering complete");
+}
+
 /// Concretize all symbolic and dynamic dimensions in the graph.
 ///
 /// ALL dims become concrete at compile time. No 0-sentinels, no runtime
@@ -2078,6 +2159,10 @@ pub struct HoloRunner {
     /// When present, `execute_with_kv` switches to this after step 0.
     decode_plan: Option<hologram::LoadedPlan>,
     decode_tape: Option<hologram::hologram_exec::tape::EnumTape>,
+    /// Pre-computed shape overrides for decode (seq=1). Extracted from the
+    /// compiled node_shapes at load time — no walk_shape_context needed per
+    /// step. Provides input_metas that Q4 LUT-GEMM kernels require.
+    decode_shape_map: std::collections::HashMap<u32, Vec<usize>>,
     /// Optional verification model (third component in LLM pipeline archives).
     /// Compiled at seq=N for batch speculative decoding verification.
     verify_plan: Option<hologram::LoadedPlan>,
@@ -2291,6 +2376,20 @@ impl HoloRunner {
                 (None, None)
             };
 
+            // Pre-compute decode shape map from the compiled graph's node_shapes.
+            // The decode graph has fully concrete shapes (seq=1), so these
+            // are exact — no runtime resolution needed.
+            let decode_shape_map = decode_plan
+                .as_ref()
+                .map(|dp| {
+                    dp.graph()
+                        .node_shapes
+                        .iter()
+                        .map(|(nid, shape)| (nid.index(), shape.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
             let runner = Self {
                 _storage: storage,
                 plan,
@@ -2298,6 +2397,7 @@ impl HoloRunner {
                 tape,
                 decode_plan,
                 decode_tape,
+                decode_shape_map,
                 verify_plan,
                 verify_tape,
                 weight_cache: parking_lot::RwLock::new(hologram::WeightCache::new()),
@@ -2329,6 +2429,7 @@ impl HoloRunner {
                 tape,
                 decode_plan: None,
                 decode_tape: None,
+                decode_shape_map: std::collections::HashMap::new(),
                 verify_plan: None,
                 verify_tape: None,
                 weight_cache: parking_lot::RwLock::new(hologram::WeightCache::new()),
@@ -2433,13 +2534,21 @@ impl HoloRunner {
     /// seq=1, making each decode step ~Nx faster than running the full prefill graph.
     ///
     /// For single-graph archives: uses the same tape for all steps.
+    ///
+    /// Single execution path for all steps (prefill + decode).
+    ///
+    /// Always uses `execute_tape_with_kv_shapes_cached` with shape overrides.
+    /// - **Prefill**: resolves shapes at runtime via `walk_shape_context` for
+    ///   variable-length prompt support.
+    /// - **Decode**: uses pre-computed `decode_shape_map` (constant at seq=1,
+    ///   no walk needed). Provides input_metas that LUT-GEMM kernels require.
     pub fn execute_with_kv(
         &self,
         inputs: &hologram::GraphInputs,
         kv_state: &mut hologram::KvCacheState,
     ) -> anyhow::Result<hologram::GraphOutputs> {
-        // Use decode tape/plan for decode steps (write_pos > 0) when available.
-        let (tape, plan) = if kv_state.write_pos() > 0 {
+        let is_decode = kv_state.write_pos() > 0;
+        let (tape, plan) = if is_decode {
             if let (Some(ref dt), Some(ref dp)) = (&self.decode_tape, &self.decode_plan) {
                 (dt, dp)
             } else {
@@ -2449,27 +2558,27 @@ impl HoloRunner {
             (&self.tape, &self.plan)
         };
 
-        if let Some(ref ctx) = self.shape_ctx {
-            let shape_map = self.resolve_shapes(ctx, plan, inputs);
-            hologram::execute_tape_with_kv_shapes_cached(
-                tape,
-                plan,
-                inputs,
-                kv_state,
-                &shape_map,
-                &self.weight_cache,
-            )
-            .map_err(|e| anyhow::anyhow!("{e}"))
+        // Prefill: walk shape context for variable-length support.
+        // Decode: use pre-computed shape map (no walk overhead).
+        let shape_map = if !is_decode {
+            if let Some(ref ctx) = self.shape_ctx {
+                self.resolve_shapes(ctx, plan, inputs)
+            } else {
+                std::collections::HashMap::new()
+            }
         } else {
-            hologram::execute_tape_with_kv_cached(
-                tape,
-                plan,
-                inputs,
-                kv_state,
-                &self.weight_cache,
-            )
-            .map_err(|e| anyhow::anyhow!("{e}"))
-        }
+            self.decode_shape_map.clone()
+        };
+
+        hologram::execute_tape_with_kv_shapes_cached(
+            tape,
+            plan,
+            inputs,
+            kv_state,
+            &shape_map,
+            &self.weight_cache,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// Whether this runner has a separate decode model for fast autoregressive generation.

@@ -103,10 +103,11 @@ fn main() -> anyhow::Result<()> {
                 Some("q2_0" | "Q2_0") => hologram_ai_common::lower::QuantStrategy::Q2_0,
                 Some("q4_0" | "Q4_0") => hologram_ai_common::lower::QuantStrategy::Q4_0,
                 Some("q8_0" | "Q8_0") => hologram_ai_common::lower::QuantStrategy::Q8_0,
+                Some("none" | "f32") => hologram_ai_common::lower::QuantStrategy::Auto,
                 Some(other) => anyhow::bail!(
-                    "unsupported quantization scheme '{other}' (supported: q2_0, q4_0, q8_0)"
+                    "unsupported quantization scheme '{other}' (supported: q2_0, q4_0, q8_0, none)"
                 ),
-                None => hologram_ai_common::lower::QuantStrategy::Auto,
+                None => hologram_ai_common::lower::QuantStrategy::Q4_0,
             };
             let compiler = ModelCompiler {
                 seq_len_override: seq_len,
