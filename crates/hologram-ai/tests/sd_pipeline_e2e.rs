@@ -272,13 +272,17 @@ fn sd_pipeline_generates_image() {
     eprintln!("tokenized: {} tokens", token_ids.len());
 
     // ── Step 2: Text Encoder ──────────────────────────────────────────────
-    // Prefer Q8 variant if available (faster via fused dequant-matmul).
-    let te_path = if text_encoder_q8_holo().exists() {
-        eprintln!("using Q8 text encoder");
-        text_encoder_q8_holo()
-    } else {
-        text_encoder_holo()
-    };
+    // Prefer the f32 variant. The Q8 path is currently broken for CLIP —
+    // observed during Plan 061 Stage A investigation: the Q8 archive
+    // produces output of shape [3696, 768] instead of [77, 768] (48× on
+    // the seq axis) with magnitudes in [-28, +33] vs the expected [-5, +5]
+    // range. Separately, the Q8 archive is *larger* than f32 (578 MB vs
+    // 493 MB) which suggests the quantization lowering is emitting extra
+    // per-layer data. Tracked as a follow-up — not on Stage A's critical
+    // path because correctness > performance until the pipeline produces
+    // a recognizable image.
+    let te_path = text_encoder_holo();
+    eprintln!("using f32 text encoder (Q8 path is broken — see Plan 061)");
     let (_te_loader, te_plan, te_tape) = load_model(&te_path);
     let mut te_inputs = hologram::GraphInputs::new();
     te_inputs.set_with_shape(0, token_bytes, vec![1, 77]);
@@ -304,7 +308,13 @@ fn sd_pipeline_generates_image() {
     eprintln!("  min={hs_min:.4} max={hs_max:.4} mean={hs_mean:.6}");
 
     // ── Step 3: UNet Denoising Loop ───────────────────────────────────────
-    let (_unet_loader, unet_plan, unet_tape) = load_model(&unet_holo());
+    let (_unet_loader, unet_plan, mut unet_tape) = load_model(&unet_holo());
+    // Enable runtime buffer eviction on the UNet tape. Without this, the
+    // executor pre-allocates ~20 GiB of activation buffers up front for
+    // the SD v1.5 UNet's 2400 nodes — even though the actual live working
+    // set is ~3 GiB. With eviction, peak memory tracks the live set.
+    // (See hologram base commits c82ea30 + d623d3f for the mechanism.)
+    unet_tape.checkpoint_enabled = true;
 
     let n_steps = 10; // 10 DDIM steps — balance between quality and speed.
     let alpha_bars = ddpm_alpha_bars();
