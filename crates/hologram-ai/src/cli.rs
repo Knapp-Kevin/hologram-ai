@@ -53,6 +53,45 @@ enum Command {
         /// Supported: q2_0 (2-bit, 4 centroids), q4_0 (4-bit, 16 centroids), q8_0 (8-bit, 256 centroids).
         #[arg(long, value_name = "SCHEME")]
         quantize: Option<String>,
+
+        // ── Host metadata flags (Plan 060) ───────────────────────────────
+        // All flags are optional. Manifest `[host]` values take precedence
+        // over flags. Omitting all of these and having no manifest `[host]`
+        // table means no `HostMetaSection` is written.
+        /// Single-turn prompt template, e.g. `"<|user|>{prompt}<|assistant|>"`.
+        #[arg(long, value_name = "TEMPLATE")]
+        prompt_template: Option<String>,
+        /// Jinja-style multi-turn chat template. Often auto-populated from
+        /// GGUF v3 `tokenizer.chat_template` at import time.
+        #[arg(long, value_name = "TEMPLATE")]
+        chat_template: Option<String>,
+        /// Default sampling temperature (f32).
+        #[arg(long, value_name = "F32")]
+        temperature: Option<f32>,
+        /// Default top-k sampling cutoff.
+        #[arg(long, value_name = "N")]
+        top_k: Option<u32>,
+        /// Default top-p (nucleus) sampling cutoff.
+        #[arg(long, value_name = "F32")]
+        top_p: Option<f32>,
+        /// Default repetition penalty (f32, typically >= 1.0).
+        #[arg(long, value_name = "F32")]
+        repetition_penalty: Option<f32>,
+        /// Stop strings for generation (repeatable).
+        #[arg(long = "stop", value_name = "STR")]
+        stop: Vec<String>,
+        /// Model card: author.
+        #[arg(long, value_name = "NAME")]
+        author: Option<String>,
+        /// Model card: SPDX license identifier.
+        #[arg(long, value_name = "SPDX")]
+        license: Option<String>,
+        /// Model card: source URL (HuggingFace Hub, etc.).
+        #[arg(long, value_name = "URL")]
+        source_url: Option<String>,
+        /// Model card: tags (repeatable).
+        #[arg(long = "tag", value_name = "TAG")]
+        tag: Vec<String>,
     },
     /// Run a compiled `.holo` archive with shape-aware inference.
     Run(hologram_ai::commands::run_cmd::RunArgs),
@@ -88,15 +127,40 @@ fn main() -> anyhow::Result<()> {
             tokenizer,
             seq_len,
             quantize,
+            prompt_template,
+            chat_template,
+            temperature,
+            top_k,
+            top_p,
+            repetition_penalty,
+            stop,
+            author,
+            license,
+            source_url,
+            tag,
         } => {
-            let (source, model_path, manifest_kind) = if let Some(manifest_path) = &manifest {
-                let (source, kind) = parse_manifest(manifest_path)?;
-                (source, manifest_path.clone(), kind)
-            } else {
-                let model_path = model.as_ref().expect("--model or --manifest required");
-                let source = model_source_from_path(model_path)?;
-                (source, model_path.clone(), None)
+            let host_cli = HostMetaCliArgs {
+                prompt_template,
+                chat_template,
+                temperature,
+                top_k,
+                top_p,
+                repetition_penalty,
+                stop,
+                author,
+                license,
+                source_url,
+                tags: tag,
             };
+            let (source, model_path, manifest_kind, manifest_host) =
+                if let Some(manifest_path) = &manifest {
+                    let (source, kind, host) = parse_manifest(manifest_path)?;
+                    (source, manifest_path.clone(), kind, host)
+                } else {
+                    let model_path = model.as_ref().expect("--model or --manifest required");
+                    let source = model_source_from_path(model_path)?;
+                    (source, model_path.clone(), None, None)
+                };
 
             let quant_strategy = match quantize.as_deref() {
                 Some("q2_0" | "Q2_0") => hologram_ai_common::lower::QuantStrategy::Q2_0,
@@ -180,6 +244,18 @@ fn main() -> anyhow::Result<()> {
                 );
                 final_bytes =
                     hologram_ai::compiler::rebuild_archive_with_section(&final_bytes, &section)?;
+            }
+
+            // Embed host metadata section if any fields are populated (Plan 060).
+            // Precedence: manifest [host] > CLI flags. A future phase adds
+            // GGUF v3 auto-population as a third source (lowest priority).
+            let host_section = build_host_meta(&host_cli, manifest_host.as_ref(), None);
+            if !host_section.is_empty() {
+                final_bytes = hologram_ai::compiler::rebuild_archive_with_section(
+                    &final_bytes,
+                    &host_section,
+                )?;
+                eprintln!("embedded host metadata section");
             }
 
             std::fs::write(&holo_path, &final_bytes)?;
@@ -284,6 +360,10 @@ struct Manifest {
     component: Vec<ManifestComponent>,
     #[serde(default)]
     connection: Vec<ManifestConnection>,
+    /// Optional host-facing metadata (prompt/chat template, sampling
+    /// defaults, model card). See `HostMetaManifest` for fields.
+    #[serde(default)]
+    host: Option<HostMetaManifest>,
 }
 
 #[derive(serde::Deserialize)]
@@ -298,6 +378,40 @@ struct ManifestComponent {
 struct ManifestConnection {
     from: String,
     to: String,
+}
+
+/// `[host]` table in a TOML manifest — the manifest-level counterpart to
+/// `HostMetaSection`. All fields optional.
+#[derive(Default, serde::Deserialize)]
+struct HostMetaManifest {
+    prompt_template: Option<String>,
+    chat_template: Option<String>,
+    #[serde(default)]
+    sampling: Option<SamplingManifest>,
+    /// `[host.ports]` — logical name → graph port id.
+    #[serde(default)]
+    ports: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    model_card: Option<ModelCardManifest>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct SamplingManifest {
+    temperature: Option<f32>,
+    top_k: Option<u32>,
+    top_p: Option<f32>,
+    repetition_penalty: Option<f32>,
+    #[serde(default)]
+    stop: Vec<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct ModelCardManifest {
+    author: Option<String>,
+    license: Option<String>,
+    source_url: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 /// Parse a model kind string from a manifest into the hologram ModelKind enum.
@@ -321,6 +435,7 @@ fn parse_manifest(
 ) -> anyhow::Result<(
     ModelSource,
     Option<hologram::hologram_archive::section::model_meta::ModelKind>,
+    Option<HostMetaManifest>,
 )> {
     use anyhow::Context as _;
     use hologram_ai::compiler::ComponentInput;
@@ -331,6 +446,7 @@ fn parse_manifest(
     let manifest: Manifest =
         toml::from_str(&text).with_context(|| format!("parsing manifest {}", path.display()))?;
     let manifest_kind = manifest.kind.as_deref().map(parse_model_kind);
+    let host = manifest.host;
 
     let manifest_dir = path.parent().unwrap_or(std::path::Path::new("."));
 
@@ -379,6 +495,7 @@ fn parse_manifest(
             connections,
         },
         manifest_kind,
+        host,
     ))
 }
 
@@ -386,4 +503,344 @@ fn tracing_subscriber_init() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
+}
+
+// ── Host metadata (Plan 060) ─────────────────────────────────────────────────
+
+/// Host metadata values passed via the `compile` subcommand's CLI flags.
+/// Mirrors `HostMetaManifest` but with explicit `Vec`s for repeatable flags.
+#[derive(Default)]
+struct HostMetaCliArgs {
+    prompt_template: Option<String>,
+    chat_template: Option<String>,
+    temperature: Option<f32>,
+    top_k: Option<u32>,
+    top_p: Option<f32>,
+    repetition_penalty: Option<f32>,
+    stop: Vec<String>,
+    author: Option<String>,
+    license: Option<String>,
+    source_url: Option<String>,
+    tags: Vec<String>,
+}
+
+/// Merge host metadata sources into a `HostMetaSection` honoring the
+/// documented precedence order: **manifest > CLI flags > importer
+/// auto-populated > unset**.
+///
+/// `imported_chat_template` is the Phase 4 integration point for GGUF v3
+/// `tokenizer.chat_template` auto-population. It is passed as a plain
+/// argument so that phase 2 can ship before phase 4 lands. Pass `None`
+/// until then.
+fn build_host_meta(
+    cli: &HostMetaCliArgs,
+    manifest: Option<&HostMetaManifest>,
+    imported_chat_template: Option<String>,
+) -> hologram::hologram_archive::section::host_meta::HostMetaSection {
+    use hologram::hologram_archive::section::host_meta::{
+        HostMetaSection, ModelCard, PortBinding, SamplingDefaults, HOST_META_VERSION,
+    };
+
+    // Helper: pick manifest over CLI over fallback.
+    fn pick<T: Clone>(manifest: Option<T>, cli: Option<T>, fallback: Option<T>) -> Option<T> {
+        manifest.or(cli).or(fallback)
+    }
+
+    let (manifest_prompt, manifest_chat, manifest_sampling, manifest_ports, manifest_card) =
+        match manifest {
+            Some(m) => (
+                m.prompt_template.clone(),
+                m.chat_template.clone(),
+                m.sampling.as_ref(),
+                Some(&m.ports),
+                m.model_card.as_ref(),
+            ),
+            None => (None, None, None, None, None),
+        };
+
+    let sampling = {
+        let temperature = pick(
+            manifest_sampling.and_then(|s| s.temperature),
+            cli.temperature,
+            None,
+        );
+        let top_k = pick(manifest_sampling.and_then(|s| s.top_k), cli.top_k, None);
+        let top_p = pick(manifest_sampling.and_then(|s| s.top_p), cli.top_p, None);
+        let repetition_penalty = pick(
+            manifest_sampling.and_then(|s| s.repetition_penalty),
+            cli.repetition_penalty,
+            None,
+        );
+        // Stop list: manifest overrides CLI entirely when set (not merged),
+        // mirroring how we treat other fields. Empty vec == not set.
+        let stop = match manifest_sampling {
+            Some(s) if !s.stop.is_empty() => s.stop.clone(),
+            _ => cli.stop.clone(),
+        };
+        if temperature.is_none()
+            && top_k.is_none()
+            && top_p.is_none()
+            && repetition_penalty.is_none()
+            && stop.is_empty()
+        {
+            None
+        } else {
+            Some(SamplingDefaults {
+                temperature,
+                top_k,
+                top_p,
+                repetition_penalty,
+                stop,
+            })
+        }
+    };
+
+    let ports: Vec<PortBinding> = manifest_ports
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| PortBinding {
+                    logical_name: k.clone(),
+                    graph_port: v.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let model_card = {
+        let author = pick(
+            manifest_card.and_then(|c| c.author.clone()),
+            cli.author.clone(),
+            None,
+        );
+        let license = pick(
+            manifest_card.and_then(|c| c.license.clone()),
+            cli.license.clone(),
+            None,
+        );
+        let source_url = pick(
+            manifest_card.and_then(|c| c.source_url.clone()),
+            cli.source_url.clone(),
+            None,
+        );
+        let tags = match manifest_card {
+            Some(c) if !c.tags.is_empty() => c.tags.clone(),
+            _ => cli.tags.clone(),
+        };
+        if author.is_none() && license.is_none() && source_url.is_none() && tags.is_empty() {
+            None
+        } else {
+            Some(ModelCard {
+                author,
+                license,
+                source_url,
+                tags,
+            })
+        }
+    };
+
+    HostMetaSection {
+        version: HOST_META_VERSION,
+        prompt_template: pick(manifest_prompt, cli.prompt_template.clone(), None),
+        chat_template: pick(
+            manifest_chat,
+            cli.chat_template.clone(),
+            imported_chat_template,
+        ),
+        sampling,
+        ports,
+        model_card,
+    }
+}
+
+#[cfg(test)]
+mod host_meta_tests {
+    use super::*;
+    use hologram::hologram_archive::section::host_meta::HostMetaSection;
+
+    #[test]
+    fn empty_inputs_produce_empty_section() {
+        let cli = HostMetaCliArgs::default();
+        let section = build_host_meta(&cli, None, None);
+        assert!(section.is_empty());
+    }
+
+    #[test]
+    fn cli_flags_populate_all_fields() {
+        let cli = HostMetaCliArgs {
+            prompt_template: Some("<|u|>{prompt}<|a|>".into()),
+            chat_template: None,
+            temperature: Some(0.8),
+            top_k: Some(50),
+            top_p: Some(0.9),
+            repetition_penalty: Some(1.2),
+            stop: vec!["</s>".into()],
+            author: Some("me".into()),
+            license: Some("MIT".into()),
+            source_url: Some("https://example.com/model".into()),
+            tags: vec!["test".into()],
+        };
+        let section = build_host_meta(&cli, None, None);
+        assert_eq!(
+            section.prompt_template.as_deref(),
+            Some("<|u|>{prompt}<|a|>")
+        );
+        let s = section.sampling.expect("sampling");
+        assert_eq!(s.temperature, Some(0.8));
+        assert_eq!(s.top_k, Some(50));
+        assert_eq!(s.stop, vec!["</s>".to_string()]);
+        let c = section.model_card.expect("card");
+        assert_eq!(c.author.as_deref(), Some("me"));
+        assert_eq!(c.license.as_deref(), Some("MIT"));
+        assert_eq!(c.tags, vec!["test".to_string()]);
+    }
+
+    #[test]
+    fn manifest_overrides_cli_for_scalars() {
+        let cli = HostMetaCliArgs {
+            prompt_template: Some("cli-template".into()),
+            temperature: Some(0.1),
+            ..Default::default()
+        };
+        let manifest = HostMetaManifest {
+            prompt_template: Some("manifest-template".into()),
+            sampling: Some(SamplingManifest {
+                temperature: Some(0.9),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let section = build_host_meta(&cli, Some(&manifest), None);
+        assert_eq!(
+            section.prompt_template.as_deref(),
+            Some("manifest-template")
+        );
+        assert_eq!(section.sampling.expect("sampling").temperature, Some(0.9),);
+    }
+
+    #[test]
+    fn cli_fills_gap_when_manifest_silent() {
+        let cli = HostMetaCliArgs {
+            temperature: Some(0.1),
+            ..Default::default()
+        };
+        let manifest = HostMetaManifest {
+            prompt_template: Some("manifest-template".into()),
+            sampling: None, // manifest says nothing about sampling
+            ..Default::default()
+        };
+        let section = build_host_meta(&cli, Some(&manifest), None);
+        assert_eq!(
+            section.prompt_template.as_deref(),
+            Some("manifest-template")
+        );
+        assert_eq!(
+            section.sampling.expect("sampling").temperature,
+            Some(0.1), // CLI fills the gap
+        );
+    }
+
+    #[test]
+    fn imported_chat_template_is_lowest_priority() {
+        // Imported value used when nothing else supplies it.
+        let cli = HostMetaCliArgs::default();
+        let section = build_host_meta(&cli, None, Some("imported".into()));
+        assert_eq!(section.chat_template.as_deref(), Some("imported"));
+
+        // CLI beats imported.
+        let cli_with_flag = HostMetaCliArgs {
+            chat_template: Some("cli".into()),
+            ..Default::default()
+        };
+        let section2 = build_host_meta(&cli_with_flag, None, Some("imported".into()));
+        assert_eq!(section2.chat_template.as_deref(), Some("cli"));
+
+        // Manifest beats CLI (which beats imported).
+        let manifest = HostMetaManifest {
+            chat_template: Some("manifest".into()),
+            ..Default::default()
+        };
+        let section3 = build_host_meta(&cli_with_flag, Some(&manifest), Some("imported".into()));
+        assert_eq!(section3.chat_template.as_deref(), Some("manifest"));
+    }
+
+    #[test]
+    fn manifest_stop_list_replaces_cli_stop_list() {
+        let cli = HostMetaCliArgs {
+            stop: vec!["cli-stop".into()],
+            ..Default::default()
+        };
+        let manifest = HostMetaManifest {
+            sampling: Some(SamplingManifest {
+                stop: vec!["manifest-stop-a".into(), "manifest-stop-b".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let section = build_host_meta(&cli, Some(&manifest), None);
+        let s = section.sampling.expect("sampling");
+        assert_eq!(
+            s.stop,
+            vec!["manifest-stop-a".to_string(), "manifest-stop-b".to_string()],
+        );
+    }
+
+    #[test]
+    fn ports_from_manifest_round_trip() {
+        let mut ports = std::collections::BTreeMap::new();
+        ports.insert("logits".to_string(), "output_0".to_string());
+        ports.insert("hidden".to_string(), "output_1".to_string());
+        let manifest = HostMetaManifest {
+            ports,
+            ..Default::default()
+        };
+        let section = build_host_meta(&HostMetaCliArgs::default(), Some(&manifest), None);
+        assert_eq!(section.ports.len(), 2);
+        // BTreeMap iteration is alphabetical, so "hidden" comes before "logits".
+        assert_eq!(section.ports[0].logical_name, "hidden");
+        assert_eq!(section.ports[0].graph_port, "output_1");
+        assert_eq!(section.ports[1].logical_name, "logits");
+        assert_eq!(section.ports[1].graph_port, "output_0");
+    }
+
+    #[test]
+    fn full_cli_path_rkyv_round_trip() {
+        // End-to-end: build a section from CLI flags, serialize to bytes
+        // via the archive-level API, deserialize, and confirm every field
+        // survives the round trip. This catches `EmbeddableSection` impl
+        // regressions that the unit tests in hologram-archive wouldn't
+        // see because they don't exercise the compile-path struct.
+        let cli = HostMetaCliArgs {
+            prompt_template: Some("tmpl".into()),
+            chat_template: Some("{{msg}}".into()),
+            temperature: Some(0.7),
+            top_k: Some(40),
+            top_p: Some(0.95),
+            repetition_penalty: Some(1.3),
+            stop: vec!["</s>".into()],
+            author: Some("ari".into()),
+            license: Some("Apache-2.0".into()),
+            source_url: Some("https://x/y".into()),
+            tags: vec!["chat".into(), "test".into()],
+        };
+        let section = build_host_meta(&cli, None, None);
+        assert!(!section.is_empty());
+
+        use hologram::hologram_archive::section::EmbeddableSection;
+        let bytes = section.to_bytes();
+        let de = HostMetaSection::deserialize_from(&bytes).expect("deserialize");
+
+        assert_eq!(de.prompt_template.as_deref(), Some("tmpl"));
+        assert_eq!(de.chat_template.as_deref(), Some("{{msg}}"));
+        let s = de.sampling.expect("sampling");
+        assert_eq!(s.temperature, Some(0.7));
+        assert_eq!(s.top_k, Some(40));
+        assert_eq!(s.top_p, Some(0.95));
+        assert_eq!(s.repetition_penalty, Some(1.3));
+        assert_eq!(s.stop, vec!["</s>".to_string()]);
+        let c = de.model_card.expect("card");
+        assert_eq!(c.author.as_deref(), Some("ari"));
+        assert_eq!(c.license.as_deref(), Some("Apache-2.0"));
+        assert_eq!(c.source_url.as_deref(), Some("https://x/y"));
+        assert_eq!(c.tags, vec!["chat".to_string(), "test".to_string()]);
+    }
 }

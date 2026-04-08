@@ -657,22 +657,24 @@ See Plan 057 for full session summary.
 Bake host-facing fields (chat template, sampling defaults, port names,
 model card) into a new `HostMetaSection`, sibling to `ModelMetaSection`.
 Closes the documented papercut where chat models require users to type
-the full chat template into `--prompt` on every invocation. Two-repo
-change: hologram base lands the section type (Phase 1), hologram-ai lands
-manifest extension + CLI flags + writer + `info` printer + GGUF v3
-auto-population (Phases 2–4). hologram base reader-side wiring is a
-follow-up that fully closes the papercut.
-- [ ] Phase 1 (hologram base): `host_meta.rs` rkyv struct + `SECTION_HOST_META` kind
-- [ ] Phase 2: extend TOML `Manifest` with `[host]`, add `--prompt-template`/
-  `--chat-template`/`--temperature`/`--top-k`/`--top-p`/`--repetition-penalty`/
-  `--license`/`--author`/`--source-url`/`--tag` flags, write section during compile
-- [ ] Phase 3: `holo info` prints "Host metadata" block
-- [ ] Phase 4: GGUF v3 importer auto-populates `chat_template` from
-  `tokenizer.chat_template` key
+the full chat template into `--prompt` on every invocation.
+- [x] Phase 1 (hologram base): `host_meta.rs` rkyv struct + `SECTION_HOST_META = 0x1003` + 6 tests
+- [x] Phase 2: TOML `Manifest` `[host]` table + `--prompt-template`/`--chat-template`/
+  `--temperature`/`--top-k`/`--top-p`/`--repetition-penalty`/`--stop`/`--author`/
+  `--license`/`--source-url`/`--tag` flags, `build_host_meta()` precedence helper
+  (manifest > CLI > imported), 8 unit tests covering every precedence path
+- [x] Phase 3: `hologram inspect` summary prints "Host metadata" block via new
+  `LoadedPlan::host_meta_from_bytes()`; `sections` detail names kind 4099
+  as `host_meta`. E2E verified against `mini_transformer.onnx`: compile with
+  flags → write → reload → print, all fields round-trip
+- [ ] Phase 4 **DEFERRED**: no GGUF importer exists in the current tree
+  (`ModelSource` only has ONNX variants). Hook is in place —
+  `build_host_meta()` accepts `imported_chat_template: Option<String>`,
+  currently `None`. When a GGUF importer lands it populates that parameter
+  and the precedence rules apply unchanged.
 - [ ] Phase 5 (follow-up, separate plan in hologram base): `run_cmd.rs` reads
   `HostMetaSection` and applies `chat_template` automatically
-- [ ] schemars-generated `specs/schemas/manifest.schema.json` checked in
-- [ ] Round-trip + precedence + GGUF auto-population conformance tests
+- [ ] Backlog: schemars-generated `specs/schemas/manifest.schema.json`
 
 ### Architecture
 - [x] Simplify post-concretization pipeline — extracted shared

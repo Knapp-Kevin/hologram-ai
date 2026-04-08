@@ -164,9 +164,19 @@ that round-trips identically.
 Print the new section under a "Host metadata" block, gracefully omitting
 anything `None`.
 
-### Phase 4 — GGUF importer auto-population
-Read `tokenizer.chat_template` from GGUF v3 metadata if present. Set
-`HostMeta.chat_template` only when not already supplied by manifest/CLI.
+### Phase 4 — GGUF importer auto-population (DEFERRED)
+**Deferred: no GGUF importer exists in the current tree.** `ModelSource`
+only supports `OnnxPath`, `OnnxBytes`, `AiGraph`, and `MultiOnnx`. The
+memory record referencing `hologram-ai-gguf` is stale — the crate does
+not exist in `crates/`.
+
+The integration hook is still in place: `build_host_meta()` accepts an
+`imported_chat_template: Option<String>` parameter, currently passed as
+`None` from the compile path. When a GGUF importer lands, it populates
+that parameter from `tokenizer.chat_template` in the GGUF v3 metadata
+and the precedence rules (manifest > CLI > imported) apply unchanged.
+The `imported_chat_template_is_lowest_priority` unit test already
+verifies this contract against a synthetic imported value.
 
 ### Phase 5 — Follow-up (separate plan in hologram base)
 Wire `run_cmd.rs` to read `HostMetaSection` and apply `chat_template`
