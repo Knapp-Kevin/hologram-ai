@@ -101,29 +101,73 @@ fn sd_text_encoder_executes() {
         }
     };
 
-    // Output: last_hidden_state [1, 77, 768]
+    // ONNX declares two outputs: `last_hidden_state` [1, seq, 768] and
+    // `index` (pooler_output) [batch, 768]. Dump both by name + stats so
+    // we can diagnose the 48× seq-axis bloat bug.
     eprintln!("output count: {}", outputs.len());
-    if let Some((_name, out_bytes)) = outputs.get(0) {
-        let n_floats = out_bytes.len() / 4;
-        let expected = 1 * seq_len * 768;
-        eprintln!("output[0]: {} floats (expected {})", n_floats, expected);
-
-        assert!(
-            n_floats >= expected,
-            "text encoder output too small: expected >= {expected}, got {n_floats}"
-        );
-
-        // Check all finite
-        let floats: &[f32] = if out_bytes.is_empty() {
-            &[]
-        } else {
-            bytemuck::cast_slice(out_bytes)
-        };
-        let finite = floats.iter().filter(|v| v.is_finite()).count();
-        assert_eq!(finite, floats.len(), "output contains non-finite values");
-
-        eprintln!("text encoder: {} output floats, all finite", n_floats);
-    } else {
-        eprintln!("no output at index 0");
+    for i in 0..outputs.len() {
+        if let Some((name, out_bytes)) = outputs.get(i) {
+            let n_floats = out_bytes.len() / 4;
+            let floats: Vec<f32> = out_bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
+                .collect();
+            let mn = floats.iter().cloned().fold(f32::MAX, f32::min);
+            let mx = floats.iter().cloned().fold(f32::MIN, f32::max);
+            let mean = floats.iter().sum::<f32>() / n_floats.max(1) as f32;
+            let finite = floats.iter().filter(|v| v.is_finite()).count();
+            eprintln!(
+                "  [{i}] name={:?} floats={n_floats} finite={finite} min={mn:.4} max={mx:.4} mean={mean:.6}",
+                name
+            );
+        }
     }
+
+    // Lookup graph metadata to cross-reference declared output shapes.
+    let graph = plan.graph();
+    eprintln!("graph output_names: {:?}", graph.output_names);
+    eprintln!("graph output_node_ids: {:?}", graph.output_node_ids);
+
+    // Dump the layer header's declared input/output port shapes.
+    if let Some(lh) = plan.layer_header() {
+        for layer in &lh.layers {
+            eprintln!("layer {:?}:", layer.name);
+            for (i, port) in layer.inputs.iter().enumerate() {
+                eprintln!(
+                    "  input[{i}] name={:?} shape={:?} dtype={}",
+                    port.name,
+                    port.shape,
+                    port.dtype.name()
+                );
+            }
+            for (i, port) in layer.outputs.iter().enumerate() {
+                eprintln!(
+                    "  output[{i}] name={:?} shape={:?} dtype={}",
+                    port.name,
+                    port.shape,
+                    port.dtype.name()
+                );
+            }
+        }
+    } else {
+        eprintln!("no layer header");
+    }
+
+    // The first declared output should be last_hidden_state with 59136 floats.
+    let expected = 1 * seq_len * 768;
+    let last_hidden = outputs
+        .by_name("last_hidden_state")
+        .expect("no last_hidden_state output");
+    let n = last_hidden.len() / 4;
+    eprintln!(
+        "last_hidden_state by_name: {} floats (expected {}, ratio {})",
+        n,
+        expected,
+        n as f64 / expected as f64
+    );
+    assert_eq!(
+        n, expected,
+        "CLIP last_hidden_state should be [1, 77, 768] = {} floats, got {}",
+        expected, n
+    );
 }

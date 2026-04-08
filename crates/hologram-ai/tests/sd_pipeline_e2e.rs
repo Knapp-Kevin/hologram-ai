@@ -291,15 +291,49 @@ fn sd_pipeline_generates_image() {
     let te_outputs = execute(&te_tape, &te_plan, &te_inputs);
     eprintln!("text encoder: {:.2?}", start.elapsed());
 
-    let (_name, hidden_bytes) = te_outputs.get(0).expect("no text encoder output");
+    // Debug: dump ALL text encoder outputs by name + size before picking one.
+    // The ONNX model declares two outputs: `last_hidden_state` [1, seq, 768]
+    // and `index` (pooler) [batch, 768]. If the compiled graph reorders them,
+    // `get(0)` may not be what we want.
+    eprintln!("text encoder outputs: {}", te_outputs.len());
+    for i in 0..te_outputs.len() {
+        if let Some((name, data)) = te_outputs.get(i) {
+            let n_floats = data.len() / 4;
+            let floats: Vec<f32> = data
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
+                .collect();
+            let mn = floats.iter().cloned().fold(f32::MAX, f32::min);
+            let mx = floats.iter().cloned().fold(f32::MIN, f32::max);
+            let mean = floats.iter().sum::<f32>() / n_floats.max(1) as f32;
+            eprintln!(
+                "  [{i}] name={:?} floats={n_floats} min={mn:.4} max={mx:.4} mean={mean:.6}",
+                name
+            );
+        }
+    }
+
+    // Prefer fetching `last_hidden_state` by name rather than by index 0,
+    // so we get the right tensor regardless of compiled graph output order.
+    let hidden_bytes = te_outputs
+        .by_name("last_hidden_state")
+        .or_else(|| te_outputs.get(0).map(|(_, d)| d))
+        .expect("no text encoder output");
     let hidden_states = bytes_to_f32(hidden_bytes);
     let expected_len = 77 * 768;
+    if hidden_states.len() != expected_len {
+        eprintln!(
+            "WARNING: last_hidden_state has {} floats, expected {} ([1, 77, 768]) — ratio {}",
+            hidden_states.len(),
+            expected_len,
+            hidden_states.len() as f64 / expected_len as f64
+        );
+    }
     let clip_len = expected_len.min(hidden_states.len());
     let hidden_77_768: Vec<f32> = hidden_states[..clip_len].to_vec();
-    // Debug: check hidden state statistics
     let hs_min = hidden_77_768.iter().cloned().fold(f32::MAX, f32::min);
     let hs_max = hidden_77_768.iter().cloned().fold(f32::MIN, f32::max);
-    let hs_mean = hidden_77_768.iter().sum::<f32>() / hidden_77_768.len() as f32;
+    let hs_mean = hidden_77_768.iter().sum::<f32>() / hidden_77_768.len().max(1) as f32;
     eprintln!(
         "hidden states: {} floats (using {} for UNet)",
         hidden_states.len(),
