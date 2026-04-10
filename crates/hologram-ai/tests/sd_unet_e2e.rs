@@ -107,7 +107,8 @@ fn sd_unet_onnx_executes() {
     eprintln!("plan loaded, graph nodes: {}", plan.graph().nodes.len());
     eprintln!("weights: {} bytes", plan.weights().len());
 
-    let tape = hologram::build_tape_from_plan(&plan).expect("building execution tape");
+    let mut tape = hologram::build_tape_from_plan(&plan).expect("building execution tape");
+    tape.checkpoint_enabled = true;
 
     // SD v1.5 UNet inputs:
     //   sample:                  [1, 4, 64, 64]  (f32) — noisy latent

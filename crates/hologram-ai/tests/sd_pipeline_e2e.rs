@@ -453,7 +453,14 @@ fn sd_pipeline_generates_image() {
     // Enable activation checkpointing: force-evict skip-connection buffers
     // after first consumer and recompute when distant consumers need them.
     // Trades ~30% extra compute for dramatically lower peak memory (51GB → ~2-3GB).
+    // VAE needs eviction to avoid OOM, but uses Heap-only eviction (no Mmap
+    // promotion). The mmap/munmap syscall overhead per buffer makes Mmap
+    // eviction too slow for VAE's many Conv2d ops. With Heap eviction, freed
+    // Vec memory stays in the allocator's free-list (RSS doesn't drop) but IS
+    // reused by subsequent allocations within the same process — sufficient
+    // for VAE's modest peak live set at spatial_scale=4.
     vae_tape.checkpoint_enabled = true;
+    vae_tape.heap_only_eviction = true;
     // Scale the latent to match VAE's compiled spatial dims.
     // With spatial_scale=4, VAE expects [1, 4, 16, 16] (= 1024 floats).
     // The UNet produces [1, 4, 64, 64] (= 16384 floats), so downsample
