@@ -1701,7 +1701,15 @@ pub mod onnx_builder {
 
     impl Conv2dSpec {
         /// New spec with default `stride = 1` and `pad = 0`.
-        pub fn new(n: usize, ic: usize, h: usize, w: usize, oc: usize, kh: usize, kw: usize) -> Self {
+        pub fn new(
+            n: usize,
+            ic: usize,
+            h: usize,
+            w: usize,
+            oc: usize,
+            kh: usize,
+            kw: usize,
+        ) -> Self {
             Self {
                 n,
                 ic,
@@ -2027,7 +2035,7 @@ pub mod onnx_builder {
         node
     }
 
-    fn build_multi_node_model(
+    pub fn build_multi_node_model(
         nodes: &[Node],
         inputs: &[(&str, &[usize])],
         outputs: &[(&str, &[usize])],

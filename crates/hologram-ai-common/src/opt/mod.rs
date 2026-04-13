@@ -11,6 +11,7 @@ pub mod layernorm_fusion;
 pub mod matmul_activation_fusion;
 pub mod norm_projection_fusion;
 pub mod oracle;
+pub mod patch_prune;
 pub mod pipeline;
 pub mod position_ids_injection;
 pub mod resolve_slice_params;

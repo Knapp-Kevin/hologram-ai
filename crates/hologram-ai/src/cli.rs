@@ -92,6 +92,17 @@ enum Command {
         /// Model card: tags (repeatable).
         #[arg(long = "tag", value_name = "TAG")]
         tag: Vec<String>,
+
+        // ── ViT patch pruning (Plan 063) ─────────────────────────────────
+        /// Patch budget ratio for ViT models (PixelPrune). Controls what
+        /// fraction of image patches the compiled ViT retains. A runtime
+        /// kernel selects the most informative patches before execution.
+        /// Range: (0.0, 1.0]. Default: 0.75. Use `--no-patch-prune` to disable.
+        #[arg(long, value_name = "RATIO")]
+        patch_budget: Option<f32>,
+        /// Disable ViT patch pruning entirely (overrides --patch-budget).
+        #[arg(long)]
+        no_patch_prune: bool,
     },
     /// Run a compiled `.holo` archive with shape-aware inference.
     Run(hologram_ai::commands::run_cmd::RunArgs),
@@ -138,6 +149,8 @@ fn main() -> anyhow::Result<()> {
             license,
             source_url,
             tag,
+            patch_budget,
+            no_patch_prune,
         } => {
             let host_cli = HostMetaCliArgs {
                 prompt_template,
@@ -172,9 +185,15 @@ fn main() -> anyhow::Result<()> {
                 ),
                 None => hologram_ai_common::lower::QuantStrategy::Q4_0,
             };
+            let patch_budget_ratio = if no_patch_prune {
+                None
+            } else {
+                patch_budget.map(Some).unwrap_or(Some(0.75))
+            };
             let compiler = ModelCompiler {
                 seq_len_override: seq_len,
                 quant_strategy,
+                patch_budget_ratio,
                 ..Default::default()
             };
             let compiled = compiler.compile(source)?;

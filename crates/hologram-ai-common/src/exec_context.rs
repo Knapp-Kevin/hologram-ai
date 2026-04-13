@@ -28,6 +28,9 @@ pub const SECTION_SHAPE_RECIPE: u32 = SECTION_CUSTOM_BASE + 0x20;
 /// Section kind for the compile-time shape context graph.
 pub const SECTION_SHAPE_CONTEXT: u32 = SECTION_CUSTOM_BASE + 0x21;
 
+/// Section kind for ViT patch pruning configuration.
+pub const SECTION_PATCH_PRUNE: u32 = SECTION_CUSTOM_BASE + 0x22;
+
 // ── ExecContext trait ───────────────────────────────────────────────────────
 
 /// Typed execution context carried inside a `.holo` archive.
@@ -488,9 +491,86 @@ impl ExecContext for ShapeRecipeSection {
     }
 }
 
+// ── PatchPruneContext ───────────────────────────────────────────────────────
+
+/// Configuration for runtime patch pruning (PixelPrune).
+///
+/// Embedded in the `.holo` archive by the `PatchPruneInjection` compiler pass.
+/// The runtime reads this to know how to preprocess the image input and feed
+/// `kept_indices` to the compiled ViT graph.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct PatchPruneContext {
+    /// Index of the `kept_indices` input in the compiled graph's input list.
+    pub kept_indices_input: u32,
+    /// Index of the pixel input in the compiled graph's input list.
+    pub pixel_input: u32,
+    /// Number of color channels (typically 3).
+    pub channels: u32,
+    /// Patch height in pixels.
+    pub patch_h: u32,
+    /// Patch width in pixels.
+    pub patch_w: u32,
+    /// Total patches in the original grid (grid_h × grid_w).
+    pub total_patches: u32,
+    /// Budget: maximum kept patches (compiled seq_len through the ViT).
+    pub max_kept: u32,
+}
+
+impl PatchPruneContext {
+    fn deserialize_from(bytes: &[u8]) -> anyhow::Result<Self> {
+        let archived = rkyv::access::<rkyv::Archived<Self>, rkyv::rancor::Error>(bytes)
+            .map_err(|e| anyhow::anyhow!("access PatchPruneContext: {e}"))?;
+        let deserialized = rkyv::deserialize::<Self, rkyv::rancor::Error>(archived)
+            .map_err(|e| anyhow::anyhow!("deserialize PatchPruneContext: {e}"))?;
+        Ok(deserialized)
+    }
+}
+
+impl EmbeddableSection for PatchPruneContext {
+    fn section_kind(&self) -> u32 {
+        SECTION_PATCH_PRUNE
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        rkyv::to_bytes::<rkyv::rancor::Error>(self)
+            .map(|b| b.to_vec())
+            .unwrap_or_default()
+    }
+}
+
+impl ExecContext for PatchPruneContext {
+    fn section_id() -> u32 {
+        SECTION_PATCH_PRUNE
+    }
+
+    fn from_context_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
+        Self::deserialize_from(bytes)
+            .map_err(|e| anyhow::anyhow!("deserialize PatchPruneContext: {e}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roundtrip_patch_prune_context() {
+        let ctx = PatchPruneContext {
+            kept_indices_input: 1,
+            pixel_input: 0,
+            channels: 3,
+            patch_h: 16,
+            patch_w: 16,
+            total_patches: 196,
+            max_kept: 147,
+        };
+        let bytes = ctx.to_bytes();
+        let recovered =
+            PatchPruneContext::from_context_bytes(&bytes).expect("deserialization should succeed");
+        assert_eq!(recovered.max_kept, 147);
+        assert_eq!(recovered.total_patches, 196);
+        assert_eq!(recovered.kept_indices_input, 1);
+    }
 
     #[test]
     fn roundtrip_shape_recipe() {

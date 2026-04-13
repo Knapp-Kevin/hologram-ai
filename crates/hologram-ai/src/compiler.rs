@@ -166,6 +166,17 @@ pub struct ModelCompiler {
     /// model at 128×128 resolution, using 16× less activation memory.
     /// Shape propagation derives all downstream dims from the scaled input.
     pub spatial_scale: Option<u32>,
+    /// Patch budget ratio for ViT models (PixelPrune).
+    /// When `Some(ratio)`, the compiler inserts a patch pruning pass that
+    /// rewrites the ViT graph to accept a reduced token sequence of
+    /// `ceil(grid_h × grid_w × ratio)` patches. A runtime pre-processing
+    /// kernel selects the most informative patches via 2D predictive coding
+    /// before the compiled graph runs. Positions are preserved for correct
+    /// positional encoding.
+    ///
+    /// Range: `(0.0, 1.0]`. Default: `Some(0.75)`.
+    /// Set to `None` to disable patch pruning entirely.
+    pub patch_budget_ratio: Option<f32>,
 }
 
 impl Default for ModelCompiler {
@@ -175,6 +186,7 @@ impl Default for ModelCompiler {
             seq_len_override: None,
             spatial_scale: None,
             quant_strategy: hologram_ai_common::lower::QuantStrategy::Auto,
+            patch_budget_ratio: Some(0.75),
         }
     }
 }
@@ -230,8 +242,27 @@ impl ModelCompiler {
                 .output_names
                 .iter()
                 .any(|n| n == "logits" || n == "output");
+        // Detect ViT topology: image-like 4D input feeding a Conv2d with
+        // kernel == stride (patch embedding). Use the ViT pipeline which
+        // includes patch pruning when a budget ratio is configured.
+        let looks_like_vit = !looks_like_causal_lm
+            && ai_graph
+                .input_names
+                .iter()
+                .any(|n| n == "pixel_values" || n == "image" || n == "input_image" || n == "x");
         let pipeline = if looks_like_causal_lm {
             OptPipeline::mvp()
+        } else if looks_like_vit {
+            if let Some(ratio) = self.patch_budget_ratio {
+                info!(
+                    budget_ratio = ratio,
+                    "using ViT pipeline with patch pruning"
+                );
+                OptPipeline::vit(ratio)
+            } else {
+                info!("using ViT pipeline (patch pruning disabled)");
+                OptPipeline::vit(1.0)
+            }
         } else {
             info!("using generic optimization pipeline (no input_ids detected)");
             OptPipeline::generic()
@@ -1173,6 +1204,92 @@ fn compile_one_component(
             .collect();
         ctx.retain_live_nodes(&live_ids);
         lower_out.context.insert(&ctx);
+    }
+
+    // Embed PatchPruneContext if the graph has patch pruning metadata.
+    if let Some(hologram_ai_common::MetaValue::Int(max_kept)) =
+        ai_graph.metadata.get("patch_prune_budget")
+    {
+        let total_patches = ai_graph
+            .metadata
+            .get("patch_prune_grid_patches")
+            .and_then(|v| {
+                if let hologram_ai_common::MetaValue::Int(n) = v {
+                    Some(*n as u32)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        let embed_dim = ai_graph
+            .metadata
+            .get("patch_prune_embed_dim")
+            .and_then(|v| {
+                if let hologram_ai_common::MetaValue::Int(n) = v {
+                    Some(*n as u32)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        // Find the kept_indices input index.
+        let kept_idx = ai_graph
+            .input_names
+            .iter()
+            .position(|n| n == "kept_indices")
+            .unwrap_or(ai_graph.inputs.len().saturating_sub(1)) as u32;
+
+        // Find the pixel input index (first image-like input).
+        let pixel_idx = ai_graph
+            .input_names
+            .iter()
+            .position(|n| n == "pixel_values" || n == "image" || n == "input_image" || n == "x")
+            .unwrap_or(0) as u32;
+
+        // Infer patch size from the Conv2d in the graph.
+        let (patch_h, patch_w) = ai_graph
+            .nodes
+            .iter()
+            .find_map(|n| match &n.op {
+                hologram_ai_common::AiOp::Conv {
+                    kernel_shape,
+                    strides,
+                    ..
+                } if kernel_shape == strides && kernel_shape.len() == 2 => {
+                    Some((kernel_shape[0] as u32, kernel_shape[1] as u32))
+                }
+                _ => None,
+            })
+            .unwrap_or((16, 16));
+
+        // Infer channels from pixel input shape.
+        let channels = ai_graph
+            .tensor_info
+            .get(&ai_graph.inputs[pixel_idx as usize])
+            .and_then(|info| info.shape.get(1)?.as_concrete())
+            .unwrap_or(3) as u32;
+
+        let prune_ctx = hologram_ai_common::PatchPruneContext {
+            kept_indices_input: kept_idx,
+            pixel_input: pixel_idx,
+            channels,
+            patch_h,
+            patch_w,
+            total_patches,
+            max_kept: *max_kept as u32,
+        };
+        lower_out.context.insert(&prune_ctx);
+        let _ = embed_dim; // used for logging context, not stored
+        info!(
+            max_kept,
+            total_patches,
+            patch_h,
+            patch_w,
+            channels,
+            kept_indices_input = kept_idx,
+            "embedded PatchPruneContext in archive"
+        );
     }
 
     let layer_header = build_tensor_port_header(&unpacked.plan, ai_graph);
@@ -2156,6 +2273,10 @@ pub struct HoloRunner {
     /// Persistent weight cache for LUT-GEMM. Deserialized quantized weights
     /// are cached here across execution calls, avoiding per-step rkyv overhead.
     weight_cache: parking_lot::RwLock<hologram::WeightCache>,
+    /// Optional patch pruning configuration (ViT models with PixelPrune).
+    /// When present, `execute()` preprocesses the pixel input to produce
+    /// `kept_indices` before feeding the compiled graph.
+    patch_prune: Option<hologram_ai_common::PatchPruneContext>,
 }
 
 impl HoloRunner {
@@ -2376,6 +2497,8 @@ impl HoloRunner {
                 })
                 .unwrap_or_default();
 
+            let patch_prune = read_patch_prune_from_plan(&plan, model_slice);
+
             let runner = Self {
                 _storage: storage,
                 plan,
@@ -2387,8 +2510,8 @@ impl HoloRunner {
                 verify_plan,
                 verify_tape,
                 weight_cache: parking_lot::RwLock::new(hologram::WeightCache::new()),
+                patch_prune,
             };
-            // Pre-warm dequant cache so decode steps never pay dequant overhead.
             // Pre-warm dequant cache: populate f32 expansion for all Q4 constants
             // so decode steps never pay the dequant overhead.
             #[cfg(target_os = "macos")]
@@ -2408,6 +2531,8 @@ impl HoloRunner {
             let tape = hologram::build_tape_from_plan(&probe)
                 .map_err(|e| anyhow::anyhow!("building tape: {e}"))?;
 
+            let patch_prune = read_patch_prune_from_plan(&probe, bytes);
+
             let runner = Self {
                 _storage: storage,
                 plan: probe,
@@ -2419,6 +2544,7 @@ impl HoloRunner {
                 verify_plan: None,
                 verify_tape: None,
                 weight_cache: parking_lot::RwLock::new(hologram::WeightCache::new()),
+                patch_prune,
             };
             #[cfg(target_os = "macos")]
             {
@@ -2435,18 +2561,97 @@ impl HoloRunner {
     /// When a `ShapeContextGraph` is available, projects runtime input shapes
     /// through the graph to produce correct per-node shapes. This enables
     /// variable-length execution (runtime seq_len != compiled seq_len).
+    ///
+    /// When patch pruning is configured (ViT models compiled with
+    /// `PatchPruneInjection`), automatically preprocesses the pixel input
+    /// to produce `kept_indices` before feeding the compiled graph.
     pub fn execute(
         &self,
         inputs: &hologram::GraphInputs,
     ) -> anyhow::Result<hologram::GraphOutputs> {
+        // If patch pruning is configured, preprocess the pixel input.
+        let inputs = if let Some(ref prune) = self.patch_prune {
+            self.preprocess_patch_prune(inputs, prune)?
+        } else {
+            std::borrow::Cow::Borrowed(inputs)
+        };
+
         if let Some(ref ctx) = self.shape_ctx {
-            let shape_map = self.resolve_shapes(ctx, &self.plan, inputs);
-            hologram::execute_tape_with_shapes(&self.tape, &self.plan, inputs, &shape_map)
+            let shape_map = self.resolve_shapes(ctx, &self.plan, &inputs);
+            hologram::execute_tape_with_shapes(&self.tape, &self.plan, &inputs, &shape_map)
                 .map_err(|e| anyhow::anyhow!("{e}"))
         } else {
-            hologram::execute_tape(&self.tape, &self.plan, inputs)
+            hologram::execute_tape(&self.tape, &self.plan, &inputs)
                 .map_err(|e| anyhow::anyhow!("{e}"))
         }
+    }
+
+    /// Run the PatchPrune kernel on the pixel input and inject `kept_indices`.
+    fn preprocess_patch_prune(
+        &self,
+        inputs: &hologram::GraphInputs,
+        prune: &hologram_ai_common::PatchPruneContext,
+    ) -> anyhow::Result<std::borrow::Cow<'_, hologram::GraphInputs>> {
+        let pixel_bytes = inputs.get(prune.pixel_input).ok_or_else(|| {
+            anyhow::anyhow!(
+                "PatchPrune: pixel input at index {} not found",
+                prune.pixel_input
+            )
+        })?;
+
+        // Interpret pixel bytes as f32.
+        let pixels: &[f32] = bytemuck::cast_slice(pixel_bytes);
+
+        // Infer image dimensions from pixel count and channel count.
+        let channels = prune.channels as usize;
+        let total_pixels = pixels.len();
+        let spatial_pixels = total_pixels / channels;
+        // Assume square image if no shape info available.
+        let img_side = (spatial_pixels as f64).sqrt() as usize;
+        let (img_h, img_w) = if let Some(shape) = inputs.shape(prune.pixel_input) {
+            // Shape is [N, C, H, W] or [C, H, W].
+            if shape.len() == 4 {
+                (shape[2], shape[3])
+            } else if shape.len() == 3 {
+                (shape[1], shape[2])
+            } else {
+                (img_side, img_side)
+            }
+        } else {
+            (img_side, img_side)
+        };
+
+        let params = hologram::hologram_exec::PatchPruneParams {
+            channels,
+            img_h,
+            img_w,
+            patch_h: prune.patch_h as usize,
+            patch_w: prune.patch_w as usize,
+            tau: 0.0, // lossless by default
+            max_kept: prune.max_kept as usize,
+        };
+
+        let result = hologram::hologram_exec::patch_prune(pixels, &params);
+
+        // Build new inputs with kept_indices injected.
+        let mut new_inputs = inputs.clone();
+        let indices_bytes =
+            hologram::hologram_exec::patch_prune::indices_to_bytes(&result.kept_indices);
+        new_inputs.set_with_shape(
+            prune.kept_indices_input,
+            indices_bytes,
+            vec![prune.max_kept as usize],
+        );
+
+        tracing::debug!(
+            n_kept = result.n_kept,
+            max_kept = prune.max_kept,
+            "PatchPrune preprocessor: selected {}/{} patches",
+            result.n_kept,
+            prune.total_patches,
+        );
+
+        Ok(std::borrow::Cow::Owned(new_inputs))
     }
 
     /// Access the underlying loaded plan (for layer headers, weights, etc.).
@@ -2579,6 +2784,18 @@ impl HoloRunner {
         self.verify_tape.is_some()
     }
 
+    /// Whether this runner has patch pruning configured (ViT models).
+    #[must_use]
+    pub fn has_patch_prune(&self) -> bool {
+        self.patch_prune.is_some()
+    }
+
+    /// Access the patch pruning config (for diagnostics/testing).
+    #[must_use]
+    pub fn patch_prune_config(&self) -> Option<&hologram_ai_common::PatchPruneContext> {
+        self.patch_prune.as_ref()
+    }
+
     /// Execute a batch verification forward pass using the verify tape (seq=N).
     ///
     /// Used by speculative decoding: draft N tokens with decode tape (seq=1),
@@ -2608,6 +2825,37 @@ impl HoloRunner {
 ///
 /// Avoids re-deserializing the archive — uses the plan's section table to
 /// find the shape context section, then reads it from the raw bytes.
+/// Read a [`PatchPruneContext`] from an already-loaded plan + raw archive bytes.
+///
+/// Returns `None` if the archive has no patch pruning section (non-ViT models).
+fn read_patch_prune_from_plan(
+    plan: &hologram::LoadedPlan,
+    archive_bytes: &[u8],
+) -> Option<hologram_ai_common::PatchPruneContext> {
+    use hologram_ai_common::exec_context::{ExecContext, SECTION_PATCH_PRUNE};
+    let entry = plan.sections().find(SECTION_PATCH_PRUNE)?;
+    let start = entry.offset as usize;
+    let end = start + entry.size as usize;
+    if end > archive_bytes.len() {
+        tracing::warn!("PatchPruneContext section out of bounds, ignoring");
+        return None;
+    }
+    match hologram_ai_common::PatchPruneContext::from_context_bytes(&archive_bytes[start..end]) {
+        Ok(ctx) => {
+            tracing::info!(
+                max_kept = ctx.max_kept,
+                total_patches = ctx.total_patches,
+                "loaded PatchPruneContext from archive"
+            );
+            Some(ctx)
+        }
+        Err(e) => {
+            tracing::warn!("failed to deserialize PatchPruneContext: {e}");
+            None
+        }
+    }
+}
+
 fn read_shape_context_from_plan(
     plan: &hologram::LoadedPlan,
     archive_bytes: &[u8],

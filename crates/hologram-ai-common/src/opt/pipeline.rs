@@ -110,6 +110,40 @@ impl OptPipeline {
         ])
     }
 
+    /// Vision Transformer pipeline with optional patch pruning.
+    ///
+    /// Runs the generic pipeline plus `PatchPruneInjection` (when
+    /// `budget_ratio < 1.0`) followed by a second shape propagation
+    /// pass to update all downstream shapes. Skips LLM-specific passes
+    /// (attention fusion, KV-cache injection).
+    pub fn vit(budget_ratio: f32) -> Self {
+        use super::{
+            const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,
+            constant_fold::ConstantFolding, data_prop::DataPropagation,
+            dead_node::DeadNodeElimination, decompose::OpDecomposition,
+            patch_prune::PatchPruneInjection, resolve_slice_params::ResolveSliceParams,
+            semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
+        };
+        Self::new(vec![
+            Box::new(ResolveSliceParams),
+            Box::new(ShapePropagation),
+            Box::new(DataPropagation),
+            Box::new(ShapePropagation),
+            Box::new(ConstantEvaluation),
+            Box::new(ConstantFolding),
+            // Patch pruning: insert Gather nodes to reduce sequence length.
+            // Must run after shape prop (needs concrete grid dims) and before
+            // fusion passes (restructures the pre-attention subgraph).
+            Box::new(PatchPruneInjection { budget_ratio }),
+            // Re-run shape prop to propagate the reduced seq dim downstream.
+            Box::new(ShapePropagation),
+            Box::new(OpDecomposition),
+            Box::new(SemanticPropagation),
+            Box::new(ConstantDeduplication),
+            Box::new(DeadNodeElimination),
+        ])
+    }
+
     /// Generic optimization pipeline for non-transformer components.
     ///
     /// Runs shape/data propagation, constant evaluation/folding, op
