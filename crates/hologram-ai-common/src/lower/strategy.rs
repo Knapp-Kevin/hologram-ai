@@ -542,6 +542,29 @@ fn resolve_op(
             ends,
             steps,
         } => {
+            // For empty-param Slices (dynamic params not resolved at import),
+            // try resolving from DataPropagation's known_i64_values.
+            let (axes, starts, ends, steps) = if axes.is_empty() && starts.is_empty() {
+                // Read starts/ends/axes/steps from known_i64_values of inputs[1-4].
+                let resolve_input = |idx: usize| -> Option<Vec<i64>> {
+                    inputs
+                        .get(idx)
+                        .and_then(|tid| tensor_info.get(tid))
+                        .and_then(|info| info.known_i64_values.as_ref())
+                        .map(|vals| vals.iter().filter_map(|v| *v).collect())
+                };
+                let s = resolve_input(1).unwrap_or_default();
+                let e = resolve_input(2).unwrap_or_default();
+                let a = resolve_input(3).unwrap_or_else(|| (0..s.len() as i64).collect());
+                let st = resolve_input(4).unwrap_or_else(|| vec![1; s.len()]);
+                if s.is_empty() || e.is_empty() {
+                    return Ok(None);
+                }
+                (a, s, e, st)
+            } else {
+                (axes.clone(), starts.clone(), ends.clone(), steps.clone())
+            };
+
             // Handle single-axis contiguous slices.
             if axes.len() != 1 || starts.len() != 1 || ends.len() != 1 {
                 return Ok(None);

@@ -533,7 +533,11 @@ fn eval_comparison(
     for i in 0..out_elems {
         let ai = broadcast_input_index(i, &out_strides, &a_padded, &a_strides, ndims);
         let bi = broadcast_input_index(i, &out_strides, &b_padded, &b_strides, ndims);
-        let val: f32 = if f(a_vals[ai], b_vals[bi]) { 1.0 } else { 0.0 };
+        let val: f32 = if ai < a_vals.len() && bi < b_vals.len() && f(a_vals[ai], b_vals[bi]) {
+            1.0
+        } else {
+            0.0
+        };
         result.extend_from_slice(&val.to_le_bytes());
     }
     Some((result, DType::F32, out_shape))
@@ -569,7 +573,11 @@ fn eval_logical(
     for i in 0..out_elems {
         let ai = broadcast_input_index(i, &out_strides, &a_padded, &a_strides, ndims);
         let bi = broadcast_input_index(i, &out_strides, &b_padded, &b_strides, ndims);
-        let val: f32 = if f(a_vals[ai], b_vals[bi]) { 1.0 } else { 0.0 };
+        let val: f32 = if ai < a_vals.len() && bi < b_vals.len() && f(a_vals[ai], b_vals[bi]) {
+            1.0
+        } else {
+            0.0
+        };
         result.extend_from_slice(&val.to_le_bytes());
     }
     Some((result, DType::F32, out_shape))

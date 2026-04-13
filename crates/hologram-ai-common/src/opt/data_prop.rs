@@ -236,6 +236,50 @@ impl Pass for DataPropagation {
             }
         }
 
+        // Materialize ConstantOfShape outputs as F32 params.
+        // ConstantOfShape produces F32 data (not shape metadata), so the
+        // integer-only materialization above skips it. We handle it separately:
+        // read the shape from the input's known_i64_values, fill with the
+        // op's fill_value, and register as a param.
+        for node in &graph.nodes {
+            let AiOp::ConstantOfShape { fill_value } = &node.op else {
+                continue;
+            };
+            let Some(&out_tid) = node.outputs.first() else {
+                continue;
+            };
+            // Already materialized (e.g. from import-time folding).
+            if graph.params.contains_key(&out_tid) {
+                continue;
+            }
+            // Read the shape from the input tensor's known_i64_values.
+            let shape_vals: Vec<i64> = node
+                .inputs
+                .first()
+                .and_then(|tid| graph.tensor_info.get(tid))
+                .and_then(|info| info.known_i64_values.as_ref())
+                .map(|vals| vals.iter().filter_map(|v| *v).collect::<Vec<_>>())
+                .unwrap_or_default();
+            if shape_vals.is_empty() {
+                continue;
+            }
+            let fill = f32::from_bits(*fill_value);
+            let n_elements: usize = shape_vals.iter().map(|&d| d.max(0) as usize).product();
+            let data_f32 = vec![fill; n_elements];
+            let data_bytes: Vec<u8> = data_f32.iter().flat_map(|f| f.to_le_bytes()).collect();
+            let dim_shape: crate::Shape = shape_vals
+                .iter()
+                .map(|&d| crate::Dim::Concrete(d as u64))
+                .collect();
+            let info = TensorInfo::new(DType::F32, dim_shape);
+            graph
+                .tensor_info
+                .entry(out_tid)
+                .and_modify(|existing| *existing = info.clone())
+                .or_insert_with(|| info.clone());
+            graph.params.insert(out_tid, AiParam::inline(data_bytes, info));
+        }
+
         Ok(graph)
     }
 }
@@ -526,6 +570,14 @@ fn eval_custom_op(
                 }
             }
             Some(vals)
+        }
+
+        // ConstantOfShape: when the shape input has known values, we can
+        // materialize the output as a param. Return empty known_values to
+        // signal the output is determined (ConstantFolding removes the node).
+        AiOp::ConstantOfShape { .. } => {
+            let _shape_known = inputs.first().copied().flatten()?;
+            Some(vec![])
         }
 
         _ => None,

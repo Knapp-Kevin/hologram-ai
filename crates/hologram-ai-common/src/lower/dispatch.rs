@@ -167,6 +167,11 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
             reason: "unsupported quant scheme for GEMM",
         },
 
+        // ── ConstantOfShape: folded to a param at import time. If it reaches
+        // lowering, the shape input wasn't a known constant — emit Identity
+        // to pass through whatever the optimization passes produced.
+        ConstantOfShape { .. } => D::Identity,
+
         // ── Opaque ──────────────────────────────────────────────────────
         Opaque { .. } => D::Unsupported {
             reason: "opaque op cannot be lowered",

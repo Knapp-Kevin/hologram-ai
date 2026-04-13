@@ -476,6 +476,12 @@ pub enum AiOp {
         value: AiParam,
     },
     Identity,
+    /// Generates a tensor of a given shape filled with a constant value.
+    /// Input: 1-D i64 shape tensor. Output: tensor of that shape filled
+    /// with `fill_value` (stored as f32 bits). Standard ONNX opset 9+ op.
+    ConstantOfShape {
+        fill_value: u32, // f32::to_bits()
+    },
 
     /// Fallback for ops the importer could not map.
     Opaque {
@@ -625,7 +631,8 @@ impl AiOp {
             // Phase 4: control flow
             | AiOp::If { .. }
             | AiOp::Loop { .. }
-            | AiOp::Scan { .. } => Custom,
+            | AiOp::Scan { .. }
+            | AiOp::ConstantOfShape { .. } => Custom,
         }
     }
 }

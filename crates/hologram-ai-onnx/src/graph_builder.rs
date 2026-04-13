@@ -7,7 +7,7 @@ use crate::{
     tensor_map::tensor_to_param,
 };
 use hologram_ai_common::{
-    AiGraph, AiNode, AiOp, DType, Dim, DimVarSource, DimVarTable, ImportWarning, NodeId,
+    AiGraph, AiNode, AiOp, AiParam, DType, Dim, DimVarSource, DimVarTable, ImportWarning, NodeId,
     QuantDescriptor, SemanticHint, Shape, TensorId, TensorInfo,
 };
 use std::collections::HashMap;
@@ -446,6 +446,18 @@ fn resolve_dynamic_op_params(
                 }
                 let starts_vals = extract_i64_const(node.inputs[1], params, tensor_info);
                 let ends_vals = extract_i64_const(node.inputs[2], params, tensor_info);
+                if starts_vals.is_none() || ends_vals.is_none() {
+                    tracing::warn!(
+                        node_id = node.id,
+                        n_inputs = node.inputs.len(),
+                        starts_tid = node.inputs[1],
+                        starts_in_params = params.contains_key(&node.inputs[1]),
+                        starts_in_info = tensor_info.contains_key(&node.inputs[1]),
+                        ends_tid = node.inputs[2],
+                        ends_in_params = params.contains_key(&node.inputs[2]),
+                        "Slice debug: starts/ends resolution"
+                    );
+                }
                 let axes_vals = if node.inputs.len() > 3 {
                     extract_i64_const(node.inputs[3], params, tensor_info)
                 } else {
@@ -471,6 +483,12 @@ fn resolve_dynamic_op_params(
                         node.inputs.truncate(1);
                     }
                     _ => {
+                        tracing::warn!(
+                            node_id = node.id,
+                            starts_tid = node.inputs.get(1).copied().unwrap_or(0),
+                            ends_tid = node.inputs.get(2).copied().unwrap_or(0),
+                            "Slice: could not resolve starts/ends"
+                        );
                         warnings.push(ImportWarning {
                             message: format!(
                                 "Slice node {}: could not resolve starts/ends from constant inputs",
@@ -644,9 +662,31 @@ fn extract_i64_const(
 ) -> Option<Vec<i64>> {
     let param = params.get(&tid)?;
     let info = tensor_info.get(&tid)?;
-    let data = match param {
-        hologram_ai_common::AiParam::Inline { data, .. } => data.as_slice(),
-        _ => return None,
+    tracing::trace!(
+        tid,
+        dtype = ?info.logical_dtype,
+        "extract_i64_const: found param"
+    );
+    let data: std::borrow::Cow<'_, [u8]> = match param {
+        hologram_ai_common::AiParam::Inline { data, .. } => {
+            std::borrow::Cow::Borrowed(data.as_slice())
+        }
+        hologram_ai_common::AiParam::Mmap {
+            path, offset, len, ..
+        } => {
+            // Read small constants from external data files (< 1 KiB).
+            // Large tensors (weights) stay mmap'd; only tiny scalars
+            // (Slice starts/ends/axes/steps) are loaded eagerly.
+            if *len > 1024 {
+                return None;
+            }
+            use std::io::{Read, Seek, SeekFrom};
+            let mut file = std::fs::File::open(path).ok()?;
+            file.seek(SeekFrom::Start(*offset)).ok()?;
+            let mut buf = vec![0u8; *len as usize];
+            file.read_exact(&mut buf).ok()?;
+            std::borrow::Cow::Owned(buf)
+        }
     };
 
     match info.logical_dtype {

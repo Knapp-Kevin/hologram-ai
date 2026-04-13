@@ -392,8 +392,10 @@ impl ShapeProjection for AiOp {
                 (ShapeSpecRepr::Unknown, None)
             }
 
-            // ── Constant / Opaque (seeded directly, not projected) ────────
-            AiOp::Constant { .. } | AiOp::Opaque { .. } => return None,
+            // ── Constant / Opaque / ConstantOfShape (seeded directly, not projected)
+            AiOp::Constant { .. } | AiOp::Opaque { .. } | AiOp::ConstantOfShape { .. } => {
+                return None;
+            }
         })
     }
 }

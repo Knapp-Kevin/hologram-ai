@@ -255,6 +255,31 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
             Cast { to: dtype }
         }
         "Identity" => Identity,
+        "ConstantOfShape" => {
+            let fill_value: f32 = ctx
+                .attrs
+                .iter()
+                .find(|a| a.name == "value")
+                .and_then(|a| a.t.as_ref())
+                .and_then(|t| {
+                    if !t.float_data.is_empty() {
+                        Some(t.float_data[0])
+                    } else if !t.raw_data.is_empty() && t.raw_data.len() >= 4 {
+                        Some(f32::from_le_bytes([
+                            t.raw_data[0],
+                            t.raw_data[1],
+                            t.raw_data[2],
+                            t.raw_data[3],
+                        ]))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0.0);
+            ConstantOfShape {
+                fill_value: fill_value.to_bits(),
+            }
+        }
         "Constant" => {
             // Handled separately in the graph builder via initializer or attr.
             return Ok(None);
