@@ -2471,9 +2471,8 @@ fn conv2d_matches_ort() {
 fn conv2d_stride2_matches_ort() {
     let (n, ic, h, w) = (1, 3, 8, 8);
     let (oc, kh, kw) = (8, 3, 3);
-    let model_bytes = onnx_builder::conv2d(
-        onnx_builder::Conv2dSpec::new(n, ic, h, w, oc, kh, kw).with_stride(2),
-    );
+    let model_bytes =
+        onnx_builder::conv2d(onnx_builder::Conv2dSpec::new(n, ic, h, w, oc, kh, kw).with_stride(2));
 
     let input_data: Vec<f32> = (0..n * ic * h * w)
         .map(|i| ((i as f32) * 0.03).cos())

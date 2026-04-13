@@ -574,9 +574,16 @@ fn run_attention_test(
     let k_hns = transpose_seq_heads(&k_snh, seq, num_kv_heads, head_dim);
     let v_hns = transpose_seq_heads(&v_snh, seq, num_kv_heads, head_dim);
     let ref_out_hns = reference::attention(
-        reference::AttentionParams::new(&q_hns, &k_hns, &v_hns, head_dim, num_q_heads, num_kv_heads)
-            .with_scale(scale)
-            .with_causal(causal),
+        reference::AttentionParams::new(
+            &q_hns,
+            &k_hns,
+            &v_hns,
+            head_dim,
+            num_q_heads,
+            num_kv_heads,
+        )
+        .with_scale(scale)
+        .with_causal(causal),
     );
     // transpose reference output back to [seq, n_heads, head_dim]
     let expected = transpose_heads_to_seq(&ref_out_hns, seq, num_q_heads, head_dim);
@@ -660,11 +667,10 @@ fn conformance_conv2d_with_padding() {
     let tol = tolerance_for(&op);
 
     let actual = run_dispatch(&op, &[&f32_bytes(&input), &f32_bytes(&kernel)]);
-    let expected =
-        reference::conv2d_simple(
-            reference::Conv2dSimpleParams::new(&input, &kernel, in_h, in_w, k_h, k_w)
-                .with_padding(pad_h, pad_w),
-        );
+    let expected = reference::conv2d_simple(
+        reference::Conv2dSimpleParams::new(&input, &kernel, in_h, in_w, k_h, k_w)
+            .with_padding(pad_h, pad_w),
+    );
 
     assert_close(&actual, &expected, tol, "Conv2d-padded");
 }

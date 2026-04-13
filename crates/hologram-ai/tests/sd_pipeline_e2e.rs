@@ -245,10 +245,7 @@ fn sd_pipeline_generates_image() {
     // `seq_len_override` compile path. Tracked as a follow-up — see
     // ~/.claude/projects/memory/project_q8_clip_bug.md for the updated
     // diagnosis.
-    assert!(ensure_compiled(
-        &text_encoder_onnx(),
-        &text_encoder_holo(),
-    ));
+    assert!(ensure_compiled(&text_encoder_onnx(), &text_encoder_holo(),));
     assert!(ensure_compiled(&unet_onnx(), &unet_holo()));
     // VAE at 1/4 spatial scale (128×128 output instead of 512×512).
     // Full-resolution VAE OOMs: the system allocator doesn't return freed
