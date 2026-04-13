@@ -687,6 +687,25 @@ the full chat template into `--prompt` on every invocation.
 
 ## Complete (this sprint)
 
+### SDXL ONNX compilation (Plans 061, 064)
+- [x] ConstantOfShape op: AiOp variant + ONNX mapping + DataProp materialization
+- [x] Dynamic Slice resolution: reads known_i64_values from DataProp when import-time resolution fails
+- [x] Mmap constant reading: small constants from external data files read eagerly for Slice params
+- [x] All 4 SDXL components compile: text_encoder, text_encoder_2, UNet (10.3 GB), vae_decoder
+- [ ] **Streaming compilation (Plan 064)** — compile SDXL UNet within 2 GB RSS
+  - [ ] Phase 1: Fix Q4 accumulation leak (`.get()` → `.remove()`)
+  - [ ] Phase 2: Spill Q4 constants to temp file
+  - [ ] Phase 3: Streaming archive write
+  - [ ] Phase 4: OS page cache advise
+
+### OutputBuffer + Mmap eviction (Plan 062)
+- [x] OutputBuffer enum (Heap/Arena/Mmap) replaces &mut Vec<u8> in 44 kernels
+- [x] Mmap eviction via munmap — RSS drops during SD UNet execution
+- [x] Lazy allocation: buffers start empty, self-promote to Mmap on resize ≥ 256 KiB
+- [x] heap_only_eviction flag for Conv2d-heavy models (VAE)
+- [x] SD UNet live working set: 37 MiB (was 47 GiB)
+- [x] TinyLlama: 42.5 tok/s unaffected
+
 ### Cleanup: GGUF removal (Plan 061 Stage 0)
 - [x] Removed `hologram-ai-gguf` crate, workspace member, and all consumers
   (compiler.rs `ModelSource::GgufPath`, lib.rs re-export, cli.rs `inspect_gguf`,
