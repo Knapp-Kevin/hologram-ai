@@ -2179,6 +2179,21 @@ fn collect_weight_bytes_streaming(
         let n = *len as usize;
         let mut f = std::fs::File::open(path)
             .with_context(|| format!("opening weight file {path:?}"))?;
+
+        // Disable OS page caching for this file — prevents the OS from
+        // keeping 10 GB of weight pages in the page cache (which inflates
+        // RSS even though the data isn't in our heap).
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::io::AsRawFd;
+            extern "C" {
+                fn fcntl(fd: std::ffi::c_int, cmd: std::ffi::c_int, ...) -> std::ffi::c_int;
+            }
+            // F_NOCACHE = 48 on macOS (Darwin)
+            const F_NOCACHE: std::ffi::c_int = 48;
+            unsafe { fcntl(f.as_raw_fd(), F_NOCACHE, 1 as std::ffi::c_int) };
+        }
+
         f.seek(std::io::SeekFrom::Start(*offset))?;
 
         // Stream from source to temp file in 256 KB chunks.
