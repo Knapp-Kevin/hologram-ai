@@ -465,20 +465,57 @@ impl ModelCompiler {
                 .plan(&ai_graph)
                 .context("memory planning failed")?;
 
-            self.compile_components(
-                vec![ComponentSpec {
-                    name: "model".into(),
-                    role: ComponentRole::Backbone,
-                    weight_group: "model".into(),
-                    opt_profile: hologram_ai_common::OptProfile::Generic,
-                    graph: &ai_graph,
-                    mem_plan: &mem_plan,
-                    phase: LowerPhase::Forward,
-                    weights: extra_weights,
-                    weight_index: Some(weight_index),
-                }],
-                vec![],
-            )?
+            if let Some(ws) = weight_source {
+                // Streaming path: build archive directly to the output
+                // file, streaming weights from the temp file. Avoids
+                // holding the weight blob in memory.
+                let tmp_archive = tempfile::NamedTempFile::new()
+                    .context("creating temp archive file")?;
+                let tmp_path = tmp_archive.path().to_owned();
+
+                let archive = compile_one_component(
+                    &ai_graph,
+                    &mem_plan.kv_cache_layout,
+                    &self.lowering_options(),
+                    &LowerPhase::Forward,
+                    Some(&[]), // empty weights — Deferred constants resolve from the weight source
+                    Some(&weight_index),
+                )?;
+                let unpacked = unpack_archive(&archive)?;
+                let layer_header = build_tensor_port_header(&unpacked.plan, &ai_graph);
+
+                build_final_archive_to_file(
+                    unpacked,
+                    ws,
+                    Some(layer_header),
+                    None,
+                    Some(&weight_index),
+                    &tmp_path,
+                )?;
+
+                // Read the file back — yes this is still in-memory for the
+                // HoloArchive return type. A full streaming API would return
+                // a path instead. For now, this eliminates the 10 GB weight
+                // blob from the compilation pipeline — the archive file is
+                // much smaller (~2-4 GB after Q4 quantization).
+                std::fs::read(&tmp_path)
+                    .context("reading streaming archive from temp file")?
+            } else {
+                self.compile_components(
+                    vec![ComponentSpec {
+                        name: "model".into(),
+                        role: ComponentRole::Backbone,
+                        weight_group: "model".into(),
+                        opt_profile: hologram_ai_common::OptProfile::Generic,
+                        graph: &ai_graph,
+                        mem_plan: &mem_plan,
+                        phase: LowerPhase::Forward,
+                        weights: extra_weights,
+                        weight_index: Some(weight_index.clone()),
+                    }],
+                    vec![],
+                )?
+            }
         };
 
         let metadata = pre_metadata;
@@ -1176,6 +1213,63 @@ fn build_final_archive(
     writer
         .build()
         .map_err(|e| anyhow::anyhow!("building final archive: {e}"))
+}
+
+/// Build a final archive to a file, streaming weights from a `WeightSource`.
+///
+/// Unlike `build_final_archive` which holds all weights in memory, this writes
+/// the archive directly to disk. Peak memory: graph + sections (~tens of MB).
+fn build_final_archive_to_file(
+    unpacked: UnpackedArchive,
+    weight_source: hologram::hologram_archive::WeightSource,
+    layer_header: Option<hologram::hologram_archive::entrypoint::schedule::LayerHeader>,
+    bundle: Option<&hologram_ai_common::ContextBundle>,
+    weight_index: Option<&hologram::hologram_archive::weight::index::WeightIndex>,
+    output_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    use hologram::hologram_archive::section::{
+        EmbeddableSection, SECTION_LAYER_HEADER, SECTION_WEIGHT_INDEX,
+    };
+
+    let mut writer = hologram::HoloWriter::new()
+        .set_graph_bytes_uncompressed(unpacked.graph_bytes)
+        .set_weight_source(weight_source);
+
+    let layer_header_kind = layer_header.as_ref().map(|lh| lh.section_kind());
+    let bundle_kinds: Vec<u32> = bundle
+        .map(|b| b.iter().map(|(k, _)| k).collect())
+        .unwrap_or_default();
+
+    for (kind, bytes) in unpacked.sections {
+        if layer_header_kind == Some(kind) {
+            continue;
+        }
+        if bundle_kinds.contains(&kind) {
+            continue;
+        }
+        if weight_index.is_some() && kind == SECTION_WEIGHT_INDEX {
+            continue;
+        }
+        writer = writer.add_raw_section(kind, bytes);
+    }
+
+    if let Some(ref lh) = layer_header {
+        writer = writer.add_raw_section(SECTION_LAYER_HEADER, lh.to_bytes());
+    }
+
+    if let Some(wi) = weight_index {
+        writer = writer.add_raw_section(SECTION_WEIGHT_INDEX, wi.to_bytes());
+    }
+
+    if let Some(bundle) = bundle {
+        for (kind, bytes) in bundle.iter() {
+            writer = writer.add_raw_section(kind, bytes.to_vec());
+        }
+    }
+
+    writer
+        .build_to_file(output_path)
+        .map_err(|e| anyhow::anyhow!("building final archive to file: {e}"))
 }
 
 /// Compile a single AiGraph into a sub-archive ready for PipelineWriter.
@@ -2121,17 +2215,22 @@ fn collect_weight_bytes_streaming(
     writer.flush()?;
 
     let total_len = write_offset;
-    let path = tmp.into_temp_path().to_path_buf();
+    // Persist the temp file so it survives until the archive is built.
+    // The caller is responsible for cleanup (or the OS cleans /tmp on reboot).
+    let path = tmp.into_temp_path();
+    let persisted = path.keep()
+        .map_err(|e| anyhow::anyhow!("persisting temp weight file: {e}"))?;
     tracing::info!(
         total_mb = total_len / (1024 * 1024),
         n_weights = entries.len(),
+        path = %persisted.display(),
         "streamed weights to temp file ({} MiB)",
         total_len / (1024 * 1024),
     );
 
     Ok((
         hologram::hologram_archive::WeightSource::File {
-            path,
+            path: persisted,
             len: total_len,
         },
         WeightIndex { entries },
