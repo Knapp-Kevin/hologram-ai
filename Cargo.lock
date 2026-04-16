@@ -902,6 +902,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hologram-backend"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "hologram-core",
+ "metal",
+ "objc",
+ "smallvec",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "hologram-cascade"
 version = "0.4.1"
 dependencies = [
@@ -967,6 +980,7 @@ version = "0.4.1"
 dependencies = [
  "bytemuck",
  "hologram-archive",
+ "hologram-backend",
  "hologram-core",
  "hologram-graph",
  "hologram-ring",
