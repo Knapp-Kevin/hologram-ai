@@ -459,7 +459,108 @@ impl ModelCompiler {
                 "LLM pipeline graphs ready (prefill + decode + verify)"
             );
 
-            // Compile all three as a pipeline. Weights are shared (same weight_group).
+            // Compile all three as a pipeline via streaming writer.
+            // The first sub-archive (prefill) gets the real weights via
+            // add_model_streaming. The other two get graph-only sub-archives.
+            if let Some(ws) = weight_source {
+                // Streaming path: build pipeline archive to a temp file.
+                use hologram::hologram_archive::section::EmbeddableSection;
+                use hologram::hologram_archive::writer::pipeline_writer::PipelineWriter;
+                use hologram_ai_common::sections::meta::{
+                    ComponentConnection, ComponentDescriptor, MetaSection,
+                };
+
+                let tmp_output = tempfile::NamedTempFile::new()
+                    .context("creating temp output file for LLM pipeline")?;
+                let output_path = tmp_output
+                    .into_temp_path()
+                    .keep()
+                    .map_err(|e| anyhow::anyhow!("persisting temp output: {e}"))?;
+                let scratch = tempfile::NamedTempFile::new()
+                    .context("creating scratch file for LLM pipeline assembly")?;
+                let scratch_path = scratch.path().to_path_buf();
+
+                // Compile sub-archives (graph + sections, no weights).
+                let prefill_archive = compile_one_component(
+                    &prefill_graph, &prefill_mem.kv_cache_layout,
+                    &self.lowering_options(), &LowerPhase::Forward,
+                    Some(&[]), Some(&weight_index),
+                )?;
+                let decode_archive = compile_one_component(
+                    &decode_graph, &decode_mem.kv_cache_layout,
+                    &self.lowering_options(), &LowerPhase::Forward,
+                    None, None,
+                )?;
+                let verify_archive = compile_one_component(
+                    &verify_graph, &verify_mem.kv_cache_layout,
+                    &self.lowering_options(), &LowerPhase::Forward,
+                    None, None,
+                )?;
+
+                // Build MetaSection.
+                let meta = MetaSection::new(
+                    vec![
+                        ComponentDescriptor {
+                            name: "prefill".into(),
+                            role: ComponentRole::Prefill,
+                            weight_group: "model".into(),
+                            weight_source: None,
+                        },
+                        ComponentDescriptor {
+                            name: "decode".into(),
+                            role: ComponentRole::Decode,
+                            weight_group: "model".into(),
+                            weight_source: Some("prefill".into()),
+                        },
+                        ComponentDescriptor {
+                            name: "verify".into(),
+                            role: ComponentRole::Prefill,
+                            weight_group: "model".into(),
+                            weight_source: Some("prefill".into()),
+                        },
+                    ],
+                    vec![] as Vec<ComponentConnection>,
+                );
+
+                let mut writer = PipelineWriter::new()
+                    .add_model_streaming("prefill", prefill_archive, ws)
+                    .add_model("decode", decode_archive)
+                    .add_model("verify", verify_archive)
+                    .add_section(meta.section_kind(), meta.to_bytes());
+
+                for (kind, bytes) in &extra_sections {
+                    writer = writer.add_section(*kind, bytes.clone());
+                }
+
+                writer
+                    .build_to_file(&output_path, &scratch_path)
+                    .map_err(|e| anyhow::anyhow!("building streaming LLM pipeline: {e}"))?;
+
+                let _ = std::fs::remove_file(&scratch_path);
+
+                let archive_size = std::fs::metadata(&output_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                info!(
+                    archive_mb = archive_size / (1024 * 1024),
+                    "streaming LLM pipeline archive: {} MiB",
+                    archive_size / (1024 * 1024),
+                );
+
+                return Ok(HoloArchive {
+                    bytes: Vec::new(),
+                    path: Some(output_path),
+                    metadata: pre_metadata,
+                    stats: CompileStats {
+                        import_warnings,
+                        validation_errors: 0,
+                        total_weight_bytes,
+                        node_count: prefill_nodes + decode_nodes + verify_nodes,
+                    },
+                });
+            }
+
+            // Non-streaming fallback (small models < 256 MB).
             self.compile_components_with_sections(
                 vec![
                     ComponentSpec {
@@ -486,7 +587,7 @@ impl ModelCompiler {
                     },
                     ComponentSpec {
                         name: "verify".into(),
-                        role: ComponentRole::Prefill, // verification uses prefill-style execution
+                        role: ComponentRole::Prefill,
                         weight_group: "model".into(),
                         opt_profile: hologram_ai_common::OptProfile::Llm,
                         graph: &verify_graph,
@@ -496,7 +597,7 @@ impl ModelCompiler {
                         weight_index: Some(weight_index),
                     },
                 ],
-                vec![], // no inter-component connections
+                vec![],
                 &extra_sections,
             )?
         } else {
