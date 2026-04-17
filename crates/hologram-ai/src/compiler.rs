@@ -2263,8 +2263,21 @@ fn zero_seq_dims_for_lowering(
     // This ensures that downstream ops (Slice, Reshape, etc.) see the
     // seq axis as dynamic at lowering time, producing 0-sentinel parameters
     // that the runtime resolves from actual buffer sizes.
+    // Zero seq dims in activation tensor shapes only.
+    // Skip constants/weights — their shapes must stay concrete for correct lowering.
+    let constant_tids: std::collections::HashSet<hologram_ai_common::TensorId> = graph
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, hologram_ai_common::AiOp::Constant { .. }))
+        .flat_map(|n| n.outputs.iter().copied())
+        .collect();
+
     let mut zeroed_shapes = 0usize;
     for &(tid, axis) in seq_dim_positions {
+        // Skip weight/constant tensors.
+        if constant_tids.contains(&tid) {
+            continue;
+        }
         if let Some(info) = graph.tensor_info.get_mut(&tid) {
             if axis < info.shape.len() {
                 if let hologram_ai_common::Dim::Concrete(v) = &info.shape[axis] {

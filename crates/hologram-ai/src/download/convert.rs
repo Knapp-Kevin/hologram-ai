@@ -32,15 +32,9 @@ import torch
 
 print(f"Loading model {model_id}...", file=sys.stderr)
 config = AutoConfig.from_pretrained(model_id)
-config.use_cache = False
-# Ensure causal attention mask is generated even without KV cache.
-# Without this, LLaMA-style models attend to future tokens, producing garbage.
-if hasattr(config, '_attn_implementation'):
-    config._attn_implementation = 'eager'
 
 # Detect causal decoder models (GPT, LLaMA, Mistral, etc.) and use
 # AutoModelForCausalLM so the ONNX export produces logits directly.
-# Encoder models (BERT, etc.) use AutoModel with hidden_state output.
 CAUSAL_TYPES = {
     "llama", "gpt2", "gpt_neo", "gpt_neox", "mistral", "qwen2", "phi",
     "gemma", "gemma2", "starcoder2", "codegen", "falcon",
@@ -50,8 +44,19 @@ is_causal = model_type in CAUSAL_TYPES
 
 if is_causal:
     print(f"Causal LM ({model_type}) — exporting with logits output", file=sys.stderr)
-    model = AutoModelForCausalLM.from_pretrained(model_id, config=config, torch_dtype=torch.float32)
+    inner = AutoModelForCausalLM.from_pretrained(model_id, config=config, torch_dtype=torch.float32)
     output_names = ["logits"]
+
+    # Wrapper: keep use_cache=True so the model generates the causal mask
+    # correctly, but only return logits (discard KV cache outputs).
+    class CausalLogitsOnly(torch.nn.Module):
+        def __init__(self, model):
+            super().__init__()
+            self.model = model
+        def forward(self, input_ids, attention_mask):
+            out = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            return out.logits
+    model = CausalLogitsOnly(inner)
 else:
     print(f"Encoder model ({model_type}) — exporting hidden states", file=sys.stderr)
     model = AutoModel.from_pretrained(model_id, config=config, torch_dtype=torch.float32)
