@@ -986,7 +986,6 @@ dependencies = [
  "hologram-graph",
  "hologram-ring",
  "libc",
- "metal",
  "parking_lot",
  "rayon",
  "rkyv",
