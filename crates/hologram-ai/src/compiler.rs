@@ -73,10 +73,51 @@ pub struct CompileStats {
 
 /// A compiled `.holo` archive ready to be saved or executed.
 pub struct HoloArchive {
-    /// The compiled archive bytes (single archive or pipeline archive).
+    /// The compiled archive bytes. Empty when `path` is set.
     pub bytes: Vec<u8>,
+    /// Path to the archive on disk. Set for streaming compilation of
+    /// large models — the archive was written directly to disk without
+    /// ever loading it into memory.
+    pub path: Option<std::path::PathBuf>,
     pub metadata: ModelMetadata,
     pub stats: CompileStats,
+}
+
+/// Sections to embed in the archive during the single build pass.
+///
+/// Collected by the CLI before compilation so that the compiler can
+/// include them in `build_final_archive_to_file` — no post-processing
+/// `rebuild_archive_with_section` round-trips needed.
+#[derive(Default)]
+pub struct ArchiveSections {
+    sections: Vec<(u32, Vec<u8>)>,
+}
+
+impl ArchiveSections {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a section from an `EmbeddableSection` implementor.
+    pub fn add(&mut self, section: &dyn hologram::hologram_archive::section::EmbeddableSection) {
+        self.sections
+            .push((section.section_kind(), section.to_bytes()));
+    }
+
+    /// Add a raw section (kind + pre-serialized bytes).
+    pub fn add_raw(&mut self, kind: u32, bytes: Vec<u8>) {
+        self.sections.push((kind, bytes));
+    }
+
+    /// Whether any sections have been added.
+    pub fn is_empty(&self) -> bool {
+        self.sections.is_empty()
+    }
+
+    /// Consume and return the collected sections.
+    pub fn into_inner(self) -> Vec<(u32, Vec<u8>)> {
+        self.sections
+    }
 }
 
 /// Debug mapping from source tensor names to compiled node indices.
@@ -204,14 +245,38 @@ impl ModelCompiler {
     /// For LLM models (GGUF with transformer architecture), produces a pipeline
     /// archive with named layer entrypoints. For simpler models (ONNX), produces
     /// a single-graph archive.
-    pub fn compile(&self, source: ModelSource) -> anyhow::Result<HoloArchive> {
+    ///
+    /// `extra_sections`: optional sections (model_meta, tokenizer, host) to
+    /// embed in the archive during the single build pass. Avoids the costly
+    /// rebuild_archive_with_section post-processing that unpacks + repacks the
+    /// entire archive per section (3× for a 14 GB SDXL UNet archive = 42 GB
+    /// of wasted allocations).
+    pub fn compile(
+        &self,
+        source: ModelSource,
+    ) -> anyhow::Result<HoloArchive> {
+        self.compile_with_sections(source, ArchiveSections::new())
+    }
+
+    /// Compile with embedded sections.
+    ///
+    /// Sections (model_meta, tokenizer, host) are included in the single
+    /// archive build pass. No post-processing `rebuild_archive_with_section`
+    /// round-trips — critical for large models where each rebuild unpacks +
+    /// repacks the entire archive.
+    pub fn compile_with_sections(
+        &self,
+        source: ModelSource,
+        sections: ArchiveSections,
+    ) -> anyhow::Result<HoloArchive> {
+        let extra_sections = sections.into_inner();
         // Multi-component models have their own compilation path.
         if let ModelSource::MultiOnnx {
             components,
             connections,
         } = source
         {
-            return self.compile_multi_onnx(components, connections);
+            return self.compile_multi_onnx(components, connections, &extra_sections);
         }
 
         // Step 1 — import.
@@ -296,17 +361,38 @@ impl ModelCompiler {
 
         use hologram_ai_common::sections::meta::ComponentRole;
 
-        // TODO: when Q4 quantization is enabled, quantized weights become dead
-        // in the weight section (replaced by Q4 constants in the graph). Stripping
-        // them requires remapping constant offsets which is a larger refactor.
-        // For now, include all weights — archive size is larger than optimal but
-        // correct. The Q4 constants are still used for execution.
-        let (weights, weight_index) = collect_weight_bytes(&ai_graph)?;
-        let total_weight_bytes = weights.len() as u64;
-        let extra_weights: Option<&[u8]> = if weights.is_empty() {
-            None
+        // Collect weight bytes. For large models (>256 MB of Mmap weights),
+        // stream to a temp file to avoid a multi-GB Vec<u8> allocation.
+        let total_mmap_bytes: u64 = ai_graph
+            .params
+            .values()
+            .filter_map(|p| match p {
+                AiParam::Mmap { len, .. } => Some(*len),
+                _ => None,
+            })
+            .sum();
+        let use_streaming = total_mmap_bytes > 256 * 1024 * 1024; // 256 MB threshold
+
+        let (weights, weight_source, weight_index) = if use_streaming {
+            let (source, idx) = collect_weight_bytes_streaming(&ai_graph)?;
+            (Vec::new(), Some(source), idx)
         } else {
+            let (w, idx) = collect_weight_bytes(&ai_graph)?;
+            (w, None, idx)
+        };
+        let total_weight_bytes = if use_streaming {
+            total_mmap_bytes
+        } else {
+            weights.len() as u64
+        };
+        let extra_weights: Option<&[u8]> = if weights.is_empty() && !use_streaming {
+            None
+        } else if !weights.is_empty() {
             Some(&weights)
+        } else {
+            // Streaming path: weights are in temp file, not in memory.
+            // Pass empty slice — the archive will be built via build_to_file.
+            Some(&[])
         };
 
         let archive_bytes = if is_llm {
@@ -373,8 +459,130 @@ impl ModelCompiler {
                 "LLM pipeline graphs ready (prefill + decode + verify)"
             );
 
-            // Compile all three as a pipeline. Weights are shared (same weight_group).
-            self.compile_components(
+            // Compile all three as a pipeline via streaming writer.
+            // The first sub-archive (prefill) gets the real weights via
+            // add_model_streaming. The other two get graph-only sub-archives.
+            if let Some(ws) = weight_source {
+                // Streaming path: build pipeline archive to a temp file.
+                use hologram::hologram_archive::section::EmbeddableSection;
+                use hologram::hologram_archive::writer::pipeline_writer::PipelineWriter;
+                use hologram_ai_common::sections::meta::{
+                    ComponentConnection, ComponentDescriptor, MetaSection,
+                };
+
+                let tmp_output = tempfile::NamedTempFile::new()
+                    .context("creating temp output file for LLM pipeline")?;
+                let output_path = tmp_output
+                    .into_temp_path()
+                    .keep()
+                    .map_err(|e| anyhow::anyhow!("persisting temp output: {e}"))?;
+                let scratch = tempfile::NamedTempFile::new()
+                    .context("creating scratch file for LLM pipeline assembly")?;
+                let scratch_path = scratch.path().to_path_buf();
+
+                // Compile sub-archives (graph + sections, no weights).
+                let prefill_archive = compile_one_component(
+                    &prefill_graph, &prefill_mem.kv_cache_layout,
+                    &self.lowering_options(), &LowerPhase::Forward,
+                    Some(&[]), Some(&weight_index),
+                )?;
+                let decode_archive = compile_one_component(
+                    &decode_graph, &decode_mem.kv_cache_layout,
+                    &self.lowering_options(), &LowerPhase::Forward,
+                    None, None,
+                )?;
+                let verify_archive = compile_one_component(
+                    &verify_graph, &verify_mem.kv_cache_layout,
+                    &self.lowering_options(), &LowerPhase::Forward,
+                    None, None,
+                )?;
+
+                // Build MetaSection.
+                let meta = MetaSection::new(
+                    vec![
+                        ComponentDescriptor {
+                            name: "prefill".into(),
+                            role: ComponentRole::Prefill,
+                            weight_group: "model".into(),
+                            weight_source: None,
+                        },
+                        ComponentDescriptor {
+                            name: "decode".into(),
+                            role: ComponentRole::Decode,
+                            weight_group: "model".into(),
+                            weight_source: Some("prefill".into()),
+                        },
+                        ComponentDescriptor {
+                            name: "verify".into(),
+                            role: ComponentRole::Prefill,
+                            weight_group: "model".into(),
+                            weight_source: Some("prefill".into()),
+                        },
+                    ],
+                    vec![] as Vec<ComponentConnection>,
+                );
+
+                let mut writer = PipelineWriter::new()
+                    .add_model_streaming("prefill", prefill_archive, ws)
+                    .add_model("decode", decode_archive)
+                    .add_model("verify", verify_archive)
+                    .add_section(meta.section_kind(), meta.to_bytes());
+
+                for (kind, bytes) in &extra_sections {
+                    writer = writer.add_section(*kind, bytes.clone());
+                }
+
+                // Add model_meta section for LLM detection at load time.
+                {
+                    use hologram::hologram_archive::section::EmbeddableSection;
+                    let model_meta =
+                        hologram::hologram_archive::section::model_meta::ModelMetaSection {
+                            kind: hologram::hologram_archive::section::model_meta::ModelKind::TextLlm,
+                            arch: pre_metadata.arch.clone(),
+                            description: pre_metadata.arch.clone(),
+                            max_seq_len: pre_metadata.context_len,
+                            supports_prompt: true,
+                            n_layers: pre_metadata.n_layers,
+                            n_kv_heads: pre_metadata.n_kv_heads,
+                            head_dim: pre_metadata.head_dim,
+                            kv_k_bits: 0,
+                            kv_v_bits: 0,
+                            kv_boundary_layers: 2,
+                            kv_wht: false,
+                        };
+                    writer = writer.add_section(model_meta.section_kind(), model_meta.to_bytes());
+                }
+
+                writer
+                    .build_to_file(&output_path, &scratch_path)
+                    .map_err(|e| anyhow::anyhow!("building streaming LLM pipeline: {e}"))?;
+
+                let _ = std::fs::remove_file(&scratch_path);
+
+                let archive_size = std::fs::metadata(&output_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                info!(
+                    archive_mb = archive_size / (1024 * 1024),
+                    "streaming LLM pipeline archive: {} MiB",
+                    archive_size / (1024 * 1024),
+                );
+
+                return Ok(HoloArchive {
+                    bytes: Vec::new(),
+                    path: Some(output_path),
+                    metadata: pre_metadata,
+                    stats: CompileStats {
+                        import_warnings,
+                        validation_errors: 0,
+                        total_weight_bytes,
+                        node_count: prefill_nodes + decode_nodes + verify_nodes,
+                    },
+                });
+            }
+
+            // Non-streaming fallback (small models < 256 MB).
+            self.compile_components_with_sections(
                 vec![
                     ComponentSpec {
                         name: "prefill".into(),
@@ -400,7 +608,7 @@ impl ModelCompiler {
                     },
                     ComponentSpec {
                         name: "verify".into(),
-                        role: ComponentRole::Prefill, // verification uses prefill-style execution
+                        role: ComponentRole::Prefill,
                         weight_group: "model".into(),
                         opt_profile: hologram_ai_common::OptProfile::Llm,
                         graph: &verify_graph,
@@ -410,7 +618,8 @@ impl ModelCompiler {
                         weight_index: Some(weight_index),
                     },
                 ],
-                vec![], // no inter-component connections
+                vec![],
+                &extra_sections,
             )?
         } else {
             // ── Non-LLM: single graph ───────────────────────────────────────
@@ -444,20 +653,98 @@ impl ModelCompiler {
                 .plan(&ai_graph)
                 .context("memory planning failed")?;
 
-            self.compile_components(
-                vec![ComponentSpec {
-                    name: "model".into(),
-                    role: ComponentRole::Backbone,
-                    weight_group: "model".into(),
-                    opt_profile: hologram_ai_common::OptProfile::Generic,
-                    graph: &ai_graph,
-                    mem_plan: &mem_plan,
-                    phase: LowerPhase::Forward,
-                    weights: extra_weights,
-                    weight_index: Some(weight_index),
-                }],
-                vec![],
-            )?
+            if let Some(ws) = weight_source {
+                // Streaming path: build a pipeline archive directly to a
+                // temp file, streaming weights from the collection temp file.
+                // Uses PipelineWriter so the output is a proper pipeline
+                // archive (SECTION_PIPELINE header), enabling partial
+                // recompilation of individual components.
+                use hologram::hologram_archive::section::EmbeddableSection;
+                use hologram::hologram_archive::writer::pipeline_writer::PipelineWriter;
+                use hologram_ai_common::sections::meta::{
+                    ComponentConnection, ComponentDescriptor, ComponentRole, MetaSection,
+                };
+
+                let tmp_output = tempfile::NamedTempFile::new()
+                    .context("creating temp output file")?;
+                let output_path = tmp_output
+                    .into_temp_path()
+                    .keep()
+                    .map_err(|e| anyhow::anyhow!("persisting temp output: {e}"))?;
+
+                let scratch = tempfile::NamedTempFile::new()
+                    .context("creating scratch file for pipeline assembly")?;
+                let scratch_path = scratch.path().to_path_buf();
+
+                // Compile the sub-archive (graph + sections, empty weights).
+                let sub_archive = compile_one_component(
+                    &ai_graph,
+                    &mem_plan.kv_cache_layout,
+                    &self.lowering_options(),
+                    &LowerPhase::Forward,
+                    Some(&[]),
+                    Some(&weight_index),
+                )?;
+
+                // Build MetaSection for the pipeline wrapper.
+                let meta = MetaSection::new(
+                    vec![ComponentDescriptor {
+                        name: "model".into(),
+                        role: ComponentRole::Backbone,
+                        weight_group: "model".into(),
+                        weight_source: None,
+                    }],
+                    vec![] as Vec<ComponentConnection>,
+                );
+
+                let writer = PipelineWriter::new()
+                    .add_model_streaming("model", sub_archive, ws)
+                    .add_section(meta.section_kind(), meta.to_bytes());
+
+                writer
+                    .build_to_file(&output_path, &scratch_path)
+                    .map_err(|e| anyhow::anyhow!("building streaming pipeline archive: {e}"))?;
+
+                // Clean up scratch file.
+                let _ = std::fs::remove_file(&scratch_path);
+
+                let archive_size = std::fs::metadata(&output_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                info!(
+                    archive_mb = archive_size / (1024 * 1024),
+                    "streaming pipeline archive: {} MiB",
+                    archive_size / (1024 * 1024),
+                );
+
+                return Ok(HoloArchive {
+                    bytes: Vec::new(),
+                    path: Some(output_path),
+                    metadata: pre_metadata,
+                    stats: CompileStats {
+                        import_warnings,
+                        validation_errors: 0,
+                        total_weight_bytes,
+                        node_count: 0,
+                    },
+                });
+            } else {
+                self.compile_components_with_sections(
+                    vec![ComponentSpec {
+                        name: "model".into(),
+                        role: ComponentRole::Backbone,
+                        weight_group: "model".into(),
+                        opt_profile: hologram_ai_common::OptProfile::Generic,
+                        graph: &ai_graph,
+                        mem_plan: &mem_plan,
+                        phase: LowerPhase::Forward,
+                        weights: extra_weights,
+                        weight_index: Some(weight_index.clone()),
+                    }],
+                    vec![],
+                    &extra_sections,
+                )?
+            }
         };
 
         let metadata = pre_metadata;
@@ -465,6 +752,7 @@ impl ModelCompiler {
 
         Ok(HoloArchive {
             bytes: archive_bytes,
+            path: None,
             metadata,
             stats: CompileStats {
                 import_warnings,
@@ -570,10 +858,12 @@ impl ModelCompiler {
             Some(layer_header),
             bundle,
             wi,
+            &[],
         )?;
 
         let archive = HoloArchive {
             bytes: archive_bytes,
+            path: None,
             metadata,
             stats: CompileStats {
                 import_warnings,
@@ -683,10 +973,12 @@ impl ModelCompiler {
             Some(layer_header),
             bundle,
             wi,
+            &[],
         )?;
 
         let archive = HoloArchive {
             bytes: archive_bytes,
+            path: None,
             metadata,
             stats: CompileStats {
                 import_warnings,
@@ -713,6 +1005,17 @@ impl ModelCompiler {
         &self,
         specs: Vec<ComponentSpec<'_>>,
         connections: Vec<hologram_ai_common::sections::meta::ComponentConnection>,
+    ) -> anyhow::Result<Vec<u8>> {
+        self.compile_components_with_sections(specs, connections, &[])
+    }
+
+    /// Compile components with additional sections (tokenizer, host meta, etc.)
+    /// embedded in the pipeline wrapper archive.
+    pub fn compile_components_with_sections(
+        &self,
+        specs: Vec<ComponentSpec<'_>>,
+        connections: Vec<hologram_ai_common::sections::meta::ComponentConnection>,
+        extra_sections: &[(u32, Vec<u8>)],
     ) -> anyhow::Result<Vec<u8>> {
         use hologram::hologram_archive::section::EmbeddableSection;
         use hologram::hologram_archive::writer::pipeline_writer::PipelineWriter;
@@ -797,6 +1100,11 @@ impl ModelCompiler {
         let meta_section = meta.to_bytes();
         writer = writer.add_section(meta.section_kind(), meta_section);
 
+        // Embed extra sections (tokenizer, host metadata, etc.) in the wrapper.
+        for (kind, bytes) in extra_sections {
+            writer = writer.add_section(*kind, bytes.clone());
+        }
+
         // Build shared weight blob + dedup index for multi-component models
         // with DIFFERENT weight groups (e.g., SD text_encoder + unet).
         // For LLM pipeline (prefill+decode sharing one weight_group), skip the
@@ -847,6 +1155,7 @@ impl ModelCompiler {
         &self,
         components: Vec<ComponentInput>,
         connections: Vec<hologram_ai_common::sections::meta::ComponentConnection>,
+        _extra_sections: &[(u32, Vec<u8>)],
     ) -> anyhow::Result<HoloArchive> {
         use hologram_ai_common::sections::meta::ComponentRole;
 
@@ -904,9 +1213,8 @@ impl ModelCompiler {
                 // Concretize.
                 let (ai_graph, seq_dim_positions) = concretize_all_dims(ai_graph, seq_len)
                     .with_context(|| format!("concretizing component '{}'", comp.name))?;
-                let ai_graph = post_concretization_repair(ai_graph)?;
-                // TODO(Plan 045): zero seq-dependent i64 values in shape constants
-                let _ = &seq_dim_positions;
+                let mut ai_graph = post_concretization_repair(ai_graph)?;
+                zero_seq_dims_for_lowering(&mut ai_graph, &seq_dim_positions);
 
                 // Memory plan.
                 let mem_plan = if is_transformer {
@@ -989,6 +1297,7 @@ impl ModelCompiler {
 
         Ok(HoloArchive {
             bytes: archive_bytes,
+            path: None,
             metadata: ModelMetadata {
                 arch: "multi-onnx".into(),
                 vocab_size: 0,
@@ -1099,6 +1408,7 @@ fn build_final_archive(
     layer_header: Option<hologram::hologram_archive::entrypoint::schedule::LayerHeader>,
     bundle: Option<&hologram_ai_common::ContextBundle>,
     weight_index: Option<&hologram::hologram_archive::weight::index::WeightIndex>,
+    extra_sections: &[(u32, Vec<u8>)],
 ) -> anyhow::Result<Vec<u8>> {
     use hologram::hologram_archive::section::{
         EmbeddableSection, SECTION_LAYER_HEADER, SECTION_WEIGHT_INDEX,
@@ -1152,9 +1462,77 @@ fn build_final_archive(
         }
     }
 
+    // Add caller-provided sections (model_meta, tokenizer, host_meta).
+    for (kind, bytes) in extra_sections {
+        writer = writer.add_raw_section(*kind, bytes.clone());
+    }
+
     writer
         .build()
         .map_err(|e| anyhow::anyhow!("building final archive: {e}"))
+}
+
+/// Build a final archive to a file, streaming weights from a `WeightSource`.
+///
+/// Unlike `build_final_archive` which holds all weights in memory, this writes
+/// the archive directly to disk. Peak memory: graph + sections (~tens of MB).
+fn _build_final_archive_to_file(
+    unpacked: UnpackedArchive,
+    weight_source: hologram::hologram_archive::WeightSource,
+    layer_header: Option<hologram::hologram_archive::entrypoint::schedule::LayerHeader>,
+    bundle: Option<&hologram_ai_common::ContextBundle>,
+    weight_index: Option<&hologram::hologram_archive::weight::index::WeightIndex>,
+    extra_sections: &[(u32, Vec<u8>)],
+    output_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    use hologram::hologram_archive::section::{
+        EmbeddableSection, SECTION_LAYER_HEADER, SECTION_WEIGHT_INDEX,
+    };
+
+    let mut writer = hologram::HoloWriter::new()
+        .set_graph_bytes_uncompressed(unpacked.graph_bytes)
+        .set_weight_source(weight_source);
+
+    let layer_header_kind = layer_header.as_ref().map(|lh| lh.section_kind());
+    let bundle_kinds: Vec<u32> = bundle
+        .map(|b| b.iter().map(|(k, _)| k).collect())
+        .unwrap_or_default();
+
+    for (kind, bytes) in unpacked.sections {
+        if layer_header_kind == Some(kind) {
+            continue;
+        }
+        if bundle_kinds.contains(&kind) {
+            continue;
+        }
+        if weight_index.is_some() && kind == SECTION_WEIGHT_INDEX {
+            continue;
+        }
+        writer = writer.add_raw_section(kind, bytes);
+    }
+
+    if let Some(ref lh) = layer_header {
+        writer = writer.add_raw_section(SECTION_LAYER_HEADER, lh.to_bytes());
+    }
+
+    if let Some(wi) = weight_index {
+        writer = writer.add_raw_section(SECTION_WEIGHT_INDEX, wi.to_bytes());
+    }
+
+    if let Some(bundle) = bundle {
+        for (kind, bytes) in bundle.iter() {
+            writer = writer.add_raw_section(kind, bytes.to_vec());
+        }
+    }
+
+    // Add caller-provided sections (model_meta, tokenizer, host_meta).
+    for (kind, bytes) in extra_sections {
+        writer = writer.add_raw_section(*kind, bytes.clone());
+    }
+
+    writer
+        .build_to_file(output_path)
+        .map_err(|e| anyhow::anyhow!("building final archive to file: {e}"))
 }
 
 /// Compile a single AiGraph into a sub-archive ready for PipelineWriter.
@@ -1305,6 +1683,7 @@ fn compile_one_component(
         Some(layer_header),
         bundle,
         weight_index,
+        &[], // compile_one_component doesn't add extra sections
     )
 }
 
@@ -1879,7 +2258,42 @@ fn zero_seq_dims_for_lowering(
         }
     }
 
-    debug!(zeroed_i64, "zero_seq_dims_for_lowering complete");
+    // ── Zero seq dims in tensor shapes ────────────────────────────────────
+    // For ALL seq-dependent tensors, set the shape dim to 0 (sentinel).
+    // This ensures that downstream ops (Slice, Reshape, etc.) see the
+    // seq axis as dynamic at lowering time, producing 0-sentinel parameters
+    // that the runtime resolves from actual buffer sizes.
+    // Zero seq dims in activation tensor shapes only.
+    // Skip constants/weights — their shapes must stay concrete for correct lowering.
+    let constant_tids: std::collections::HashSet<hologram_ai_common::TensorId> = graph
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, hologram_ai_common::AiOp::Constant { .. }))
+        .flat_map(|n| n.outputs.iter().copied())
+        .collect();
+
+    let mut zeroed_shapes = 0usize;
+    for &(tid, axis) in seq_dim_positions {
+        // Skip weight/constant tensors.
+        if constant_tids.contains(&tid) {
+            continue;
+        }
+        if let Some(info) = graph.tensor_info.get_mut(&tid) {
+            if axis < info.shape.len() {
+                if let hologram_ai_common::Dim::Concrete(v) = &info.shape[axis] {
+                    if *v > 0 {
+                        info.shape[axis] = hologram_ai_common::Dim::Concrete(0);
+                        zeroed_shapes += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    debug!(
+        zeroed_i64,
+        zeroed_shapes, "zero_seq_dims_for_lowering complete"
+    );
 }
 
 /// Concretize all symbolic and dynamic dimensions in the graph.
@@ -1955,6 +2369,20 @@ fn concretize_all_dims(
         {
             debug!(var = %entry.name, value = context_len, "concretizing seq-like dim");
             entry.fixed = Some(context_len);
+        } else if name_lower.contains("height") || name_lower.contains("width") {
+            // Spatial dims for diffusion models: default to 128 (1024×1024
+            // image ÷ 8 VAE downscale). Overridden by spatial_scale if set.
+            let spatial_default = 128u64;
+            debug!(var = %entry.name, value = spatial_default, "concretizing spatial dim");
+            entry.fixed = Some(spatial_default);
+        } else if name_lower.contains("channel") {
+            // Channel dim for diffusion latent space: typically 4.
+            debug!(var = %entry.name, value = 4, "concretizing channel dim");
+            entry.fixed = Some(4);
+        } else if name_lower == "steps" {
+            // Timestep steps: always 1 (single timestep per forward pass).
+            debug!(var = %entry.name, value = 1, "concretizing steps dim");
+            entry.fixed = Some(1);
         } else {
             debug!(var = %entry.name, value = 1, "concretizing batch-like dim");
             entry.upper = Some(1u64);
@@ -2017,6 +2445,124 @@ fn collect_weight_bytes(
     hologram::hologram_archive::weight::index::WeightIndex,
 )> {
     collect_weight_bytes_filtered(ai_graph, &std::collections::HashSet::new())
+}
+
+/// Streaming version of `collect_weight_bytes`: writes weights to a temp file
+/// instead of a `Vec<u8>`. Returns a `WeightSource::File` for the archive writer.
+///
+/// Peak memory: one weight's I/O buffer (256 KB) + index entries (~1 KB each).
+/// For SDXL UNet with 10 GB of Mmap weights, this uses ~1 MB instead of 10 GB.
+fn collect_weight_bytes_streaming(
+    ai_graph: &AiGraph,
+) -> anyhow::Result<(
+    hologram::hologram_archive::WeightSource,
+    hologram::hologram_archive::weight::index::WeightIndex,
+)> {
+    use hologram::hologram_archive::weight::index::{
+        derive_layer_group, WeightIndex, WeightIndexEntry,
+    };
+    use std::io::{Seek, Write};
+
+    let mut sorted: Vec<_> = ai_graph
+        .params
+        .iter()
+        .filter(|(_, p)| matches!(p, AiParam::Mmap { .. }))
+        .collect();
+    if sorted.is_empty() {
+        return Ok((
+            hologram::hologram_archive::WeightSource::Bytes(Vec::new()),
+            WeightIndex { entries: vec![] },
+        ));
+    }
+    sorted.sort_by_key(|(&tid, _)| tid);
+
+    let tmp = tempfile::NamedTempFile::new()
+        .context("creating temp file for streaming weight collection")?;
+    let mut writer = std::io::BufWriter::with_capacity(256 * 1024, tmp.as_file().try_clone()?);
+    let mut entries = Vec::with_capacity(sorted.len());
+    let mut write_offset = 0u64;
+
+    for (&tid, param) in &sorted {
+        let AiParam::Mmap {
+            path, offset, len, ..
+        } = param
+        else {
+            continue;
+        };
+        let n = *len as usize;
+        let mut f = std::fs::File::open(path)
+            .with_context(|| format!("opening weight file {path:?}"))?;
+
+        // Disable OS page caching for this file — prevents the OS from
+        // keeping 10 GB of weight pages in the page cache (which inflates
+        // RSS even though the data isn't in our heap).
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::io::AsRawFd;
+            extern "C" {
+                fn fcntl(fd: std::ffi::c_int, cmd: std::ffi::c_int, ...) -> std::ffi::c_int;
+            }
+            // F_NOCACHE = 48 on macOS (Darwin)
+            const F_NOCACHE: std::ffi::c_int = 48;
+            unsafe { fcntl(f.as_raw_fd(), F_NOCACHE, 1 as std::ffi::c_int) };
+        }
+
+        f.seek(std::io::SeekFrom::Start(*offset))?;
+
+        // Stream from source to temp file in 256 KB chunks.
+        let mut remaining = n;
+        let mut buf = vec![0u8; 256 * 1024];
+        while remaining > 0 {
+            let to_read = remaining.min(buf.len());
+            std::io::Read::read_exact(&mut f, &mut buf[..to_read])
+                .with_context(|| format!("reading {n} bytes from {path:?}"))?;
+            writer.write_all(&buf[..to_read])?;
+            remaining -= to_read;
+        }
+
+        let tensor_name = ai_graph
+            .tensor_names
+            .get(&tid)
+            .cloned()
+            .unwrap_or_else(|| format!("tensor_{tid}"));
+        entries.push(WeightIndexEntry {
+            tensor_name: tensor_name.clone(),
+            group: derive_layer_group(&tensor_name),
+            offset: write_offset,
+            size: n as u64,
+        });
+
+        // 4-byte align.
+        let aligned = (n as u64).div_ceil(4) * 4;
+        let padding = aligned - n as u64;
+        if padding > 0 {
+            writer.write_all(&vec![0u8; padding as usize])?;
+        }
+        write_offset += aligned;
+    }
+    writer.flush()?;
+
+    let total_len = write_offset;
+    // Persist the temp file so it survives until the archive is built.
+    // The caller is responsible for cleanup (or the OS cleans /tmp on reboot).
+    let path = tmp.into_temp_path();
+    let persisted = path.keep()
+        .map_err(|e| anyhow::anyhow!("persisting temp weight file: {e}"))?;
+    tracing::info!(
+        total_mb = total_len / (1024 * 1024),
+        n_weights = entries.len(),
+        path = %persisted.display(),
+        "streamed weights to temp file ({} MiB)",
+        total_len / (1024 * 1024),
+    );
+
+    Ok((
+        hologram::hologram_archive::WeightSource::File {
+            path: persisted,
+            len: total_len,
+        },
+        WeightIndex { entries },
+    ))
 }
 
 /// Predict which weight TIDs will be quantized during lowering.

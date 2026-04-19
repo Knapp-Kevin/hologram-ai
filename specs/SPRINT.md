@@ -123,11 +123,24 @@ zero runtime code. All kernels belong in hologram base crate.
   **Finding:** Shape metadata overrides can't fix baked op parameters (MatMul m/k/n,
   Softmax size). Shape overrides tell the *next* op what shape a buffer has, but
   the *current* op still computes with its baked parameter values.
-- [ ] **0-sentinel op parameters (Plan 045)** — zero seq-dependent values in
-  Reshape/Expand shape constants AND set seq axis to Dynamic for MatMul/norm
-  input tensors. Runs after `post_concretization_repair`, before `lower()`.
-  This makes DeferredStrategy emit 0-sentinels that the runtime resolves
-  from buffer sizes. See Plan 045 "Implementation: Shape Tensor Zeroing Pass".
+- [x] **0-sentinel op parameters (Plan 045)** — `zero_seq_dims_for_lowering()`
+  now called in all compile paths including `compile_multi_onnx` (was missing).
+  Fixed 75× UNet regression (>10 min → ~20s).
+- [x] **Metal MatMul dispatch** — wired Metal SGEMM through tape executor for
+  InlineMatMul, InlineMatMulActivation, InlineMatMulBiasActivation. 15× kernel
+  speedup (8.6s → 0.57s). Conv2d 1×1 also routes through Metal.
+- [x] **Online softmax for large attention** — SD self-attention (4096×4096)
+  uses O(seq) online softmax instead of materializing O(seq²) score matrix.
+- [x] **Streaming pipeline archives** — `PipelineWriter::build_to_file()` streams
+  weights from disk. All archives are now proper pipeline format (SECTION_PIPELINE).
+- [x] **GPU buffer chaining (Plan 065)** — `GpuBuffer` + `GpuInput` abstraction,
+  Metal kernel coverage for all SD UNet ops, GPU-to-GPU op chaining. CPU kernel
+  time reduced to 587ms but hybrid GPU/CPU execution creates 24s sync overhead.
+- [ ] **ComputeBackend + ComputeMemory rewrite (Plan 067)** — replaces Plans
+  065/066. New `hologram-backend` crate with device-native execution: all data
+  lives on one device, all computation happens there, no CPU↔GPU transfers.
+  Every backend implements full UOR computational model (ring ops, float ops,
+  data movement). Target: 2-5s for SD UNet.
   - [ ] `zero_seq_dims_for_lowering()` — new function in compiler.rs
     - Zero `known_i64_values[axis]` on Reshape/Flatten output tensors
     - Zero seq dims on Expand shape input tensors
@@ -315,6 +328,27 @@ zero runtime code. All kernels belong in hologram base crate.
       GraphOps + `InlineConv2dActivation` / `InlineConv2dBiasActivation` TapeKernels in
       hologram base. Fusion pass fires automatically during `hologram::compile()`.
       Eliminates 335MB memory traffic per Conv2d+SiLU block at 512×512.
+- [ ] **Vision-language model support (Plan 070 — Falcon-Perception analysis)**
+  - [ ] ONNX export script for Falcon-Perception-300M (Python `torch.onnx.export`)
+  - **hologram-ai changes:**
+    - [ ] `AttentionMaskKind` enum on AiOp — replace `causal: bool` with `Full |
+      Causal | HybridCausalPrefix | SpatialWindow | BlockSparse` + lowering
+    - [ ] `RoPE2D` AiOp variant + lowering (split temporal/spatial halves)
+    - [ ] `VisionTokenConfig` in tokenizer — image placeholder, coord/size/seg
+      token IDs for multimodal encoding
+    - [ ] New DimVars: `IMAGE_HEIGHT`, `IMAGE_WIDTH`, `NUM_IMAGES`, `PATCH_DIM`
+    - [ ] `SquaredReluGateFusion` pass (pattern: `relu(gate)² * up`)
+    - [ ] SafeTensors weight loader crate (medium-term, for HF ecosystem)
+    - [ ] `MultimodalTokenizer` trait + `encode_with_images()` API
+  - **hologram base changes:**
+    - [ ] `AttentionMaskKind` kernel support in `dispatch_attention` — hybrid
+      bidirectional prefix + causal suffix, spatial window patterns
+    - [ ] `FloatOp::RoPE2D` variant + kernel (2D spatial rotation with learned freqs)
+    - [ ] `FloatOp::FusedSquaredReluGate` kernel (like FusedSwiGLU but relu²)
+    - [ ] Sink token gating (`sigmoid(LSE - sink_param)`) fused into attention output
+    - [ ] Paged KV cache in hologram-exec (Plan 016) — virtual page tables,
+      LIFO free-page stack, `KvPagedWrite`/`KvPagedRead` dispatch
+    - [ ] AnyUp-style windowed cross-attention kernel (P3, segmentation)
 - [ ] Test with Whisper (encoder-decoder, audio)
 - [ ] Fix any op dispatch failures discovered
 - [ ] Goal: `hologram-ai compile -m model.onnx` works for top-20 HuggingFace models
@@ -686,6 +720,25 @@ the full chat template into `--prompt` on every invocation.
 ---
 
 ## Complete (this sprint)
+
+### SDXL ONNX compilation (Plans 061, 064)
+- [x] ConstantOfShape op: AiOp variant + ONNX mapping + DataProp materialization
+- [x] Dynamic Slice resolution: reads known_i64_values from DataProp when import-time resolution fails
+- [x] Mmap constant reading: small constants from external data files read eagerly for Slice params
+- [x] All 4 SDXL components compile: text_encoder, text_encoder_2, UNet (10.3 GB), vae_decoder
+- [ ] **Streaming compilation (Plan 064)** — compile SDXL UNet within 2 GB RSS
+  - [ ] Phase 1: Fix Q4 accumulation leak (`.get()` → `.remove()`)
+  - [ ] Phase 2: Spill Q4 constants to temp file
+  - [ ] Phase 3: Streaming archive write
+  - [ ] Phase 4: OS page cache advise
+
+### OutputBuffer + Mmap eviction (Plan 062)
+- [x] OutputBuffer enum (Heap/Arena/Mmap) replaces &mut Vec<u8> in 44 kernels
+- [x] Mmap eviction via munmap — RSS drops during SD UNet execution
+- [x] Lazy allocation: buffers start empty, self-promote to Mmap on resize ≥ 256 KiB
+- [x] heap_only_eviction flag for Conv2d-heavy models (VAE)
+- [x] SD UNet live working set: 37 MiB (was 47 GiB)
+- [x] TinyLlama: 42.5 tok/s unaffected
 
 ### Cleanup: GGUF removal (Plan 061 Stage 0)
 - [x] Removed `hologram-ai-gguf` crate, workspace member, and all consumers

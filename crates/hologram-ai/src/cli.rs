@@ -1,5 +1,6 @@
 //! CLI entry point for hologram-ai.
 
+use anyhow::Context as _;
 use clap::Parser;
 use hologram_ai::compiler::{ModelCompiler, ModelSource};
 use hologram_ai::download;
@@ -175,6 +176,9 @@ fn main() -> anyhow::Result<()> {
                     (source, model_path.clone(), None, None)
                 };
 
+            // These sections are collected here so that streaming compilation
+            // can include them in the single build pass (no rebuild-with-section
+            // round-trips on a 14 GB archive).
             let quant_strategy = match quantize.as_deref() {
                 Some("q2_0" | "Q2_0") => hologram_ai_common::lower::QuantStrategy::Q2_0,
                 Some("q4_0" | "Q4_0") => hologram_ai_common::lower::QuantStrategy::Q4_0,
@@ -196,7 +200,7 @@ fn main() -> anyhow::Result<()> {
                 patch_budget_ratio,
                 ..Default::default()
             };
-            let compiled = compiler.compile(source)?;
+
             if output.exists() && !output.is_dir() {
                 anyhow::bail!(
                     "'{}' exists and is not a directory. Remove it or choose a different --output path.",
@@ -217,67 +221,83 @@ fn main() -> anyhow::Result<()> {
                 candidate.exists().then_some(candidate)
             });
 
-            // Embed model metadata section.
-            // Use manifest kind if provided, otherwise auto-detect.
-            let kind = if let Some(k) = manifest_kind {
-                k
-            } else {
-                // Detect LLM: either the metadata says so (GGUF sets arch/n_layers)
-                // or we have a tokenizer (strong signal for text models).
-                let is_llm = (compiled.metadata.arch != "unknown"
-                    && compiled.metadata.n_layers > 0)
-                    || tok_path.is_some();
-                if is_llm {
-                    hologram::hologram_archive::section::model_meta::ModelKind::TextLlm
-                } else {
-                    hologram::hologram_archive::section::model_meta::ModelKind::Generic
-                }
-            };
-            let model_meta = hologram::hologram_archive::section::model_meta::ModelMetaSection {
-                kind,
-                arch: compiled.metadata.arch.clone(),
-                description: format!("{} ({})", compiled.metadata.arch, model_path.display()),
-                max_seq_len: compiled.metadata.context_len,
-                supports_prompt: tok_path.is_some(),
-                n_layers: compiled.metadata.n_layers,
-                n_kv_heads: compiled.metadata.n_kv_heads,
-                head_dim: compiled.metadata.head_dim,
-                kv_k_bits: 0,
-                kv_v_bits: 0,
-                kv_boundary_layers: 2,
-                kv_wht: false,
-            };
-            let mut final_bytes =
-                hologram_ai::compiler::rebuild_archive_with_section(&compiled.bytes, &model_meta)?;
+            // ── Collect all sections BEFORE compilation ──────────────────
+            // Single-pass: sections are embedded during archive build.
+            // No post-processing rebuild_archive_with_section round-trips.
+            let mut sections = hologram_ai::compiler::ArchiveSections::new();
 
-            // Embed tokenizer section if available.
+            // Tokenizer section.
             if let Some(tok_path) = &tok_path {
-                let section =
+                let tok_section =
                     hologram_ai_tokenizer::archive::TokenizerSectionData::from_tokenizer_json(
                         tok_path,
                     )?;
                 eprintln!(
                     "embedding tokenizer ({} tokens) from {}",
-                    section.vocab.len(),
+                    tok_section.vocab.len(),
                     tok_path.display()
                 );
-                final_bytes =
-                    hologram_ai::compiler::rebuild_archive_with_section(&final_bytes, &section)?;
+                sections.add(&tok_section);
             }
 
-            // Embed host metadata section if any fields are populated (Plan 060).
-            // Precedence: manifest [host] > CLI flags. A future phase adds
-            // GGUF v3 auto-population as a third source (lowest priority).
+            // Host metadata section.
             let host_section = build_host_meta(&host_cli, manifest_host.as_ref(), None);
             if !host_section.is_empty() {
-                final_bytes = hologram_ai::compiler::rebuild_archive_with_section(
-                    &final_bytes,
-                    &host_section,
-                )?;
+                sections.add(&host_section);
                 eprintln!("embedded host metadata section");
             }
 
-            std::fs::write(&holo_path, &final_bytes)?;
+            // ── Compile with all sections in a single pass ──────────────
+            let compiled = compiler.compile_with_sections(source, sections)?;
+
+            if let Some(archive_path) = &compiled.path {
+                // Streaming path: archive is already on disk. Move it.
+                std::fs::rename(archive_path, &holo_path)
+                    .or_else(|_| std::fs::copy(archive_path, &holo_path).map(|_| ()))
+                    .with_context(|| format!(
+                        "moving archive from {} to {}",
+                        archive_path.display(),
+                        holo_path.display(),
+                    ))?;
+            } else {
+                // In-memory path: add model_meta section and write.
+                let kind = if let Some(k) = manifest_kind {
+                    k
+                } else {
+                    let is_llm = (compiled.metadata.arch != "unknown"
+                        && compiled.metadata.n_layers > 0)
+                        || tok_path.is_some();
+                    if is_llm {
+                        hologram::hologram_archive::section::model_meta::ModelKind::TextLlm
+                    } else {
+                        hologram::hologram_archive::section::model_meta::ModelKind::Generic
+                    }
+                };
+                let model_meta =
+                    hologram::hologram_archive::section::model_meta::ModelMetaSection {
+                        kind,
+                        arch: compiled.metadata.arch.clone(),
+                        description: format!(
+                            "{} ({})",
+                            compiled.metadata.arch,
+                            model_path.display()
+                        ),
+                        max_seq_len: compiled.metadata.context_len,
+                        supports_prompt: tok_path.is_some(),
+                        n_layers: compiled.metadata.n_layers,
+                        n_kv_heads: compiled.metadata.n_kv_heads,
+                        head_dim: compiled.metadata.head_dim,
+                        kv_k_bits: 0,
+                        kv_v_bits: 0,
+                        kv_boundary_layers: 2,
+                        kv_wht: false,
+                    };
+                let final_bytes = hologram_ai::compiler::rebuild_archive_with_section(
+                    &compiled.bytes,
+                    &model_meta,
+                )?;
+                std::fs::write(&holo_path, &final_bytes)?;
+            }
             println!(
                 "wrote {} ({} nodes, {} weight bytes, {} warnings)",
                 holo_path.display(),

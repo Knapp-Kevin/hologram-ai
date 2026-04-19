@@ -32,11 +32,9 @@ import torch
 
 print(f"Loading model {model_id}...", file=sys.stderr)
 config = AutoConfig.from_pretrained(model_id)
-config.use_cache = False
 
 # Detect causal decoder models (GPT, LLaMA, Mistral, etc.) and use
 # AutoModelForCausalLM so the ONNX export produces logits directly.
-# Encoder models (BERT, etc.) use AutoModel with hidden_state output.
 CAUSAL_TYPES = {
     "llama", "gpt2", "gpt_neo", "gpt_neox", "mistral", "qwen2", "phi",
     "gemma", "gemma2", "starcoder2", "codegen", "falcon",
@@ -46,8 +44,19 @@ is_causal = model_type in CAUSAL_TYPES
 
 if is_causal:
     print(f"Causal LM ({model_type}) — exporting with logits output", file=sys.stderr)
-    model = AutoModelForCausalLM.from_pretrained(model_id, config=config, torch_dtype=torch.float32)
+    inner = AutoModelForCausalLM.from_pretrained(model_id, config=config, torch_dtype=torch.float32)
     output_names = ["logits"]
+
+    # Wrapper: keep use_cache=True so the model generates the causal mask
+    # correctly, but only return logits (discard KV cache outputs).
+    class CausalLogitsOnly(torch.nn.Module):
+        def __init__(self, model):
+            super().__init__()
+            self.model = model
+        def forward(self, input_ids, attention_mask):
+            out = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            return out.logits
+    model = CausalLogitsOnly(inner)
 else:
     print(f"Encoder model ({model_type}) — exporting hidden states", file=sys.stderr)
     model = AutoModel.from_pretrained(model_id, config=config, torch_dtype=torch.float32)
@@ -64,13 +73,18 @@ config.save_pretrained(output_dir)
 seq_len = 8
 dummy_ids = torch.ones(1, seq_len, dtype=torch.long)
 dummy_mask = torch.ones(1, seq_len, dtype=torch.long)
+dummy_pos = torch.arange(seq_len, dtype=torch.long).unsqueeze(0)
 
 input_names = ["input_ids", "attention_mask"]
+inputs = (dummy_ids, dummy_mask)
 dynamic_axes = {
     "input_ids": {0: "batch_size", 1: "sequence_length"},
     "attention_mask": {0: "batch_size", 1: "sequence_length"},
     output_names[0]: {0: "batch_size", 1: "sequence_length"},
 }
+# Note: position_ids are NOT exported as an input. The model computes
+# them internally from the attention mask. hologram-ai's
+# PositionIdsInjection pass handles position tracking for KV cache.
 
 onnx_path = os.path.join(output_dir, "model.onnx")
 print(f"Exporting to {onnx_path}...", file=sys.stderr)
@@ -80,7 +94,7 @@ model.train(False)
 with torch.no_grad():
     torch.onnx.export(
         model,
-        (dummy_ids, dummy_mask),
+        inputs,
         onnx_path,
         input_names=input_names,
         output_names=output_names,
