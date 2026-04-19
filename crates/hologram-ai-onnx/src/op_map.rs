@@ -508,8 +508,14 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
             raw_attrs: vec![],
         },
 
+        // Triangular matrix extraction (causal mask generation).
+        "Trilu" => {
+            let upper = ctx.attr_i("upper").unwrap_or(1) != 0;
+            Trilu { upper }
+        }
+
         // Linear algebra — rare in inference graphs.
-        "Det" | "Inverse" | "EyeLike" | "Trilu" => Opaque {
+        "Det" | "Inverse" | "EyeLike" => Opaque {
             op_type: ctx.op_type.to_string(),
             raw_attrs: vec![],
         },

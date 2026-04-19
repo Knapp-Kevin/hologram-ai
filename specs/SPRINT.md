@@ -88,9 +88,9 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] QK-Norm + RoPE pre-attention fusion — **pass removed** (hologram base
   `dispatch_attention()` still ignores `qk_norm`/`rope` flags). AiOp fields
   and lowering stubs retained as forward-compatible placeholders. Re-add pass
-  when hologram base wires kernel support.
+  when hologram base wires kernel support. **→ Plan 074 Workstream A.**
 
-### P4: Compilation speed (DONE — Plans 017, 020)
+### P4: Compilation speed (Plans 017, 020, 073)
 - [x] Release profile with LTO (`codegen-units = 1, lto = "thin"`)
 - [x] Extract shared `post_concretization_repair` (was duplicated 3x in
   compiler.rs, now a single function with early convergence detection)
@@ -100,6 +100,13 @@ zero runtime code. All kernels belong in hologram base crate.
   each building 3 HashMaps; now cached with `RefCell` + invalidation)
 - [x] Avoid double LLM compilation (clone AiGraph after MVP, concretize
   twice instead of re-importing from disk — ~50% LLM compile time savings)
+- [ ] **Plan 073 — Compilation Speed Optimization (next wave)**
+  - [ ] Phase 1: Tracing instrumentation on all pipeline stages
+  - [ ] Phase 2: Parallelize LLM 3-graph compilation (prefill/decode/verify
+    via `std::thread::scope`) — expected ~3x LLM compile speedup
+  - [ ] Phase 3: Pass skip predicates (`should_run` on `Pass` trait)
+  - [ ] Phase 4: Parallel weight quantization (rayon chunked Q4)
+  - [ ] Phase 5: Arc-shared `AiParam::Inline` data (cheaper graph clones)
 
 ### P5: Variable-length prefill (active — Plans 045 + 058)
 - [x] **Blocker resolved:** hologram base now applies `resolve_size()` in
@@ -329,8 +336,14 @@ zero runtime code. All kernels belong in hologram base crate.
       hologram base. Fusion pass fires automatically during `hologram::compile()`.
       Eliminates 335MB memory traffic per Conv2d+SiLU block at 512×512.
 - [ ] **Vision-language model support (Plan 070 — Falcon-Perception analysis)**
-  - [ ] ONNX export script for Falcon-Perception-300M (Python `torch.onnx.export`)
-  - **hologram-ai changes:**
+  - [x] ONNX export of Falcon-Perception-300M — 3621 nodes, 22 op types, 957 MB.
+    All 22 ops now supported. Export uses SDPA decomposition (FlexAttention
+    not ONNX-exportable). Compilation succeeds (1.1 GB archive).
+  - [x] `Trilu` op support — AiOp variant + ONNX mapping (`upper` attr) +
+    constant folding in DataPropagation (materializes upper/lower triangular
+    matrix from constant input). Lowering falls through to Identity (folded).
+    Used for causal mask: `ConstantOfShape → Trilu → Unsqueeze → Cast → Where → Softmax`.
+  - **hologram-ai changes (VLM architecture):**
     - [ ] `AttentionMaskKind` enum on AiOp — replace `causal: bool` with `Full |
       Causal | HybridCausalPrefix | SpatialWindow | BlockSparse` + lowering
     - [ ] `RoPE2D` AiOp variant + lowering (split temporal/spatial halves)
@@ -349,6 +362,21 @@ zero runtime code. All kernels belong in hologram base crate.
     - [ ] Paged KV cache in hologram-exec (Plan 016) — virtual page tables,
       LIFO free-page stack, `KvPagedWrite`/`KvPagedRead` dispatch
     - [ ] AnyUp-style windowed cross-attention kernel (P3, segmentation)
+- [ ] **Qwen model support (Plan 074)**
+  - [ ] Workstream A: RoPE + QK-Norm kernel support
+    - [ ] A.1: Wire `rope`/`rope_base` into `dispatch_attention()` (hologram base)
+    - [ ] A.2: RoPE scaling variants (NTK/YaRN) for 128K+ context
+    - [ ] A.3: QK-Norm (RMSNorm on Q/K before attention)
+    - [ ] Re-enable `PreAttentionFusion` pass + detect RoPE in ONNX graph
+  - [ ] Workstream B: KV cache quantization exposure
+    - [ ] Serialize `KvCacheConfig` into archive metadata
+    - [ ] E2E validation (TinyLlama Q8/Q4 KV quality + memory benchmarks)
+  - [ ] Workstream C: Qwen2-0.5B cross-family validation
+    - [ ] C.1: Download + compile + decode Qwen2-0.5B ONNX
+    - [ ] C.2: Verify byte-level BPE tokenizer (BBPE, 151K vocab)
+    - [ ] C.3: Position IDs handling (verify commit aa65654 works for Qwen)
+    - [ ] C.4: Architecture detection (`"qwen2"` not `"llama"`)
+    - [ ] C.5: Post-embedding RMSNorm correctness verification
 - [ ] Test with Whisper (encoder-decoder, audio)
 - [ ] Fix any op dispatch failures discovered
 - [ ] Goal: `hologram-ai compile -m model.onnx` works for top-20 HuggingFace models
@@ -416,10 +444,13 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] GPU backend: WebGPU/wgpu compute shader path — cross-platform GPU,
   browser + native (hologram base Phase 8.3)
 - [ ] GPU backend: Metal Attention kernel (fused QKV on GPU)
-- [ ] GPU backend: CUDA kernel implementations
+- [ ] GPU backend: CUDA backend (Plan 072) — `CudaMemory` + `CudaBackend` via
+    cudarc 0.19 (dynamic loading, no toolkit at compile time). Pre-compiled PTX
+    kernels matching Metal parity (~30 kernels). Hardware detection for SM 7.5-9.0.
+    Future: tensor-core matmul, FlashAttention, INT8 (informed by kaio patterns).
 - [ ] GPU backend: WebGPU command encoder batching + buffer reuse (Phase 8.3d)
 
-### P8: KV Cache Compression & Attention-Gated Decode (Plan 038)
+### P8: KV Cache Compression & Attention-Gated Decode (Plans 038, 074B)
 - [ ] Phase 1: Sparse V decode — skip V accumulation for negligible attention weights
   (τ=1e-6) in hologram base attention kernel. Format-agnostic, works with f32/Q8/Q4
   KV cache. Expected +22.8% decode at 32K context, zero quality loss.

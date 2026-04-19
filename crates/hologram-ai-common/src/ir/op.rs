@@ -482,6 +482,14 @@ pub enum AiOp {
     ConstantOfShape {
         fill_value: u32, // f32::to_bits()
     },
+    /// Upper or lower triangular part of a matrix (or batch of matrices).
+    /// Input 0: tensor (at least 2-D). Input 1 (optional): scalar k (diagonal offset).
+    /// `upper=true`: zero below the k-th diagonal (keep upper triangle).
+    /// `upper=false`: zero above the k-th diagonal (keep lower triangle).
+    /// Standard ONNX opset 14+ op; commonly used for causal attention masks.
+    Trilu {
+        upper: bool,
+    },
 
     /// Fallback for ops the importer could not map.
     Opaque {
@@ -632,7 +640,8 @@ impl AiOp {
             | AiOp::If { .. }
             | AiOp::Loop { .. }
             | AiOp::Scan { .. }
-            | AiOp::ConstantOfShape { .. } => Custom,
+            | AiOp::ConstantOfShape { .. }
+            | AiOp::Trilu { .. } => Custom,
         }
     }
 }

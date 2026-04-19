@@ -354,10 +354,42 @@ const PATCH_DIM: &str = "patch_dim";             // patch_size² * channels (e.g
 | **P3** | AnyUp-style windowed cross-attention kernel | **hologram** (hologram-exec) | Medium | Segmentation |
 | **P3** | Ragged dimension support in DimExpr | **hologram-ai** (common) | Large | Batched serving |
 
-## Verification
+## Verification Results (2026-04-19)
 
-To validate this analysis end-to-end:
-1. Export Falcon-Perception-300M to ONNX via `torch.onnx.export()` with a dummy image+text input
-2. Attempt `import_onnx()` — identify which ops fail to import
-3. Compare the ONNX graph structure against our AiOp coverage
-4. Run the imported graph through our compiler pipeline to find lowering gaps
+### ONNX Export
+- **Exported Falcon-Perception-300M** (239M params, 957 MB ONNX) with random weights
+- Used SDPA decomposition (replacing FlexAttention) + manual RMSNorm decomposition
+- Triton not available on macOS — mocked for model instantiation
+- **Model structure confirmed:**
+  - 22 layers × (Attention + SquaredReLU-Gated FFN)
+  - Attention: wqkv [1280, 768] (combined Q+K+V), wo [768, 768], sinks [12]
+  - FFN: w13 [4096, 768] (combined gate+up), w2 [768, 2048]
+  - 12 query heads, 4 KV heads, head_dim=64
+  - QK-norm (RMSNorm on Q and K after projection)
+
+### ONNX Op Coverage
+- **3621 nodes, 22 unique op types**
+- **ALL 22 ops supported** by hologram-ai ONNX importer:
+  - Constant (1632), Unsqueeze (308), Slice (198), Concat (154), Mul (134),
+    Add (133), MatMul (133), Reshape (132), Pow (111), Transpose (110),
+    ReduceMean (89), Sqrt (89), Div (89), Shape (88), Gather (45), Tile (44),
+    ConstantOfShape (22), Trilu (22), Cast (22), Where (22), Softmax (22), Relu (22)
+
+### Compiler Import Result
+- **Failed on `Trilu` op** — currently mapped to `Opaque` in op_map.rs:512
+- `Trilu` is used for causal mask generation: `ConstantOfShape → Trilu(upper=1) → Unsqueeze → Cast → Where(mask, -inf, scores) → Softmax`
+- **Fix:** Either add `Trilu` as a first-class AiOp (trivial: generates upper/lower triangular matrix), or enhance AttentionFusion to absorb the Trilu-based causal mask chain into `causal=true`
+- `Tile` (44 instances, GQA repeat_interleave) is already mapped
+
+### Missing from SDPA Export (vs full Falcon architecture)
+- FlexAttention (hybrid causal+bidirectional masks) — not ONNX-exportable
+- 3D RoPE (temporal + spatial golden-ratio) — omitted from export
+- Sink tokens (per-head attention gating) — omitted from export
+- KV cache ops — omitted from export
+- Image patch embedding + scatter — omitted (no perception heads)
+
+### Prefill Numerical Bug Status
+- **NOT a Q4 LUT-GEMM bug** — disproven. On macOS, Q4 uses the same BLAS `sgemm` as f32.
+- **Root cause:** Variable-length shape resolution (baked op parameters vs runtime seq_len).
+- **Workaround:** Compile at full context length; any prompt <= compiled seq works.
+- **Fix path:** Plan 045 + 058 walker-based shape recipe system (two bugs remaining).

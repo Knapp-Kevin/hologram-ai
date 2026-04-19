@@ -280,6 +280,85 @@ impl Pass for DataPropagation {
             graph.params.insert(out_tid, AiParam::inline(data_bytes, info));
         }
 
+        // Materialize Trilu outputs when the input is a known constant param.
+        // Trilu(upper=true): zero below the k-th diagonal.
+        // Trilu(upper=false): zero above the k-th diagonal.
+        for node in &graph.nodes {
+            let AiOp::Trilu { upper } = &node.op else {
+                continue;
+            };
+            let Some(&out_tid) = node.outputs.first() else {
+                continue;
+            };
+            if graph.params.contains_key(&out_tid) {
+                continue;
+            }
+            // Input 0: the matrix. Must be a known f32 param.
+            let input_tid = match node.inputs.first() {
+                Some(tid) => *tid,
+                None => continue,
+            };
+            let input_param = match graph.params.get(&input_tid) {
+                Some(p) => p,
+                None => continue,
+            };
+            let (input_data, input_info) = match input_param {
+                AiParam::Inline { data, info } => (data.as_slice(), info),
+                _ => continue,
+            };
+            if input_info.logical_dtype != DType::F32 {
+                continue;
+            }
+            let shape: Vec<usize> = input_info
+                .shape
+                .iter()
+                .filter_map(|d| match d {
+                    crate::Dim::Concrete(v) => Some(*v as usize),
+                    _ => None,
+                })
+                .collect();
+            if shape.len() < 2 {
+                continue;
+            }
+            // Read the diagonal offset k from input 1 (default 0).
+            let k: i64 = node
+                .inputs
+                .get(1)
+                .and_then(|tid| graph.params.get(tid))
+                .and_then(extract_i64_param)
+                .and_then(|vals| vals.first().copied())
+                .unwrap_or(0);
+
+            let input_f32: &[f32] = match bytemuck::try_cast_slice(input_data) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let rows = shape[shape.len() - 2];
+            let cols = shape[shape.len() - 1];
+            let batch_size: usize = shape[..shape.len() - 2].iter().product::<usize>().max(1);
+            let mut output = input_f32.to_vec();
+            for b in 0..batch_size {
+                let offset = b * rows * cols;
+                for r in 0..rows {
+                    for c in 0..cols {
+                        let diag = c as i64 - r as i64;
+                        let zero_it = if *upper { diag < k } else { diag > k };
+                        if zero_it {
+                            output[offset + r * cols + c] = 0.0;
+                        }
+                    }
+                }
+            }
+            let out_bytes: Vec<u8> = output.iter().flat_map(|f| f.to_le_bytes()).collect();
+            let out_info = input_info.clone();
+            graph
+                .tensor_info
+                .entry(out_tid)
+                .and_modify(|existing| *existing = out_info.clone())
+                .or_insert_with(|| out_info.clone());
+            graph.params.insert(out_tid, AiParam::inline(out_bytes, out_info));
+        }
+
         Ok(graph)
     }
 }
@@ -577,6 +656,14 @@ fn eval_custom_op(
         // signal the output is determined (ConstantFolding removes the node).
         AiOp::ConstantOfShape { .. } => {
             let _shape_known = inputs.first().copied().flatten()?;
+            Some(vec![])
+        }
+
+        // Trilu: if the input is fully known, the output is fully known.
+        // Return empty to signal determined (materialized in the pass body).
+        AiOp::Trilu { .. } => {
+            // We only signal "determined" here; actual materialization happens
+            // in the pass body alongside ConstantOfShape.
             Some(vec![])
         }
 
