@@ -5,6 +5,13 @@ use rayon::prelude::*;
 pub trait Pass: Send + Sync {
     fn name(&self) -> &str;
     fn run(&self, graph: AiGraph) -> anyhow::Result<AiGraph>;
+    /// Quick predicate: does this graph contain ops this pass would transform?
+    ///
+    /// Returns `true` by default (always run). Override to return `false` for
+    /// graphs that definitely lack matching patterns, avoiding a full traversal.
+    fn should_run(&self, _graph: &AiGraph) -> bool {
+        true
+    }
 }
 
 /// Sequentially-composed optimization pipeline.
@@ -179,7 +186,11 @@ impl OptPipeline {
     /// node elimination, etc.) apply to subgraphs too.
     pub fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
         for pass in &self.passes {
-            tracing::debug!(pass = pass.name(), "running opt pass");
+            if !pass.should_run(&graph) {
+                tracing::debug!(pass = pass.name(), "skipping (no matching ops)");
+                continue;
+            }
+            let _span = tracing::info_span!("opt_pass", name = pass.name()).entered();
             graph = pass.run(graph)?;
         }
 

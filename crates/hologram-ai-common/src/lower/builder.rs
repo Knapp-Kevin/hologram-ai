@@ -239,6 +239,7 @@ pub fn lower(
         std::collections::HashMap::new();
 
     let mut mmap_offset: u64 = 0;
+    let _weight_span = tracing::info_span!("lower_register_weights", count = sorted_params.len()).entered();
     for (&tid, param) in sorted_params.iter() {
         // Try early quantization for eligible f32 weights.
         if do_early_quant {
@@ -397,7 +398,43 @@ pub fn lower(
         }
     }
 
+    drop(_weight_span);
+
+    // ── Pre-quantize eligible weights in parallel ───────────────────────
+    // Instead of quantizing one-at-a-time during node lowering (sequential),
+    // batch-quantize all Q4-eligible weights using rayon. Bounded parallelism
+    // via chunk_size controls peak memory (~8 weights in flight).
+    if !q4_eligible.is_empty() {
+        use rayon::prelude::*;
+        let _quant_span = tracing::info_span!(
+            "lower_parallel_quantize",
+            eligible = q4_eligible.len()
+        )
+        .entered();
+        let eligible_tids: Vec<TensorId> = q4_eligible.iter().copied().collect();
+        let chunk_size = 8;
+        for chunk in eligible_tids.chunks(chunk_size) {
+            let results: Vec<(TensorId, Vec<u8>)> = chunk
+                .par_iter()
+                .filter_map(|&tid| {
+                    quantize_weight_on_demand(tid, ai_graph, q4_error_threshold)
+                        .map(|bytes| (tid, bytes))
+                })
+                .collect();
+            for (tid, bytes) in results {
+                early_quant_bytes.insert(tid, bytes);
+            }
+        }
+        // Remove tids that failed quantization (not in early_quant_bytes).
+        q4_eligible.retain(|tid| early_quant_bytes.contains_key(tid));
+        tracing::info!(
+            quantized = early_quant_bytes.len(),
+            "parallel Q4 weight quantization complete"
+        );
+    }
+
     // Emit each node in topological order.
+    let _node_span = tracing::info_span!("lower_emit_nodes").entered();
     let topo = ai_graph.topo_order();
     let node_map: HashMap<u32, &_> = ai_graph.nodes.iter().map(|n| (n.id, n)).collect();
 
@@ -1153,6 +1190,8 @@ pub fn lower(
             }
         }
     }
+
+    drop(_node_span);
 
     // Add Output nodes and register named graph outputs.
     for (i, &tid) in ai_graph.outputs.iter().enumerate() {
@@ -2256,7 +2295,7 @@ fn quantize_weight_on_demand(
 fn param_bytes_owned(param: &crate::ir::AiParam) -> anyhow::Result<Vec<u8>> {
     use crate::ir::AiParam;
     match param {
-        AiParam::Inline { data, .. } => Ok(data.clone()),
+        AiParam::Inline { data, .. } => Ok(data.as_ref().clone()),
         AiParam::Mmap {
             path, offset, len, ..
         } => {

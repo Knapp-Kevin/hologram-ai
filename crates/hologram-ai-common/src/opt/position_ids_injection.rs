@@ -37,6 +37,10 @@ impl Pass for PositionIdsInjection {
         "PositionIdsInjection"
     }
 
+    fn should_run(&self, graph: &AiGraph) -> bool {
+        graph.nodes.iter().any(|n| matches!(n.op, AiOp::Range))
+    }
+
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
         // Find Range nodes that look like position generators:
         // Range(start=0, limit=seq_len, step=1)

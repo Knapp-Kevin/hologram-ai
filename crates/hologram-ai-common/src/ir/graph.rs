@@ -6,9 +6,8 @@ use super::{
     shape::{ConstraintStore, DimVarTable},
 };
 use hologram_ai_quant::QuantDescriptor;
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Semantic classification of tensor content.
 ///
@@ -120,7 +119,7 @@ pub struct ValidationError {
 ///
 /// `Clone` is cheap: most weight data uses `AiParam::Mmap` (copies a path +
 /// offset, not the bytes). Only small inline constants are deep-copied.
-#[derive(Clone)]
+/// Manually implemented because `Mutex` (topo_cache) doesn't derive `Clone`.
 pub struct AiGraph {
     pub name: String,
     pub nodes: Vec<AiNode>,
@@ -149,10 +148,34 @@ pub struct AiGraph {
     pub tensor_names: HashMap<TensorId, String>,
 
     /// Cached topological order. Invalidated by any structural graph mutation.
-    /// Uses `RefCell<Option<Rc<...>>>` so callers share the allocation (zero clones).
+    /// Uses `Mutex<Option<Arc<...>>>` so callers share the allocation (zero clones).
+    /// `Mutex` (not `RefCell`) makes `AiGraph: Sync`, enabling parallel compilation.
     /// **Do not read or write directly** — use `topo_order()` and `invalidate_topo_cache()`.
     #[doc(hidden)]
-    pub topo_cache: RefCell<Option<Arc<Vec<NodeId>>>>,
+    pub topo_cache: Mutex<Option<Arc<Vec<NodeId>>>>,
+}
+
+impl Clone for AiGraph {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            nodes: self.nodes.clone(),
+            inputs: self.inputs.clone(),
+            outputs: self.outputs.clone(),
+            input_names: self.input_names.clone(),
+            output_names: self.output_names.clone(),
+            params: self.params.clone(),
+            tensor_info: self.tensor_info.clone(),
+            metadata: self.metadata.clone(),
+            warnings: self.warnings.clone(),
+            dim_vars: self.dim_vars.clone(),
+            shape_constraints: self.shape_constraints.clone(),
+            subgraphs: self.subgraphs.clone(),
+            tensor_names: self.tensor_names.clone(),
+            // Don't carry over the topo cache — the clone starts fresh.
+            topo_cache: Mutex::new(None),
+        }
+    }
 }
 
 impl AiGraph {
@@ -259,14 +282,17 @@ impl AiGraph {
     /// any structural graph mutation (add/remove nodes, rewire edges).
     pub fn topo_order(&self) -> Arc<Vec<NodeId>> {
         // Return cached order if available (Arc::clone is O(1), no data copy).
-        if let Some(cached) = self.topo_cache.borrow().as_ref() {
+        let guard = self.topo_cache.lock().expect("topo_cache mutex poisoned");
+        if let Some(cached) = guard.as_ref() {
             return Arc::clone(cached);
         }
+        drop(guard);
 
         let order = Arc::new(self.compute_topo_order());
 
         // Cache the result.
-        *self.topo_cache.borrow_mut() = Some(Arc::clone(&order));
+        let mut guard = self.topo_cache.lock().expect("topo_cache mutex poisoned");
+        *guard = Some(Arc::clone(&order));
         order
     }
 
@@ -276,7 +302,8 @@ impl AiGraph {
     /// changing node inputs/outputs, etc. Optimization passes that rewrite
     /// the `nodes` vec should call this.
     pub fn invalidate_topo_cache(&self) {
-        *self.topo_cache.borrow_mut() = None;
+        let mut guard = self.topo_cache.lock().expect("topo_cache mutex poisoned");
+        *guard = None;
     }
 
     /// Compute topological order from scratch (Kahn's algorithm).

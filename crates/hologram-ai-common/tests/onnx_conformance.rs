@@ -43,7 +43,7 @@ fn run_single_op(
         param_map.insert(
             *tid,
             AiParam::Inline {
-                data: data.clone(),
+                data: data.clone().into(),
                 info: TensorInfo::new(*dtype, shape_from_concrete(&[num_elems as u64])),
             },
         );

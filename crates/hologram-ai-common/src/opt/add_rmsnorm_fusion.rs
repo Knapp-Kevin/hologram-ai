@@ -39,6 +39,10 @@ impl Pass for AddRmsNormFusion {
         "AddRmsNormFusion"
     }
 
+    fn should_run(&self, graph: &AiGraph) -> bool {
+        graph.nodes.iter().any(|n| matches!(n.op, AiOp::RmsNorm { .. }))
+    }
+
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
         // Map: tensor_id → node index that produces it.
         let tid_to_node: HashMap<TensorId, usize> = graph

@@ -1,14 +1,22 @@
 use super::graph::TensorInfo;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// A model weight or constant tensor.
 ///
 /// Weights remain in their source representation until the lowering pass
 /// decides the dequantization strategy.
+///
+/// `Inline` data uses `Arc<Vec<u8>>` so that `AiGraph::clone()` is cheap —
+/// weight bytes are reference-counted, not deep-copied. This enables
+/// parallel compilation of prefill/decode/verify graphs from cloned graphs.
 #[derive(Debug, Clone)]
 pub enum AiParam {
     /// Small weights embedded directly in the graph.
-    Inline { data: Vec<u8>, info: TensorInfo },
+    Inline {
+        data: Arc<Vec<u8>>,
+        info: TensorInfo,
+    },
     /// Large weights memory-mapped from the source model file.
     Mmap {
         path: PathBuf,
@@ -21,7 +29,10 @@ pub enum AiParam {
 impl AiParam {
     /// Construct an inline parameter from owned bytes.
     pub fn inline(data: Vec<u8>, info: TensorInfo) -> Self {
-        Self::Inline { data, info }
+        Self::Inline {
+            data: Arc::new(data),
+            info,
+        }
     }
 
     /// Construct a memory-mapped parameter reference.

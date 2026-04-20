@@ -406,7 +406,7 @@ mod tests {
         params.insert(
             1u32,
             AiParam::Inline {
-                data: vec![0u8; 4], // dummy
+                data: vec![0u8; 4].into(), // dummy
                 info: TensorInfo::new(DType::F32, shape_from_concrete(&[768, 3, 16, 16])),
             },
         );
@@ -431,7 +431,7 @@ mod tests {
         params.insert(
             4u32,
             AiParam::Inline {
-                data: vec![0u8; 4], // dummy
+                data: vec![0u8; 4].into(), // dummy
                 info: TensorInfo::new(DType::F32, shape_from_concrete(&[1, 196, 768])),
             },
         );

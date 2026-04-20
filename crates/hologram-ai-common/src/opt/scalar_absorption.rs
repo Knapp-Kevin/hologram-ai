@@ -223,7 +223,7 @@ mod tests {
         };
         (
             AiParam::Inline {
-                data,
+                data: data.into(),
                 info: info.clone(),
             },
             info,

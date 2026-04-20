@@ -101,12 +101,20 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Avoid double LLM compilation (clone AiGraph after MVP, concretize
   twice instead of re-importing from disk — ~50% LLM compile time savings)
 - [ ] **Plan 073 — Compilation Speed Optimization (next wave)**
-  - [ ] Phase 1: Tracing instrumentation on all pipeline stages
-  - [ ] Phase 2: Parallelize LLM 3-graph compilation (prefill/decode/verify
-    via `std::thread::scope`) — expected ~3x LLM compile speedup
-  - [ ] Phase 3: Pass skip predicates (`should_run` on `Pass` trait)
-  - [ ] Phase 4: Parallel weight quantization (rayon chunked Q4)
-  - [ ] Phase 5: Arc-shared `AiParam::Inline` data (cheaper graph clones)
+  - [x] Phase 1: Tracing instrumentation on all pipeline stages —
+    `info_span!` on import, optimize, weight collection, per-component
+    prepare, lower, hologram_compile, and per-opt-pass in pipeline.rs
+  - [x] Phase 2: Parallelize LLM 3-graph compilation (prefill/decode/verify
+    via `std::thread::scope`) — preparation + compilation run in parallel.
+    `AiGraph.topo_cache` changed from `RefCell` to `Mutex` for `Sync`.
+    `prepare_llm_component()` extracted as reusable helper.
+  - [x] Phase 3: Pass skip predicates (`should_run` on `Pass` trait) —
+    implemented for KvSlotInjection, AddRmsNormFusion, SwiGluFusion,
+    NormProjectionFusion, SwiGluProjectionFusion, PositionIdsInjection
+  - [x] Phase 4: Parallel weight quantization — `rayon::par_iter` in chunks
+    of 8 before node lowering loop. Pre-quantizes all Q4-eligible weights.
+  - [x] Phase 5: `AiParam::Inline` data → `Arc<Vec<u8>>` — graph clones
+    are now near-free (reference-counted, not deep-copied)
 
 ### P5: Variable-length prefill (active — Plans 045 + 058)
 - [x] **Blocker resolved:** hologram base now applies `resolve_size()` in

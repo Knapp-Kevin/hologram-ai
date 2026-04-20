@@ -47,6 +47,15 @@ impl Pass for NormProjectionFusion {
         "NormProjectionFusion"
     }
 
+    fn should_run(&self, graph: &AiGraph) -> bool {
+        graph.nodes.iter().any(|n| {
+            matches!(
+                n.op,
+                AiOp::RmsNorm { .. } | AiOp::FusedLayerNormResidual { .. }
+            )
+        })
+    }
+
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
         // Map: tensor_id → list of (consuming_node_idx, input_position).
         let mut consumers: HashMap<TensorId, Vec<(usize, usize)>> = HashMap::new();
@@ -314,7 +323,7 @@ mod tests {
         };
         (
             AiParam::Inline {
-                data,
+                data: data.into(),
                 info: info.clone(),
             },
             info,

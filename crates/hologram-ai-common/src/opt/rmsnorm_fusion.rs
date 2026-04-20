@@ -296,7 +296,7 @@ mod tests {
 
     fn f32_param(v: f32) -> AiParam {
         AiParam::Inline {
-            data: v.to_le_bytes().to_vec(),
+            data: v.to_le_bytes().to_vec().into(),
             info: TensorInfo::new(DType::F32, shape_from_concrete(&[])),
         }
     }
@@ -304,7 +304,7 @@ mod tests {
     fn vec_param(values: &[f32]) -> AiParam {
         let data: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         AiParam::Inline {
-            data,
+            data: data.into(),
             info: TensorInfo::new(DType::F32, shape_from_concrete(&[values.len() as u64])),
         }
     }

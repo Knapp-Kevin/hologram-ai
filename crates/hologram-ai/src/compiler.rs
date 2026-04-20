@@ -283,7 +283,10 @@ impl ModelCompiler {
         };
 
         // Step 1 — import.
-        let mut ai_graph = self.import(source)?;
+        let mut ai_graph = {
+            let _span = tracing::info_span!("compile_import").entered();
+            self.import(source)?
+        };
         info!(
             nodes = ai_graph.nodes.len(),
             params = ai_graph.params.len(),
@@ -343,7 +346,10 @@ impl ModelCompiler {
             info!("using generic optimization pipeline (no input_ids detected)");
             OptPipeline::generic()
         };
-        let mut ai_graph = pipeline.run(ai_graph).context("optimization pass failed")?;
+        let mut ai_graph = {
+            let _span = tracing::info_span!("compile_optimize").entered();
+            pipeline.run(ai_graph).context("optimization pass failed")?
+        };
         info!(nodes = ai_graph.nodes.len(), "optimization complete");
 
         // Step 2a — infer LLM metadata from fused attention nodes.
@@ -384,12 +390,15 @@ impl ModelCompiler {
             .sum();
         let use_streaming = total_mmap_bytes > 256 * 1024 * 1024; // 256 MB threshold
 
-        let (weights, weight_source, weight_index) = if use_streaming {
-            let (source, idx) = collect_weight_bytes_streaming(&ai_graph)?;
-            (Vec::new(), Some(source), idx)
-        } else {
-            let (w, idx) = collect_weight_bytes(&ai_graph)?;
-            (w, None, idx)
+        let (weights, weight_source, weight_index) = {
+            let _span = tracing::info_span!("compile_collect_weights", streaming = use_streaming).entered();
+            if use_streaming {
+                let (source, idx) = collect_weight_bytes_streaming(&ai_graph)?;
+                (Vec::new(), Some(source), idx)
+            } else {
+                let (w, idx) = collect_weight_bytes(&ai_graph)?;
+                (w, None, idx)
+            }
         };
         let total_weight_bytes = if use_streaming {
             total_mmap_bytes
@@ -414,53 +423,35 @@ impl ModelCompiler {
             let decode_ai_graph = ai_graph.clone();
             let verify_ai_graph = ai_graph.clone();
 
-            // Prefill graph: concretize at prompt seq_len.
-            let (prefill_graph, seq_dim_positions) =
-                concretize_all_dims(ai_graph, self.seq_len_override)
-                    .context("prefill concretization failed")?;
-            let mut prefill_graph = post_concretization_repair(prefill_graph)?;
-            zero_seq_dims_for_lowering(&mut prefill_graph, &seq_dim_positions);
-            log_post_repair_diagnostics(&prefill_graph);
-            let errs = prefill_graph.validate();
-            if !errs.is_empty() {
-                anyhow::bail!(
-                    "prefill: {} validation error(s): {}",
-                    errs.len(),
-                    errs[0].message
-                );
-            }
-            let prefill_mem = MemoryPlanner
-                .plan(&prefill_graph)
-                .context("prefill memory planning failed")?;
-            let prefill_nodes = prefill_graph.nodes.len();
-
-            // Decode graph: concretize at seq=1.
-            let (decode_graph, _) = concretize_all_dims(decode_ai_graph, Some(1))
-                .context("decode concretization failed")?;
-            let decode_graph = post_concretization_repair(decode_graph)?;
-            let errs = decode_graph.validate();
-            if !errs.is_empty() {
-                anyhow::bail!(
-                    "decode: {} validation error(s): {}",
-                    errs.len(),
-                    errs[0].message
-                );
-            }
-            let decode_mem = MemoryPlanner
-                .plan(&decode_graph)
-                .context("decode memory planning failed")?;
-            let decode_nodes = decode_graph.nodes.len();
-
-            // Verification graph: concretize at seq=8 (for batch speculative decoding).
-            // This allows verifying up to 8 draft tokens in a single forward pass.
+            // Prepare all three LLM graphs in parallel.
+            // Each is fully independent after cloning: concretize → repair →
+            // validate → memory plan. Uses std::thread::scope (not rayon) to
+            // avoid work-stealing contention with inner parallelism.
             let verify_seq = 8u64;
-            let (verify_graph, _) = concretize_all_dims(verify_ai_graph, Some(verify_seq))
-                .context("verify concretization failed")?;
-            let verify_graph = post_concretization_repair(verify_graph)?;
-            let verify_mem = MemoryPlanner
-                .plan(&verify_graph)
-                .context("verify memory planning failed")?;
-            let verify_nodes = verify_graph.nodes.len();
+            let seq_override = self.seq_len_override;
+            let (prefill, decode, verify) = std::thread::scope(|s| {
+                let h_prefill = s.spawn(|| {
+                    prepare_llm_component(ai_graph, seq_override, "prefill", true)
+                });
+                let h_decode = s.spawn(|| {
+                    prepare_llm_component(decode_ai_graph, Some(1), "decode", false)
+                });
+                let h_verify = s.spawn(|| {
+                    prepare_llm_component(verify_ai_graph, Some(verify_seq), "verify", false)
+                });
+                // Join all threads — propagate panics.
+                let prefill = h_prefill.join().expect("prefill thread panicked");
+                let decode = h_decode.join().expect("decode thread panicked");
+                let verify = h_verify.join().expect("verify thread panicked");
+                (prefill, decode, verify)
+            });
+            let prefill = prefill.context("prefill preparation failed")?;
+            let decode = decode.context("decode preparation failed")?;
+            let verify = verify.context("verify preparation failed")?;
+
+            let prefill_nodes = prefill.node_count;
+            let decode_nodes = decode.node_count;
+            let verify_nodes = verify.node_count;
 
             info!(
                 prefill_nodes,
@@ -491,31 +482,51 @@ impl ModelCompiler {
                     .context("creating scratch file for LLM pipeline assembly")?;
                 let scratch_path = scratch.path().to_path_buf();
 
-                // Compile sub-archives (graph + sections, no weights).
-                let prefill_archive = compile_one_component(
-                    &prefill_graph,
-                    &prefill_mem.kv_cache_layout,
-                    &self.lowering_options(),
-                    &LowerPhase::Forward,
-                    Some(&[]),
-                    Some(&weight_index),
-                )?;
-                let decode_archive = compile_one_component(
-                    &decode_graph,
-                    &decode_mem.kv_cache_layout,
-                    &self.lowering_options(),
-                    &LowerPhase::Forward,
-                    None,
-                    None,
-                )?;
-                let verify_archive = compile_one_component(
-                    &verify_graph,
-                    &verify_mem.kv_cache_layout,
-                    &self.lowering_options(),
-                    &LowerPhase::Forward,
-                    None,
-                    None,
-                )?;
+                // Compile sub-archives in parallel (graph + sections, no weights).
+                let lowering_opts = self.lowering_options();
+                let (prefill_archive, decode_archive, verify_archive) =
+                    std::thread::scope(|s| {
+                        let h_p = s.spawn(|| {
+                            compile_one_component(
+                                &prefill.graph,
+                                &prefill.mem_plan.kv_cache_layout,
+                                &lowering_opts,
+                                &LowerPhase::Forward,
+                                Some(&[]),
+                                Some(&weight_index),
+                            )
+                        });
+                        let h_d = s.spawn(|| {
+                            compile_one_component(
+                                &decode.graph,
+                                &decode.mem_plan.kv_cache_layout,
+                                &lowering_opts,
+                                &LowerPhase::Forward,
+                                None,
+                                None,
+                            )
+                        });
+                        let h_v = s.spawn(|| {
+                            compile_one_component(
+                                &verify.graph,
+                                &verify.mem_plan.kv_cache_layout,
+                                &lowering_opts,
+                                &LowerPhase::Forward,
+                                None,
+                                None,
+                            )
+                        });
+                        let p = h_p.join().expect("prefill compile thread panicked");
+                        let d = h_d.join().expect("decode compile thread panicked");
+                        let v = h_v.join().expect("verify compile thread panicked");
+                        (p, d, v)
+                    });
+                let prefill_archive = prefill_archive
+                    .context("compiling prefill component")?;
+                let decode_archive = decode_archive
+                    .context("compiling decode component")?;
+                let verify_archive = verify_archive
+                    .context("compiling verify component")?;
 
                 // Build MetaSection.
                 let meta = MetaSection::new(
@@ -610,8 +621,8 @@ impl ModelCompiler {
                         role: ComponentRole::Prefill,
                         weight_group: "model".into(),
                         opt_profile: hologram_ai_common::OptProfile::Llm,
-                        graph: &prefill_graph,
-                        mem_plan: &prefill_mem,
+                        graph: &prefill.graph,
+                        mem_plan: &prefill.mem_plan,
                         phase: LowerPhase::Forward,
                         weights: extra_weights,
                         weight_index: Some(weight_index.clone()),
@@ -621,8 +632,8 @@ impl ModelCompiler {
                         role: ComponentRole::Decode,
                         weight_group: "model".into(),
                         opt_profile: hologram_ai_common::OptProfile::Llm,
-                        graph: &decode_graph,
-                        mem_plan: &decode_mem,
+                        graph: &decode.graph,
+                        mem_plan: &decode.mem_plan,
                         phase: LowerPhase::Forward,
                         weights: extra_weights,
                         weight_index: Some(weight_index.clone()),
@@ -632,8 +643,8 @@ impl ModelCompiler {
                         role: ComponentRole::Prefill,
                         weight_group: "model".into(),
                         opt_profile: hologram_ai_common::OptProfile::Llm,
-                        graph: &verify_graph,
-                        mem_plan: &verify_mem,
+                        graph: &verify.graph,
+                        mem_plan: &verify.mem_plan,
                         phase: LowerPhase::Forward,
                         weights: extra_weights,
                         weight_index: Some(weight_index),
@@ -1556,6 +1567,51 @@ fn _build_final_archive_to_file(
         .map_err(|e| anyhow::anyhow!("building final archive to file: {e}"))
 }
 
+/// Result of preparing a single LLM component (concretize + repair + validate + plan).
+struct PreparedComponent {
+    graph: AiGraph,
+    mem_plan: hologram_ai_common::MemoryPlan,
+    node_count: usize,
+}
+
+/// Prepare a single LLM component: concretize dims, repair, validate, plan memory.
+///
+/// This is the common pipeline shared by prefill, decode, and verify graph
+/// preparation. Extracted to enable parallel preparation of all three.
+fn prepare_llm_component(
+    ai_graph: AiGraph,
+    seq_len: Option<u64>,
+    component_name: &str,
+    zero_seq_dims: bool,
+) -> anyhow::Result<PreparedComponent> {
+    let _span =
+        tracing::info_span!("compile_prepare", component = component_name).entered();
+    let (graph, seq_dim_positions) = concretize_all_dims(ai_graph, seq_len)
+        .with_context(|| format!("{component_name} concretization failed"))?;
+    let mut graph = post_concretization_repair(graph)?;
+    if zero_seq_dims {
+        zero_seq_dims_for_lowering(&mut graph, &seq_dim_positions);
+        log_post_repair_diagnostics(&graph);
+    }
+    let errs = graph.validate();
+    if !errs.is_empty() {
+        anyhow::bail!(
+            "{component_name}: {} validation error(s): {}",
+            errs.len(),
+            errs[0].message
+        );
+    }
+    let mem_plan = MemoryPlanner
+        .plan(&graph)
+        .with_context(|| format!("{component_name} memory planning failed"))?;
+    let node_count = graph.nodes.len();
+    Ok(PreparedComponent {
+        graph,
+        mem_plan,
+        node_count,
+    })
+}
+
 /// Compile a single AiGraph into a sub-archive ready for PipelineWriter.
 ///
 /// Encapsulates the lower → compile → unpack → assemble pipeline that was
@@ -1570,9 +1626,13 @@ fn compile_one_component(
     weight_index: Option<&hologram::hologram_archive::weight::index::WeightIndex>,
 ) -> anyhow::Result<Vec<u8>> {
     let phase_name = phase.layer_name();
+    let _span = tracing::info_span!("compile_one_component", phase = phase_name).entered();
 
-    let mut lower_out = lower(ai_graph, kv_layout, opts, phase)
-        .with_context(|| format!("lowering {phase_name} graph"))?;
+    let mut lower_out = {
+        let _span = tracing::info_span!("lower", phase = phase_name).entered();
+        lower(ai_graph, kv_layout, opts, phase)
+            .with_context(|| format!("lowering {phase_name} graph"))?
+    };
     debug!(
         graph_nodes = lower_out.graph.node_count(),
         phase = phase_name,
@@ -1582,8 +1642,11 @@ fn compile_one_component(
     // Validate: check all Gemm/MatMul nodes' weight inputs are valid constants.
     validate_matmul_constants(&lower_out.graph, extra_weights);
 
-    let compiled = hologram::compile(lower_out.graph)
-        .with_context(|| format!("compiling {phase_name} graph"))?;
+    let compiled = {
+        let _span = tracing::info_span!("hologram_compile", phase = phase_name).entered();
+        hologram::compile(lower_out.graph)
+            .with_context(|| format!("compiling {phase_name} graph"))?
+    };
     debug!(
         archive_bytes = compiled.archive.len(),
         phase = phase_name,

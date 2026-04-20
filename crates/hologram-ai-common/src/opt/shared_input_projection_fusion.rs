@@ -328,7 +328,7 @@ fn get_2d_shape(graph: &AiGraph, tid: TensorId) -> Option<(usize, usize)> {
 fn param_bytes(param: &AiParam) -> anyhow::Result<Vec<u8>> {
     use anyhow::Context;
     match param {
-        AiParam::Inline { data, .. } => Ok(data.clone()),
+        AiParam::Inline { data, .. } => Ok(data.as_ref().clone()),
         AiParam::Mmap {
             path, offset, len, ..
         } => {
@@ -414,7 +414,7 @@ fn fuse_matmuls(
     graph.params.insert(
         weight_tid,
         AiParam::Inline {
-            data: concat_bytes,
+            data: std::sync::Arc::new(concat_bytes),
             info: weight_info.clone(),
         },
     );

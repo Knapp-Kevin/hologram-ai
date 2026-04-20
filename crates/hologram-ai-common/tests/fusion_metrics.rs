@@ -45,7 +45,7 @@ fn f32_param(k: usize, n: usize) -> (AiParam, TensorInfo) {
     };
     (
         AiParam::Inline {
-            data,
+            data: data.into(),
             info: info.clone(),
         },
         info,
@@ -277,7 +277,7 @@ fn ffn_block_swiglu_projection_fusion() {
     g.params.insert(
         norm_w_tid,
         AiParam::Inline {
-            data: norm_data,
+            data: norm_data.into(),
             info: norm_info.clone(),
         },
     );
@@ -424,7 +424,7 @@ fn multi_layer_ffn_fusion_scaling() {
         g.params.insert(
             norm_w,
             AiParam::Inline {
-                data: norm_data,
+                data: norm_data.into(),
                 info: norm_info.clone(),
             },
         );

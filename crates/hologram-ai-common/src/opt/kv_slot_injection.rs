@@ -21,6 +21,13 @@ impl Pass for KvSlotInjection {
         "KvSlotInjection"
     }
 
+    fn should_run(&self, graph: &AiGraph) -> bool {
+        graph
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, AiOp::GroupedQueryAttention { .. }))
+    }
+
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
         // Build producer map: TensorId → node index that outputs it.
         let tid_producer: HashMap<TensorId, usize> = graph

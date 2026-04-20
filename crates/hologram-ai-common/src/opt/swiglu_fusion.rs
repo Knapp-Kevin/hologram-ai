@@ -32,6 +32,13 @@ impl Pass for SwiGluFusion {
         "SwiGluFusion"
     }
 
+    fn should_run(&self, graph: &AiGraph) -> bool {
+        graph
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, AiOp::Silu | AiOp::Sigmoid))
+    }
+
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
         // Map: tensor_id → node index that produces it.
         let tid_to_node: HashMap<TensorId, usize> = graph

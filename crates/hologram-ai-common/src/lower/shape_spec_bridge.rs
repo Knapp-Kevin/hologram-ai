@@ -1169,7 +1169,7 @@ mod tests {
         .is_none());
         assert!(AiOp::Constant {
             value: crate::ir::AiParam::Inline {
-                data: vec![],
+                data: vec![].into(),
                 info: crate::ir::TensorInfo::new(crate::ir::DType::F32, smallvec::smallvec![]),
             }
         }

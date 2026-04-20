@@ -643,7 +643,7 @@ mod tests {
         graph.params.insert(
             scale_val,
             AiParam::Inline {
-                data: 0.25f32.to_le_bytes().to_vec(),
+                data: 0.25f32.to_le_bytes().to_vec().into(),
                 info: f32_info(crate::shape_from_concrete(&[1])),
             },
         );
