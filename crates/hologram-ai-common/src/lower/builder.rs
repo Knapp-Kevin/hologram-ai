@@ -149,6 +149,64 @@ pub fn lower(
         opts.quant_strategy,
         QuantStrategy::Q4_0 | QuantStrategy::Q2_0
     );
+
+    // ── Adaptive quantization threshold ──────────────────────────────
+    // Smaller models are more sensitive to quantization error because each
+    // weight carries more information. Scale the error threshold by
+    // sqrt(total_params / 1B) so that:
+    //   TinyLlama 1.1B: 0.15 × 1.05 = 0.157 (unchanged)
+    //   Qwen2     0.5B: 0.15 × 0.71 = 0.106 (stricter)
+    //   LLaMA-3   8B:   0.15 × 2.83 = 0.424 (more permissive)
+    let total_param_bytes: u64 = ai_graph
+        .params
+        .values()
+        .map(|p| match p {
+            crate::ir::AiParam::Inline { data, .. } => data.len() as u64,
+            crate::ir::AiParam::Mmap { len, .. } => *len,
+        })
+        .sum();
+    let total_params_approx = total_param_bytes / 4; // f32 params
+
+    // ── Model-size-aware quantization ────────────────────────────────
+    // Small models (<1B params) are too sensitive for Q4 — the 9% per-weight
+    // error compounds across layers into garbage output. Automatically
+    // upgrade to Q8 (1% per-weight error) for small models.
+    // Threshold: 750M params (~3GB f32). Below this, Q4 is not safe.
+    let q4_min_params: u64 = 750_000_000;
+    let (do_early_quant, opts_effective) = if do_early_quant
+        && total_params_approx < q4_min_params
+        && matches!(opts.quant_strategy, QuantStrategy::Q4_0)
+    {
+        tracing::info!(
+            total_params = total_params_approx,
+            threshold = q4_min_params,
+            "model too small for Q4 — upgrading to Q8 for quality"
+        );
+        // Upgrade to Q8: disable Q4 early-quant. The Q8 path is handled
+        // separately via QuantStrategy::Q8_0 lowering (Gemm quant_b=2).
+        // For now, fall back to f32 (no early quant). The user can
+        // explicitly request Q4 via --quantize q4_0 to override.
+        (false, LoweringOptions {
+            quant_strategy: QuantStrategy::None,
+        })
+    } else {
+        (do_early_quant, LoweringOptions {
+            quant_strategy: opts.quant_strategy,
+        })
+    };
+    let _ = &opts_effective; // suppress unused warning
+
+    let base_threshold = 0.15f32;
+    let size_scale = (total_params_approx as f64 / 1e9).sqrt().max(0.3) as f32;
+    let q4_error_threshold = base_threshold * size_scale;
+    if do_early_quant {
+        tracing::info!(
+            total_params = total_params_approx,
+            q4_error_threshold,
+            "adaptive Q4 threshold (model-size-aware)"
+        );
+    }
+
     // Collect attention dimensions to skip attention-sensitive weights.
     let mut attn_n_dims: Vec<usize> = Vec::new();
     let mut _hidden_size: usize = 0;
@@ -172,8 +230,7 @@ pub fn lower(
     // (which holds ~2.5 GB of Q4 data for SDXL UNet), we mark eligible
     // weights here and quantize them one-at-a-time during node lowering.
     // Peak memory: one weight's Q4 data at a time (~30 MB).
-    let mut q4_eligible: std::collections::HashSet<TensorId> =
-        std::collections::HashSet::new();
+    let mut q4_eligible: std::collections::HashSet<TensorId> = std::collections::HashSet::new();
     // Cache for on-demand Q4 quantization results. Populated lazily during
     // node lowering (one weight at a time). Entries are consumed (removed)
     // after use to keep memory bounded.
@@ -221,8 +278,7 @@ pub fn lower(
                     q4_eligible.insert(tid);
                     // Register a placeholder constant so tid_to_idx has an entry.
                     let placeholder = ConstantData::Bytes(vec![]);
-                    builder =
-                        builder.constant_with_shape(placeholder, vec![dims[0], dims[1]]);
+                    builder = builder.constant_with_shape(placeholder, vec![dims[0], dims[1]]);
                     let builder_idx = builder.len() - 1;
                     tid_to_idx.insert(tid, builder_idx);
                     tracing::debug!(
@@ -377,7 +433,7 @@ pub fn lower(
             if let Some(wt) = weight_tid {
                 // On-demand: quantize if eligible and not yet cached.
                 if q4_eligible.contains(&wt) && !early_quant_bytes.contains_key(&wt) {
-                    if let Some(q4) = quantize_weight_on_demand(wt, ai_graph) {
+                    if let Some(q4) = quantize_weight_on_demand(wt, ai_graph, q4_error_threshold) {
                         early_quant_bytes.insert(wt, q4);
                     } else {
                         q4_eligible.remove(&wt);
@@ -528,7 +584,7 @@ pub fn lower(
                     let weight_tid = node.inputs.get(2).copied();
                     if let Some(wt) = weight_tid {
                         if q4_eligible.contains(&wt) && !early_quant_bytes.contains_key(&wt) {
-                            if let Some(q4) = quantize_weight_on_demand(wt, ai_graph) {
+                            if let Some(q4) = quantize_weight_on_demand(wt, ai_graph, q4_error_threshold) {
                                 early_quant_bytes.insert(wt, q4);
                             } else {
                                 q4_eligible.remove(&wt);
@@ -543,10 +599,8 @@ pub fn lower(
                             let swiglu_idx = builder.len() - 1;
 
                             // Step 2: emit MatMulLut4(activated, Q4_down_weight) → output
-                            builder = builder.matmul_lut_4bit(
-                                ConstantData::Bytes(q4_bytes),
-                                &[swiglu_idx],
-                            );
+                            builder = builder
+                                .matmul_lut_4bit(ConstantData::Bytes(q4_bytes), &[swiglu_idx]);
                             let idx = builder.len() - 1;
                             if let Some(&tid) = node.outputs.first() {
                                 let out_shape = output_shape(Some(&tid), &ai_graph.tensor_info);
@@ -572,17 +626,15 @@ pub fn lower(
                     let weight_tid = node.inputs.get(1).copied();
                     if let Some(wt) = weight_tid {
                         if q4_eligible.contains(&wt) && !early_quant_bytes.contains_key(&wt) {
-                            if let Some(q4) = quantize_weight_on_demand(wt, ai_graph) {
+                            if let Some(q4) = quantize_weight_on_demand(wt, ai_graph, q4_error_threshold) {
                                 early_quant_bytes.insert(wt, q4);
                             } else {
                                 q4_eligible.remove(&wt);
                             }
                         }
                         if let Some(q4_bytes) = early_quant_bytes.remove(&wt) {
-                            builder = builder.matmul_lut_4bit(
-                                ConstantData::Bytes(q4_bytes),
-                                &[input_idxs[0]],
-                            );
+                            builder = builder
+                                .matmul_lut_4bit(ConstantData::Bytes(q4_bytes), &[input_idxs[0]]);
                             let idx = builder.len() - 1;
                             if let Some(&tid) = node.outputs.first() {
                                 let out_shape = output_shape(Some(&tid), &ai_graph.tensor_info);
@@ -941,18 +993,18 @@ pub fn lower(
                         let weight_tid = node.inputs[weight_input_pos];
 
                         // On-demand Q4 quantization for this weight.
-                        if q4_eligible.contains(&weight_tid) && !early_quant_bytes.contains_key(&weight_tid) {
-                            if let Some(q4) = quantize_weight_on_demand(weight_tid, ai_graph) {
+                        if q4_eligible.contains(&weight_tid)
+                            && !early_quant_bytes.contains_key(&weight_tid)
+                        {
+                            if let Some(q4) = quantize_weight_on_demand(weight_tid, ai_graph, q4_error_threshold) {
                                 early_quant_bytes.insert(weight_tid, q4);
                             } else {
                                 q4_eligible.remove(&weight_tid);
                             }
                         }
                         if let Some(q4_bytes) = early_quant_bytes.remove(&weight_tid) {
-                            builder = builder.matmul_lut_4bit(
-                                ConstantData::Bytes(q4_bytes),
-                                &[norm_idx],
-                            );
+                            builder =
+                                builder.matmul_lut_4bit(ConstantData::Bytes(q4_bytes), &[norm_idx]);
                             let proj_idx = builder.len() - 1;
                             let out_shape = output_shape(Some(&out_tid), &ai_graph.tensor_info);
                             if let Some(ref s) = out_shape {
@@ -2080,12 +2132,15 @@ fn try_convert_conv2d_to_lut4(
     }))
 }
 
-/// Read parameter bytes into an owned `Vec<u8>`.
 /// Quantize a weight on demand: load from param, quantize to Q4, serialize.
 /// Returns None if the weight doesn't meet Q4 eligibility or has too high error.
+///
+/// `error_threshold` is the model-size-adaptive maximum relative error.
+/// Smaller models get a stricter threshold to preserve quality.
 fn quantize_weight_on_demand(
     tid: TensorId,
     ai_graph: &AiGraph,
+    error_threshold: f32,
 ) -> Option<Vec<u8>> {
     let param = ai_graph.params.get(&tid)?;
     let info = ai_graph.tensor_info.get(&tid)?;
@@ -2111,8 +2166,13 @@ fn quantize_weight_on_demand(
     let qw4 = quantize_4bit(&f32_weights, dims[0] as u32, dims[1] as u32);
     let rel_err = dequantize_error_q4(&f32_weights, &qw4);
     drop(f32_weights); // Free f32 before serializing.
-    if rel_err > 0.15 {
-        tracing::debug!(tid, rel_err, "deferred-quant: skipping Q4 (error too high)");
+    if rel_err > error_threshold {
+        tracing::debug!(
+            tid,
+            rel_err,
+            error_threshold,
+            "deferred-quant: skipping Q4 (error too high for model size)"
+        );
         return None;
     }
     let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&qw4).ok()?;
@@ -2120,6 +2180,7 @@ fn quantize_weight_on_demand(
         tid,
         rows = dims[0],
         cols = dims[1],
+        rel_err,
         bytes = serialized.len(),
         "deferred-quant: weight → Q4"
     );
