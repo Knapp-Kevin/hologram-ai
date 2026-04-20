@@ -3125,9 +3125,11 @@ impl HoloRunner {
                 let sg = runner.plan.graph();
                 let mut wc = runner.weight_cache.write();
                 wc.prewarm_q4(&runner.tape, &sg.constants, runner.plan.weights());
+                wc.prewarm_q8(&runner.tape, &sg.constants, runner.plan.weights());
                 if let Some(ref dt) = runner.decode_tape {
                     // Decode plan shares weights with prefill plan.
                     wc.prewarm_q4(dt, &sg.constants, runner.plan.weights());
+                    wc.prewarm_q8(dt, &sg.constants, runner.plan.weights());
                 }
             }
             Ok(runner)
@@ -3157,6 +3159,7 @@ impl HoloRunner {
                 let sg = runner.plan.graph();
                 let mut wc = runner.weight_cache.write();
                 wc.prewarm_q4(&runner.tape, &sg.constants, runner.plan.weights());
+                wc.prewarm_q8(&runner.tape, &sg.constants, runner.plan.weights());
             }
             Ok(runner)
         }

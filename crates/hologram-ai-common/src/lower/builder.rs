@@ -180,14 +180,13 @@ pub fn lower(
         tracing::info!(
             total_params = total_params_approx,
             threshold = q4_min_params,
-            "model too small for Q4 — falling back to f32"
+            "model too small for Q4 — using Q8 uniform for quality"
         );
-        // Disable Q4 early-quant, fall back to f32. Q8 k-means is too slow
-        // for compile-time use (hours for 120+ weight matrices). A fast per-row
-        // Q8 format (like GGML's Q8_0) would enable Q8 here — tracked as
-        // future work in Plan 074 Pattern 6.
+        // Disable Q4 early-quant, switch to Q8. The Q8 uniform quantization
+        // is O(n) (no k-means) and the runtime uses BLAS dequant-matmul
+        // (same as Q4 hybrid path). ~2x faster than f32, near-lossless quality.
         (false, LoweringOptions {
-            quant_strategy: QuantStrategy::None,
+            quant_strategy: QuantStrategy::Q8_0,
         })
     } else {
         (do_early_quant, LoweringOptions {
@@ -1016,6 +1015,25 @@ pub fn lower(
                             builder = builder.set_node_dtype(proj_idx, dtype);
                             tid_to_idx.insert(out_tid, proj_idx);
                             continue;
+                        }
+
+                        // Try Q8 uniform quantization for small-model auto-downgrade.
+                        if matches!(opts.quant_strategy, QuantStrategy::Q8_0) {
+                            if let Some(q8_bytes) = quantize_weight_q8_on_demand(weight_tid, ai_graph) {
+                                builder = builder.matmul_lut_8bit(
+                                    ConstantData::Bytes(q8_bytes),
+                                    &[norm_idx],
+                                );
+                                let proj_idx = builder.len() - 1;
+                                let out_shape = output_shape(Some(&out_tid), &ai_graph.tensor_info);
+                                if let Some(ref s) = out_shape {
+                                    builder = builder.set_node_shape(proj_idx, s.clone());
+                                }
+                                let dtype = input_float_dtype(Some(&out_tid), &ai_graph.tensor_info);
+                                builder = builder.set_node_dtype(proj_idx, dtype);
+                                tid_to_idx.insert(out_tid, proj_idx);
+                                continue;
+                            }
                         }
 
                         // No quantization — emit as plain f32 MatMul.
@@ -2134,15 +2152,10 @@ fn try_convert_conv2d_to_lut4(
     }))
 }
 
-/// Quantize a weight on demand to Q8: load from param, quantize to 8-bit, serialize.
+/// Quantize a weight on demand to Q8 (uniform spacing): O(n), no k-means.
 /// Returns None if the weight doesn't meet eligibility.
-///
-/// NOTE: Currently unused because the k-means Q8 quantization is too slow for
-/// compile-time use (O(elements × 256 × iterations)). A fast per-row symmetric
-/// Q8 format would make this viable.
-#[allow(dead_code)]
 fn quantize_weight_q8_on_demand(tid: TensorId, ai_graph: &AiGraph) -> Option<Vec<u8>> {
-    use hologram::hologram_exec::lut_gemm::quantize::quantize_8bit;
+    use hologram::hologram_exec::lut_gemm::quantize::quantize_8bit_uniform;
 
     let param = ai_graph.params.get(&tid)?;
     let info = ai_graph.tensor_info.get(&tid)?;
@@ -2172,7 +2185,7 @@ fn quantize_weight_q8_on_demand(tid: TensorId, ai_graph: &AiGraph) -> Option<Vec
         .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
         .collect();
     drop(raw_bytes);
-    let qw8 = quantize_8bit(&f32_weights, dims[0] as u32, dims[1] as u32);
+    let qw8 = quantize_8bit_uniform(&f32_weights, dims[0] as u32, dims[1] as u32);
     drop(f32_weights);
     let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&qw8).ok()?;
     tracing::debug!(
