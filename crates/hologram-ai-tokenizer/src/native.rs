@@ -344,6 +344,10 @@ fn parse_pre_tokenizer(json: &serde_json::Value) -> PreTokenizerConfig {
         _ => return PreTokenizerConfig::None,
     };
 
+    parse_pre_tokenizer_value(pt)
+}
+
+fn parse_pre_tokenizer_value(pt: &serde_json::Value) -> PreTokenizerConfig {
     match pt["type"].as_str() {
         Some("Metaspace") => {
             let replacement = pt["replacement"]
@@ -366,6 +370,49 @@ fn parse_pre_tokenizer(json: &serde_json::Value) -> PreTokenizerConfig {
                 .and_then(|r| r.as_str())
             {
                 PreTokenizerConfig::Regex(pattern.to_string())
+            } else {
+                PreTokenizerConfig::None
+            }
+        }
+        Some("ByteLevel") => PreTokenizerConfig::ByteLevel { regex: None },
+        Some("Sequence") => {
+            // A Sequence contains an ordered list of sub-tokenizers.
+            // For byte-level BPE (Qwen, GPT-2), the pattern is:
+            //   [Split(regex), ByteLevel]
+            // We extract the regex from Split and combine with ByteLevel.
+            let subs = match pt["pretokenizers"].as_array() {
+                Some(arr) => arr,
+                None => return PreTokenizerConfig::None,
+            };
+
+            let mut regex: Option<String> = None;
+            let mut has_byte_level = false;
+
+            for sub in subs {
+                match sub["type"].as_str() {
+                    Some("Split") => {
+                        regex = sub["pattern"]
+                            .as_object()
+                            .and_then(|p| p.get("Regex"))
+                            .and_then(|r| r.as_str())
+                            .map(|s| s.to_string());
+                    }
+                    Some("ByteLevel") => {
+                        has_byte_level = true;
+                    }
+                    Some("Metaspace") => {
+                        // If Sequence contains Metaspace (not ByteLevel),
+                        // use the Metaspace config.
+                        return parse_pre_tokenizer_value(sub);
+                    }
+                    _ => {}
+                }
+            }
+
+            if has_byte_level {
+                PreTokenizerConfig::ByteLevel { regex }
+            } else if let Some(pattern) = regex {
+                PreTokenizerConfig::Regex(pattern)
             } else {
                 PreTokenizerConfig::None
             }

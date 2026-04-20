@@ -56,6 +56,12 @@ pub enum PreTokenizerConfig {
     Metaspace { replacement: char, prepend: bool },
     /// Regex-based pre-tokenization (GPT-2 / LLaMA-3 style).
     Regex(String),
+    /// Byte-level pre-tokenizer (GPT-2 / Qwen style).
+    /// Maps each input byte to a Unicode character via the GPT-2
+    /// byte-to-unicode table, then splits with an optional regex.
+    ByteLevel {
+        regex: Option<String>,
+    },
 }
 
 /// Pre-tokenization text normalization.

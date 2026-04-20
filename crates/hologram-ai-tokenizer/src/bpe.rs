@@ -92,7 +92,37 @@ impl BpeEncoder {
                 // TODO: regex pre-tokenization for GPT-2/LLaMA-3
                 vec![text.to_string()]
             }
+            PreTokenizerConfig::ByteLevel { regex } => {
+                self.pre_tokenize_byte_level(text, regex.as_deref())
+            }
         }
+    }
+
+    /// Byte-level pre-tokenization (GPT-2 / Qwen style):
+    /// 1. Optionally split text using a regex pattern
+    /// 2. Map each byte to a Unicode character via the GPT-2 byte-to-unicode table
+    fn pre_tokenize_byte_level(&self, text: &str, regex_pattern: Option<&str>) -> Vec<String> {
+        let table = byte_to_unicode_table();
+
+        // Split with regex if provided, otherwise use whole text
+        let fragments: Vec<&str> = if let Some(pattern) = regex_pattern {
+            match regex::Regex::new(pattern) {
+                Ok(re) => re.find_iter(text).map(|m| m.as_str()).collect(),
+                Err(_) => vec![text],
+            }
+        } else {
+            vec![text]
+        };
+
+        // Map each fragment's bytes through the byte-to-unicode table
+        fragments
+            .into_iter()
+            .map(|frag| {
+                frag.bytes()
+                    .map(|b| table[b as usize])
+                    .collect::<String>()
+            })
+            .collect()
     }
 
     /// Metaspace pre-tokenization (SentencePiece style):
@@ -212,6 +242,33 @@ impl BpeEncoder {
             })
             .collect()
     }
+}
+
+/// GPT-2 byte-to-unicode mapping.
+///
+/// Maps each byte value (0–255) to a unique Unicode character. Printable ASCII
+/// characters map to themselves; non-printable bytes map to characters starting
+/// at U+0100 (Ā, ā, Ă, ...). This is the standard mapping used by GPT-2, Qwen,
+/// and other byte-level BPE tokenizers.
+fn byte_to_unicode_table() -> [char; 256] {
+    let mut table = ['\0'; 256];
+    let mut n: u32 = 0;
+    for b in 0u8..=255 {
+        let ch = match b {
+            // Printable ranges that map to themselves:
+            // '!' (33) through '~' (126), and '¡' (161) through '¬' (172),
+            // and '®' (174) through 'ÿ' (255)
+            33..=126 | 161..=172 | 174..=255 => b as u32,
+            // Non-printable bytes map to U+0100 + offset
+            _ => {
+                let ch = 256 + n;
+                n += 1;
+                ch
+            }
+        };
+        table[b as usize] = char::from_u32(ch).unwrap_or('?');
+    }
+    table
 }
 
 /// Parse a byte-fallback token like `<0x41>` → Some(0x41).

@@ -883,6 +883,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hologram",
+ "regex",
  "rkyv",
  "serde",
  "serde_json",
@@ -985,6 +986,7 @@ dependencies = [
  "hologram-core",
  "hologram-graph",
  "hologram-ring",
+ "hologram-shape",
  "libc",
  "parking_lot",
  "rayon",
@@ -1010,6 +1012,15 @@ version = "0.4.1"
 dependencies = [
  "rkyv",
  "uor-foundation",
+]
+
+[[package]]
+name = "hologram-shape"
+version = "0.4.1"
+dependencies = [
+ "hologram-core",
+ "smallvec",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

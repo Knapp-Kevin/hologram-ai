@@ -251,10 +251,7 @@ impl ModelCompiler {
     /// rebuild_archive_with_section post-processing that unpacks + repacks the
     /// entire archive per section (3× for a 14 GB SDXL UNet archive = 42 GB
     /// of wasted allocations).
-    pub fn compile(
-        &self,
-        source: ModelSource,
-    ) -> anyhow::Result<HoloArchive> {
+    pub fn compile(&self, source: ModelSource) -> anyhow::Result<HoloArchive> {
         self.compile_with_sections(source, ArchiveSections::new())
     }
 
@@ -279,6 +276,12 @@ impl ModelCompiler {
             return self.compile_multi_onnx(components, connections, &extra_sections);
         }
 
+        // Extract model directory for companion file discovery (config.json).
+        let model_dir = match &source {
+            ModelSource::OnnxPath(p) => p.parent().map(|d| d.to_path_buf()),
+            _ => None,
+        };
+
         // Step 1 — import.
         let mut ai_graph = self.import(source)?;
         info!(
@@ -286,6 +289,14 @@ impl ModelCompiler {
             params = ai_graph.params.len(),
             "import complete"
         );
+
+        // Step 1a — read companion config.json for architecture metadata.
+        // HuggingFace models include config.json with model_type, rope_theta,
+        // vocab_size, etc. Pre-set these on the graph so that
+        // infer_llm_metadata_from_graph uses them instead of defaults.
+        if let Some(dir) = &model_dir {
+            seed_metadata_from_config_json(&mut ai_graph, dir);
+        }
 
         // Step 1b — apply spatial scaling if requested.
         if let Some(scale) = self.spatial_scale {
@@ -482,19 +493,28 @@ impl ModelCompiler {
 
                 // Compile sub-archives (graph + sections, no weights).
                 let prefill_archive = compile_one_component(
-                    &prefill_graph, &prefill_mem.kv_cache_layout,
-                    &self.lowering_options(), &LowerPhase::Forward,
-                    Some(&[]), Some(&weight_index),
+                    &prefill_graph,
+                    &prefill_mem.kv_cache_layout,
+                    &self.lowering_options(),
+                    &LowerPhase::Forward,
+                    Some(&[]),
+                    Some(&weight_index),
                 )?;
                 let decode_archive = compile_one_component(
-                    &decode_graph, &decode_mem.kv_cache_layout,
-                    &self.lowering_options(), &LowerPhase::Forward,
-                    None, None,
+                    &decode_graph,
+                    &decode_mem.kv_cache_layout,
+                    &self.lowering_options(),
+                    &LowerPhase::Forward,
+                    None,
+                    None,
                 )?;
                 let verify_archive = compile_one_component(
-                    &verify_graph, &verify_mem.kv_cache_layout,
-                    &self.lowering_options(), &LowerPhase::Forward,
-                    None, None,
+                    &verify_graph,
+                    &verify_mem.kv_cache_layout,
+                    &self.lowering_options(),
+                    &LowerPhase::Forward,
+                    None,
+                    None,
                 )?;
 
                 // Build MetaSection.
@@ -537,7 +557,8 @@ impl ModelCompiler {
                     use hologram::hologram_archive::section::EmbeddableSection;
                     let model_meta =
                         hologram::hologram_archive::section::model_meta::ModelMetaSection {
-                            kind: hologram::hologram_archive::section::model_meta::ModelKind::TextLlm,
+                            kind:
+                                hologram::hologram_archive::section::model_meta::ModelKind::TextLlm,
                             arch: pre_metadata.arch.clone(),
                             description: pre_metadata.arch.clone(),
                             max_seq_len: pre_metadata.context_len,
@@ -665,8 +686,8 @@ impl ModelCompiler {
                     ComponentConnection, ComponentDescriptor, ComponentRole, MetaSection,
                 };
 
-                let tmp_output = tempfile::NamedTempFile::new()
-                    .context("creating temp output file")?;
+                let tmp_output =
+                    tempfile::NamedTempFile::new().context("creating temp output file")?;
                 let output_path = tmp_output
                     .into_temp_path()
                     .keep()
@@ -1821,6 +1842,44 @@ fn extract_metadata(graph: &AiGraph) -> ModelMetadata {
     }
 }
 
+/// Read companion `config.json` (HuggingFace format) and seed metadata on the
+/// graph. This lets `infer_llm_metadata_from_graph` use the correct arch name
+/// and context length instead of defaulting to "llama"/2048.
+fn seed_metadata_from_config_json(graph: &mut AiGraph, model_dir: &std::path::Path) {
+    use hologram_ai_common::MetaValue;
+
+    let config_path = model_dir.join("config.json");
+    let data = match std::fs::read_to_string(&config_path) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let json: serde_json::Value = match serde_json::from_str(&data) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    // model_type → arch (e.g. "qwen2", "llama", "mistral", "gemma", "phi")
+    if let Some(model_type) = json.get("model_type").and_then(|v| v.as_str()) {
+        graph
+            .metadata
+            .entry("arch".into())
+            .or_insert(MetaValue::Str(model_type.into()));
+    }
+
+    // vocab_size
+    if let Some(vocab) = json.get("vocab_size").and_then(|v| v.as_i64()) {
+        graph
+            .metadata
+            .entry("vocab_size".into())
+            .or_insert(MetaValue::Int(vocab));
+    }
+
+    info!(
+        config = %config_path.display(),
+        "seeded metadata from config.json"
+    );
+}
+
 /// Infer LLM architecture metadata from fused GroupedQueryAttention nodes.
 ///
 /// ONNX models don't carry `arch`, `n_layers`, `n_kv_heads`, etc. natively.
@@ -2490,8 +2549,8 @@ fn collect_weight_bytes_streaming(
             continue;
         };
         let n = *len as usize;
-        let mut f = std::fs::File::open(path)
-            .with_context(|| format!("opening weight file {path:?}"))?;
+        let mut f =
+            std::fs::File::open(path).with_context(|| format!("opening weight file {path:?}"))?;
 
         // Disable OS page caching for this file — prevents the OS from
         // keeping 10 GB of weight pages in the page cache (which inflates
@@ -2546,7 +2605,8 @@ fn collect_weight_bytes_streaming(
     // Persist the temp file so it survives until the archive is built.
     // The caller is responsible for cleanup (or the OS cleans /tmp on reboot).
     let path = tmp.into_temp_path();
-    let persisted = path.keep()
+    let persisted = path
+        .keep()
         .map_err(|e| anyhow::anyhow!("persisting temp weight file: {e}"))?;
     tracing::info!(
         total_mb = total_len / (1024 * 1024),

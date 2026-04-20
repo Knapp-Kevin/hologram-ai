@@ -88,7 +88,7 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] QK-Norm + RoPE pre-attention fusion — **pass removed** (hologram base
   `dispatch_attention()` still ignores `qk_norm`/`rope` flags). AiOp fields
   and lowering stubs retained as forward-compatible placeholders. Re-add pass
-  when hologram base wires kernel support. **→ Plan 074 Workstream A.**
+  when hologram base wires kernel support. **→ Plan 074 Patterns 1+3.**
 
 ### P4: Compilation speed (Plans 017, 020, 073)
 - [x] Release profile with LTO (`codegen-units = 1, lto = "thin"`)
@@ -362,21 +362,22 @@ zero runtime code. All kernels belong in hologram base crate.
     - [ ] Paged KV cache in hologram-exec (Plan 016) — virtual page tables,
       LIFO free-page stack, `KvPagedWrite`/`KvPagedRead` dispatch
     - [ ] AnyUp-style windowed cross-attention kernel (P3, segmentation)
-- [ ] **Qwen model support (Plan 074)**
-  - [ ] Workstream A: RoPE + QK-Norm kernel support
-    - [ ] A.1: Wire `rope`/`rope_base` into `dispatch_attention()` (hologram base)
-    - [ ] A.2: RoPE scaling variants (NTK/YaRN) for 128K+ context
-    - [ ] A.3: QK-Norm (RMSNorm on Q/K before attention)
-    - [ ] Re-enable `PreAttentionFusion` pass + detect RoPE in ONNX graph
-  - [ ] Workstream B: KV cache quantization exposure
+- [ ] **Architectural patterns from Qwen (Plan 074)**
+  Six compiler improvements inspired by Qwen, benefiting all model families:
+  - [ ] Pattern 1: Fused RoPE + context scaling (NTK/YaRN for 128K+ context)
+    - [ ] Wire `rope`/`rope_base` into `dispatch_attention()` (hologram base)
+    - [ ] `RopeScaling` enum (Linear/NTK/YaRN) + CLI `--context-scale`
+    - [ ] Detect RoPE in ONNX graph, re-enable `PreAttentionFusion`
+  - [ ] Pattern 2: LogN attention scaling (`log(n)/log(n_train)` for long ctx)
+  - [ ] Pattern 3: QK-Norm (RMSNorm on Q/K before attention)
+  - [ ] Pattern 4: KV cache quantization as first-class feature
     - [ ] Serialize `KvCacheConfig` into archive metadata
-    - [ ] E2E validation (TinyLlama Q8/Q4 KV quality + memory benchmarks)
-  - [ ] Workstream C: Qwen2-0.5B cross-family validation
-    - [ ] C.1: Download + compile + decode Qwen2-0.5B ONNX
-    - [ ] C.2: Verify byte-level BPE tokenizer (BBPE, 151K vocab)
-    - [ ] C.3: Position IDs handling (verify commit aa65654 works for Qwen)
-    - [ ] C.4: Architecture detection (`"qwen2"` not `"llama"`)
-    - [ ] C.5: Post-embedding RMSNorm correctness verification
+  - [ ] Pattern 5: SwiGLU clamping for numerical stability at Q4
+  - [ ] Pattern 6: Per-layer quantization sensitivity (`--protect-layers`)
+  - [ ] Validation: Qwen2-0.5B cross-family test
+    - [ ] Download + compile + decode Qwen2-0.5B ONNX
+    - [ ] Verify byte-level BPE tokenizer (BBPE, 151K vocab)
+    - [ ] Position IDs, arch detection (`"qwen2"`), post-embed RMSNorm
 - [ ] Test with Whisper (encoder-decoder, audio)
 - [ ] Fix any op dispatch failures discovered
 - [ ] Goal: `hologram-ai compile -m model.onnx` works for top-20 HuggingFace models
