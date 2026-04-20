@@ -187,7 +187,7 @@ fn main() -> anyhow::Result<()> {
                 Some(other) => anyhow::bail!(
                     "unsupported quantization scheme '{other}' (supported: q2_0, q4_0, q8_0, none)"
                 ),
-                None => hologram_ai_common::lower::QuantStrategy::None,
+                None => hologram_ai_common::lower::QuantStrategy::Q4_0,
             };
             let patch_budget_ratio = if no_patch_prune {
                 None
