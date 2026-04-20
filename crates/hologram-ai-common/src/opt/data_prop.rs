@@ -277,7 +277,9 @@ impl Pass for DataPropagation {
                 .entry(out_tid)
                 .and_modify(|existing| *existing = info.clone())
                 .or_insert_with(|| info.clone());
-            graph.params.insert(out_tid, AiParam::inline(data_bytes, info));
+            graph
+                .params
+                .insert(out_tid, AiParam::inline(data_bytes, info));
         }
 
         // Materialize Trilu outputs when the input is a known constant param.
@@ -356,7 +358,9 @@ impl Pass for DataPropagation {
                 .entry(out_tid)
                 .and_modify(|existing| *existing = out_info.clone())
                 .or_insert_with(|| out_info.clone());
-            graph.params.insert(out_tid, AiParam::inline(out_bytes, out_info));
+            graph
+                .params
+                .insert(out_tid, AiParam::inline(out_bytes, out_info));
         }
 
         Ok(graph)

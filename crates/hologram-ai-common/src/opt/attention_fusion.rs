@@ -739,9 +739,11 @@ mod tests {
         let graph = build_sdpa_graph();
         assert_eq!(graph.nodes.len(), 5);
 
-        let fused = AttentionFusion { force_causal: Some(false) }
-            .run(graph)
-            .expect("fusion failed");
+        let fused = AttentionFusion {
+            force_causal: Some(false),
+        }
+        .run(graph)
+        .expect("fusion failed");
 
         // Should have 1 node: GroupedQueryAttention (Mul, Add, Softmax, output MatMul removed).
         // The Q@K^T MatMul is also removed.
@@ -806,14 +808,22 @@ mod tests {
         let v = alloc_tid(&mut next_tid);
 
         graph.tensor_info.insert(q, f32_info(shape_4d(1, 4, 8, 16)));
-        graph.tensor_info.insert(k_t, f32_info(shape_4d(1, 4, 16, 8)));
+        graph
+            .tensor_info
+            .insert(k_t, f32_info(shape_4d(1, 4, 16, 8)));
         graph.tensor_info.insert(v, f32_info(shape_4d(1, 4, 8, 16)));
 
         // MatMul(Q, K^T) → scores
         let scores = alloc_tid(&mut next_tid);
-        graph.tensor_info.insert(scores, f32_info(shape_4d(1, 4, 8, 8)));
+        graph
+            .tensor_info
+            .insert(scores, f32_info(shape_4d(1, 4, 8, 8)));
         graph.nodes.push(AiNode::new(
-            { let n = next_nid; next_nid += 1; n },
+            {
+                let n = next_nid;
+                next_nid += 1;
+                n
+            },
             AiOp::MatMul,
             vec![q, k_t],
             vec![scores],
@@ -821,9 +831,15 @@ mod tests {
 
         // Softmax(scores) → weights (no Add/mask in between)
         let weights = alloc_tid(&mut next_tid);
-        graph.tensor_info.insert(weights, f32_info(shape_4d(1, 4, 8, 8)));
+        graph
+            .tensor_info
+            .insert(weights, f32_info(shape_4d(1, 4, 8, 8)));
         graph.nodes.push(AiNode::new(
-            { let n = next_nid; next_nid += 1; n },
+            {
+                let n = next_nid;
+                next_nid += 1;
+                n
+            },
             AiOp::Softmax { axis: -1 },
             vec![scores],
             vec![weights],
@@ -831,9 +847,15 @@ mod tests {
 
         // MatMul(weights, V) → output
         let output = alloc_tid(&mut next_tid);
-        graph.tensor_info.insert(output, f32_info(shape_4d(1, 4, 8, 16)));
+        graph
+            .tensor_info
+            .insert(output, f32_info(shape_4d(1, 4, 8, 16)));
         graph.nodes.push(AiNode::new(
-            { let _n = next_nid; next_nid += 1; _n },
+            {
+                let _n = next_nid;
+                next_nid += 1;
+                _n
+            },
             AiOp::MatMul,
             vec![weights, v],
             vec![output],
@@ -883,14 +905,19 @@ mod tests {
     fn force_causal_override_true() {
         // Explicitly force causal even for encoder-like output.
         let graph = build_maskless_sdpa_graph("last_hidden_state");
-        let fused = AttentionFusion { force_causal: Some(true) }
-            .run(graph)
-            .expect("fusion failed");
+        let fused = AttentionFusion {
+            force_causal: Some(true),
+        }
+        .run(graph)
+        .expect("fusion failed");
 
         assert_eq!(fused.nodes.len(), 1);
         match &fused.nodes[0].op {
             AiOp::GroupedQueryAttention { causal, .. } => {
-                assert!(*causal, "force_causal=Some(true) should override auto-detect");
+                assert!(
+                    *causal,
+                    "force_causal=Some(true) should override auto-detect"
+                );
             }
             other => panic!("expected GroupedQueryAttention, got {other:?}"),
         }

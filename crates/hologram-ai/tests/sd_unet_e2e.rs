@@ -50,7 +50,11 @@ fn sd_unet_holo_path() -> PathBuf {
 /// The archive is written to disk immediately and the in-memory buffer dropped.
 fn ensure_compiled() -> bool {
     let holo = sd_unet_holo_path();
-    if holo.exists() && std::fs::metadata(&holo).map(|m| m.len() > 0).unwrap_or(false) {
+    if holo.exists()
+        && std::fs::metadata(&holo)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+    {
         return true;
     }
     let onnx = sd_unet_model_path();
@@ -229,9 +233,17 @@ fn sd_unet_metal_backend() {
     let encoder_data = vec![0.0f32; 1 * 77 * 768];
 
     let mut inputs = hologram::GraphInputs::new();
-    inputs.set_with_shape(0, bytemuck::cast_slice(&sample_data).to_vec(), vec![1, 4, 64, 64]);
+    inputs.set_with_shape(
+        0,
+        bytemuck::cast_slice(&sample_data).to_vec(),
+        vec![1, 4, 64, 64],
+    );
     inputs.set_with_shape(1, bytemuck::cast_slice(&timestep_data).to_vec(), vec![1]);
-    inputs.set_with_shape(2, bytemuck::cast_slice(&encoder_data).to_vec(), vec![1, 77, 768]);
+    inputs.set_with_shape(
+        2,
+        bytemuck::cast_slice(&encoder_data).to_vec(),
+        vec![1, 77, 768],
+    );
 
     // Use the new Metal backend path.
     let metal_mem = match hologram::backend::metal::MetalMemory::new() {
@@ -251,9 +263,8 @@ fn sd_unet_metal_backend() {
 
     eprintln!("starting Metal backend execution...");
     let start = std::time::Instant::now();
-    let result = hologram::execute_tape_on_backend(
-        &tape, &plan, &inputs, &metal_mem, &metal_backend,
-    );
+    let result =
+        hologram::execute_tape_on_backend(&tape, &plan, &inputs, &metal_mem, &metal_backend);
     let elapsed = start.elapsed();
     eprintln!("Metal execution took: {elapsed:.2?}");
 
