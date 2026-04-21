@@ -30,16 +30,16 @@ pub struct QuantizeStats {
 ///
 /// `quant_cache` is shared across multiple graphs (prefill/decode/verify) to
 /// avoid re-quantizing the same weight constant.
-/// Optional weight source for streaming compilation where constants
+/// Optional weight file for streaming compilation where constants
 /// are `ConstantData::Deferred` (mmap'd from a temp file).
-pub type WeightSource<'a> = Option<&'a [u8]>;
+pub type WeightFile<'a> = Option<&'a [u8]>;
 
 pub fn quantize_graph(
     graph: &mut Graph,
     strategy: QuantStrategy,
     total_params: u64,
     quant_cache: &mut HashMap<ConstantId, (ConstantId, QuantLevel)>,
-    weight_bytes: WeightSource<'_>,
+    weight_file: WeightFile<'_>,
 ) -> anyhow::Result<QuantizeStats> {
     if matches!(strategy, QuantStrategy::None | QuantStrategy::Auto) {
         return Ok(QuantizeStats::default());
@@ -143,19 +143,15 @@ pub fn quantize_graph(
         // Read the weight constant data.
         let weight_data = match graph.get_constant(weight_cid) {
             Some(ConstantData::Bytes(b)) => b.clone(),
-            Some(ConstantData::Deferred { byte_size, .. }) => {
-                // Streaming: read from the weight file.
+            Some(ConstantData::Deferred {
+                byte_size,
+                source_id,
+            }) => {
+                // Streaming: read from the mmap'd weight file at the offset.
                 let size = *byte_size as usize;
-                match weight_bytes {
-                    Some(wb) if wb.len() >= size => {
-                        // The constant's byte offset into the weight file is
-                        // implicit from the ConstantId ordering. For now, we
-                        // skip deferred constants — they'll be handled when we
-                        // have the offset mapping. The post-lowering pass works
-                        // for non-streaming (small models) today.
-                        stats.skipped += 1;
-                        continue;
-                    }
+                let offset = *source_id as usize;
+                match weight_file {
+                    Some(wf) if offset + size <= wf.len() => wf[offset..offset + size].to_vec(),
                     _ => {
                         stats.skipped += 1;
                         continue;

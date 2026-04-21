@@ -145,16 +145,10 @@ pub fn lower(
     //
     // We track which TIDs became Q4 constants so node lowering emits
     // MatMulLut4 instead of FloatOp::MatMul.
-    // For streaming compilation (large models with mmap'd weights), early-quant
-    // during lowering is still used because the post-lowering quantize_graph()
-    // pass cannot read Deferred constants. For non-streaming (small models where
-    // weights are ConstantData::Bytes), early-quant is disabled and the post-
-    // lowering pass handles all quantization with full coverage.
-    let is_streaming = ai_graph.params.values().any(|p| matches!(p, crate::ir::AiParam::Mmap { .. }));
-    let do_early_quant = is_streaming && matches!(
-        opts.quant_strategy,
-        QuantStrategy::Q4_0 | QuantStrategy::Q2_0
-    );
+    // Quantization is handled entirely by the post-lowering quantize_graph() pass.
+    // All weights are emitted as f32 Float(MatMul). The pass reads weights from
+    // the mmap'd file (streaming) or from ConstantData::Bytes (in-memory).
+    let do_early_quant = false;
     let q4_error_threshold = 0.15f32;
     let _ = q4_error_threshold;
 

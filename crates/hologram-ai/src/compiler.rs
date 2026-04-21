@@ -482,6 +482,18 @@ impl ModelCompiler {
                     .context("creating scratch file for LLM pipeline assembly")?;
                 let scratch_path = scratch.path().to_path_buf();
 
+                // Mmap the weight file for the quantize pass.
+                let weight_mmap: Option<memmap2::Mmap> = match &ws {
+                    hologram::hologram_archive::WeightSource::File { path, .. } => {
+                        let f = std::fs::File::open(path)
+                            .context("opening weight file for quantize mmap")?;
+                        Some(unsafe { memmap2::Mmap::map(&f) }
+                            .context("mmap weight file for quantize pass")?)
+                    }
+                    _ => None,
+                };
+                let wm_slice: Option<&[u8]> = weight_mmap.as_deref();
+
                 // Compile sub-archives in parallel (graph + sections, no weights).
                 let lowering_opts = self.lowering_options();
                 let (prefill_archive, decode_archive, verify_archive) =
@@ -495,6 +507,7 @@ impl ModelCompiler {
                                 Some(&[]),
                                 Some(&weight_index),
                                 total_weight_bytes / 4,
+                                wm_slice,
                             )
                         });
                         let h_d = s.spawn(|| {
@@ -506,6 +519,7 @@ impl ModelCompiler {
                                 None,
                                 None,
                                 total_weight_bytes / 4,
+                                wm_slice,
                             )
                         });
                         let h_v = s.spawn(|| {
@@ -517,6 +531,7 @@ impl ModelCompiler {
                                 None,
                                 None,
                                 total_weight_bytes / 4,
+                                wm_slice,
                             )
                         });
                         let p = h_p.join().expect("prefill compile thread panicked");
@@ -720,6 +735,7 @@ impl ModelCompiler {
                     Some(&[]),
                     Some(&weight_index),
                     total_weight_bytes / 4,
+                    if weights.is_empty() { None } else { Some(&weights) },
                 )?;
 
                 // Build MetaSection for the pipeline wrapper.
@@ -1122,6 +1138,7 @@ impl ModelCompiler {
                 weights_for_component,
                 wi_for_component,
                 total_weight_bytes_before / 4,
+                None, // multi-component: weights are in-memory via spec.weights
             )
             .with_context(|| format!("compiling component '{}'", spec.name))?;
             info!(
@@ -1630,6 +1647,7 @@ fn compile_one_component(
     extra_weights: Option<&[u8]>,
     weight_index: Option<&hologram::hologram_archive::weight::index::WeightIndex>,
     total_params: u64,
+    weight_mmap: Option<&[u8]>,
 ) -> anyhow::Result<Vec<u8>> {
     let phase_name = phase.layer_name();
     let _span = tracing::info_span!("compile_one_component", phase = phase_name).entered();
@@ -1657,7 +1675,7 @@ fn compile_one_component(
             opts.quant_strategy,
             total_params,
             &mut quant_cache,
-            extra_weights,
+            weight_mmap,
         )?;
         if stats.quantized > 0 {
             tracing::info!(
