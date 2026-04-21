@@ -539,11 +539,11 @@ impl ModelCompiler {
                         let v = h_v.join().expect("verify compile thread panicked");
                         (p, d, v)
                     });
-                let prefill_archive = prefill_archive
+                let prefill_result = prefill_archive
                     .context("compiling prefill component")?;
-                let decode_archive = decode_archive
+                let decode_result = decode_archive
                     .context("compiling decode component")?;
-                let verify_archive = verify_archive
+                let verify_result = verify_archive
                     .context("compiling verify component")?;
 
                 // Build MetaSection.
@@ -571,11 +571,25 @@ impl ModelCompiler {
                     vec![] as Vec<ComponentConnection>,
                 );
 
-                let mut writer = PipelineWriter::new()
-                    .add_model_streaming("prefill", prefill_archive, ws)
-                    .add_model("decode", decode_archive)
-                    .add_model("verify", verify_archive)
-                    .add_section(meta.section_kind(), meta.to_bytes());
+                // If all weights were encoded (Q4/Q8), the f32 weight source
+                // is no longer needed — all data is in Bytes constants inside
+                // the sub-archive. Skip streaming to avoid bloated archives.
+                let mut writer = if prefill_result.all_weights_encoded {
+                    tracing::info!(
+                        "all weights encoded — skipping f32 weight stream"
+                    );
+                    PipelineWriter::new()
+                        .add_model("prefill", prefill_result.archive)
+                        .add_model("decode", decode_result.archive)
+                        .add_model("verify", verify_result.archive)
+                        .add_section(meta.section_kind(), meta.to_bytes())
+                } else {
+                    PipelineWriter::new()
+                        .add_model_streaming("prefill", prefill_result.archive, ws)
+                        .add_model("decode", decode_result.archive)
+                        .add_model("verify", verify_result.archive)
+                        .add_section(meta.section_kind(), meta.to_bytes())
+                };
 
                 for (kind, bytes) in &extra_sections {
                     writer = writer.add_section(*kind, bytes.clone());
@@ -727,7 +741,7 @@ impl ModelCompiler {
                 let scratch_path = scratch.path().to_path_buf();
 
                 // Compile the sub-archive (graph + sections, empty weights).
-                let sub_archive = compile_one_component(
+                let result = compile_one_component(
                     &ai_graph,
                     &mem_plan.kv_cache_layout,
                     &self.lowering_options(),
@@ -749,9 +763,16 @@ impl ModelCompiler {
                     vec![] as Vec<ComponentConnection>,
                 );
 
-                let writer = PipelineWriter::new()
-                    .add_model_streaming("model", sub_archive, ws)
-                    .add_section(meta.section_kind(), meta.to_bytes());
+                let writer = if result.all_weights_encoded {
+                    tracing::info!("all weights encoded — skipping f32 weight stream");
+                    PipelineWriter::new()
+                        .add_model("model", result.archive)
+                        .add_section(meta.section_kind(), meta.to_bytes())
+                } else {
+                    PipelineWriter::new()
+                        .add_model_streaming("model", result.archive, ws)
+                        .add_section(meta.section_kind(), meta.to_bytes())
+                };
 
                 writer
                     .build_to_file(&output_path, &scratch_path)
@@ -1130,7 +1151,7 @@ impl ModelCompiler {
             });
 
             let lowering_opts = self.lowering_options();
-            let archive = compile_one_component(
+            let result = compile_one_component(
                 spec.graph,
                 &spec.mem_plan.kv_cache_layout,
                 &lowering_opts,
@@ -1143,10 +1164,10 @@ impl ModelCompiler {
             .with_context(|| format!("compiling component '{}'", spec.name))?;
             info!(
                 component = %spec.name,
-                archive_bytes = archive.len(),
+                archive_bytes = result.archive.len(),
                 "component compiled"
             );
-            writer = writer.add_model(&spec.name, archive);
+            writer = writer.add_model(&spec.name, result.archive);
         }
 
         // Embed MetaSection in the pipeline wrapper archive.
@@ -1634,6 +1655,16 @@ fn prepare_llm_component(
     })
 }
 
+/// Result from compiling a single component.
+struct ComponentResult {
+    /// The sub-archive bytes.
+    archive: Vec<u8>,
+    /// True if all Deferred (f32) weight constants were replaced by
+    /// quantized Bytes constants. When true, the streaming weight source
+    /// is no longer needed for this component.
+    all_weights_encoded: bool,
+}
+
 /// Compile a single AiGraph into a sub-archive ready for PipelineWriter.
 ///
 /// Encapsulates the lower → compile → unpack → assemble pipeline that was
@@ -1648,7 +1679,7 @@ fn compile_one_component(
     weight_index: Option<&hologram::hologram_archive::weight::index::WeightIndex>,
     total_params: u64,
     weight_mmap: Option<&[u8]>,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<ComponentResult> {
     let phase_name = phase.layer_name();
     let _span = tracing::info_span!("compile_one_component", phase = phase_name).entered();
 
@@ -1668,7 +1699,7 @@ fn compile_one_component(
 
     // UOR encoding resolution (Plan 077): convert eligible Float(MatMul)/Gemm
     // to MatMulLut4/8 with content-addressed constants.
-    let content_entries = {
+    let (content_entries, all_weights_encoded) = {
         let _span = tracing::info_span!("resolve_encodings", phase = phase_name).entered();
         let mut quant_cache = std::collections::HashMap::new();
         let stats = hologram_ai_common::lower::resolve_encodings(
@@ -1678,16 +1709,26 @@ fn compile_one_component(
             &mut quant_cache,
             weight_mmap,
         )?;
+        // Check if any Deferred constants remain in the lowered graph.
+        // If none, the streaming weight source is no longer needed.
+        let store = lower_out.graph.constant_store();
+        let has_deferred = (0..store.len()).any(|i| {
+            store
+                .get(hologram::ConstantId::new(i as u32))
+                .map_or(false, |c| c.is_deferred())
+        });
+        let all_weights_encoded = stats.encoded > 0 && !has_deferred;
         if stats.encoded > 0 {
             tracing::info!(
                 encoded = stats.encoded,
                 skipped = stats.skipped,
                 saved_mb = stats.bytes_saved / (1024 * 1024),
                 content_entries = stats.content_entries.len(),
+                all_weights_encoded,
                 "UOR encoding resolution"
             );
         }
-        stats.content_entries
+        (stats.content_entries, all_weights_encoded)
     };
 
     let compiled = {
@@ -1832,14 +1873,18 @@ fn compile_one_component(
         );
     }
 
-    build_final_archive(
+    let archive = build_final_archive(
         unpacked,
         extra_weights,
         Some(layer_header),
         bundle,
         weight_index,
         &extra_sections,
-    )
+    )?;
+    Ok(ComponentResult {
+        archive,
+        all_weights_encoded,
+    })
 }
 
 /// Build a corrected `LayerHeader` with proper TensorPorts from the AiGraph.

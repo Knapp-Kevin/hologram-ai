@@ -198,6 +198,10 @@ pub fn resolve_encodings(
         // stats.content_entries after all graphs are compiled.
         let effective_cid = graph.add_constant(ConstantData::Bytes(serialized.clone()));
 
+        // TODO(Plan 077): After PipelineWriter gains content-address awareness,
+        // replace the original f32 Deferred constant to avoid streaming unused
+        // f32 weights. For now the archive is larger than optimal.
+
         quant_cache.insert(weight_cid, (effective_cid, level));
 
         let new_op = make_quantized_op(level, effective_cid);
