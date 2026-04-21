@@ -145,9 +145,10 @@ pub fn lower(
     //
     // We track which TIDs became Q4 constants so node lowering emits
     // MatMulLut4 instead of FloatOp::MatMul.
-    // Quantization is handled entirely by the post-lowering quantize_graph() pass.
-    // All weights are emitted as f32 Float(MatMul). The pass reads weights from
-    // the mmap'd file (streaming) or from ConstantData::Bytes (in-memory).
+    // Quantization is handled entirely by the post-lowering resolve_encodings() pass
+    // (Plan 077 — UOR encoding). All weights are emitted as f32 Float(MatMul). The
+    // pass reads weights from the mmap'd file (streaming) or ConstantData::Bytes
+    // (in-memory), encodes them, and registers content-addressed constants.
     let do_early_quant = false;
     let q4_error_threshold = 0.15f32;
     let _ = q4_error_threshold;

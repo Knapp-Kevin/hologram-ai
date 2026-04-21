@@ -1666,23 +1666,24 @@ fn compile_one_component(
     // Validate: check all Gemm/MatMul nodes' weight inputs are valid constants.
     validate_matmul_constants(&lower_out.graph, extra_weights);
 
-    // Post-lowering quantization: convert eligible Float(MatMul) to MatMulLut4/8.
+    // UOR encoding resolution (Plan 077): convert eligible Float(MatMul)/Gemm
+    // to MatMulLut4/8 with content-addressed constants.
     {
-        let _span = tracing::info_span!("quantize_graph", phase = phase_name).entered();
+        let _span = tracing::info_span!("resolve_encodings", phase = phase_name).entered();
         let mut quant_cache = std::collections::HashMap::new();
-        let stats = hologram_ai_common::lower::quantize_graph(
+        let stats = hologram_ai_common::lower::resolve_encodings(
             &mut lower_out.graph,
             opts.quant_strategy,
             total_params,
             &mut quant_cache,
             weight_mmap,
         )?;
-        if stats.quantized > 0 {
+        if stats.encoded > 0 {
             tracing::info!(
-                quantized = stats.quantized,
+                encoded = stats.encoded,
                 skipped = stats.skipped,
                 saved_mb = stats.bytes_saved / (1024 * 1024),
-                "post-lowering quantization"
+                "UOR encoding resolution"
             );
         }
     }

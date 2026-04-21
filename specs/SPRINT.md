@@ -267,6 +267,16 @@ zero runtime code. All kernels belong in hologram base crate.
   `Float(MatMul)` → `MatMulLut4/8` with pre-serialized weights. Enables:
   full Q8 coverage for small models (→ 10+ tok/s), per-layer sensitivity,
   mixed Q4/Q8, and future GPTQ/AWQ algorithms.
+  - [x] In-memory path working (Qwen2 10.5 tok/s Q8)
+  - [ ] Streaming/mmap path broken (TinyLlama falls to f32)
+  - **Superseded by Plan 077** for the streaming fix and architectural rework.
+- [ ] **UOR encoding for quantization (Plan 077)** — replace graph-level
+  quantization with content-addressed, self-describing weight encoding.
+  `TensorEncoding` descriptor on `TensorMetadata`, `ConstantData::ContentAddressed`
+  with BLAKE3 digest, `ContentAddressIndex` section, `WeightResolver` trait
+  (anticipates Plan 067 ComputeBackend). Fixes streaming bug, removes 9+ builder
+  hooks, covers MatMul + Gemm + Conv2d in single code path. Branch:
+  `feat/uor-quantization`. See `specs/plans/077-uor-quantization-encoding.md`.
 
 ---
 
