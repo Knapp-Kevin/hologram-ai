@@ -434,8 +434,8 @@ fn run_generation(
     }
 
     let max_tokens = config.max_tokens.unwrap_or_else(|| {
-        let limit = model_meta.map(|m| m.max_seq_len as usize).unwrap_or(2048);
-        info!("max_tokens not set, using model max_seq_len: {limit}");
+        let limit = 128;
+        info!("max_tokens not set, defaulting to {limit}");
         limit
     });
 
