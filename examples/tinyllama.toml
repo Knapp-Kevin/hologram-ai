@@ -10,4 +10,4 @@ quantize = "q4_0"
 
 [run]
 prompt = "The capital of France is"
-max_tokens = 30
+# max_tokens = 30
