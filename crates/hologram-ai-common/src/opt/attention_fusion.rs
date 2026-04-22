@@ -131,11 +131,18 @@ impl Pass for AttentionFusion {
                 // The GQA kernel receives pre-Transpose K and handles layout
                 // via the heads_first flag. KvSlotInjection then inserts
                 // KvWrite on this same pre-Transpose K tensor.
+                //
+                // NOTE: PyTorch SDPA may split 1/√d across Q and K as separate
+                // Mul(Q, 1/√8) + Mul(K, 1/√8). We absorb the K-side Mul here.
+                // The Q-side Mul stays in the graph — Q arrives prescaled. The
+                // combined effect: Q_prescaled @ K_raw^T * effective_scale
+                // = (s_q * Q) @ K^T * s_k = s_q * s_k * Q@K^T = Q@K^T / √d. ✓
                 let (k_pre_transpose, effective_scale) = {
                     let (k, k_scale) = find_pre_transpose_with_scale(k_tid, &tid_to_node, &graph);
                     let eff = k_scale.unwrap_or(1.0) * chain.scale;
                     (k, eff)
                 };
+                let q_input = q_tid;
 
                 // Trace K and V back past GQA expansion ops (Expand/Reshape/
                 // Unsqueeze) to find the un-expanded tensors. At runtime,
@@ -178,7 +185,7 @@ impl Pass for AttentionFusion {
                         rope: false,
                         rope_base: 0.0,
                     },
-                    vec![q_tid, k_actual, v_actual],
+                    vec![q_input, k_actual, v_actual],
                     vec![chain.output_tid],
                 );
                 next_id += 1;

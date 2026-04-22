@@ -426,7 +426,15 @@ fn resolve_op(
             )
         }
         AiOp::Embed => {
-            let dim = concrete_last_dim(inputs.get(1), tensor_info).unwrap_or(1) as u32;
+            let dim = concrete_last_dim(inputs.get(1), tensor_info).unwrap_or_else(|| {
+                tracing::warn!(
+                    table_tid = ?inputs.get(1),
+                    has_info = inputs.get(1).map_or(false, |t| tensor_info.contains_key(t)),
+                    shape = ?inputs.get(1).and_then(|t| tensor_info.get(t)).map(|i| &i.shape),
+                    "Embed: concrete_last_dim failed, falling back to dim=1"
+                );
+                1
+            }) as u32;
             let quant = quant_code(inputs.get(1), tensor_info);
             (FloatOp::Embed { dim, quant }, vec![])
         }

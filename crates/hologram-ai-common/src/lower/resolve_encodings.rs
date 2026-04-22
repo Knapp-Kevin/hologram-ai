@@ -198,10 +198,24 @@ pub fn resolve_encodings(
         // stats.content_entries after all graphs are compiled.
         let effective_cid = graph.add_constant(ConstantData::Bytes(serialized.clone()));
 
-        // Replace the original f32 Deferred constant with empty Bytes so
-        // trim_weight_blob excludes it from the trimmed blob.
+        // Replace the original Deferred with empty Bytes ONLY if the weight
+        // constant is exclusively used by the quantized MatMul (no other ops
+        // reference it). This avoids breaking tied weights (e.g., Embed +
+        // lm_head sharing the same embedding table constant).
         if graph.get_constant(weight_cid).map_or(false, |c| c.is_deferred()) {
-            graph.replace_constant(weight_cid, ConstantData::Bytes(vec![]));
+            // Check if any other node in the graph references this constant.
+            let other_users = graph.node_ids().into_iter().any(|nid| {
+                if nid == node_id {
+                    return false; // skip the node we just replaced
+                }
+                graph.get(nid).map_or(false, |n| match &n.op {
+                    GraphOp::Constant(cid) => *cid == weight_cid,
+                    _ => false,
+                })
+            });
+            if !other_users {
+                graph.replace_constant(weight_cid, ConstantData::Bytes(vec![]));
+            }
         }
 
         quant_cache.insert(weight_cid, (effective_cid, level));
@@ -223,15 +237,16 @@ pub fn resolve_encodings(
         );
     }
 
-    // Second pass: inline ALL remaining Deferred constants from the weight file.
-    // This eliminates the streaming weight blob entirely — every constant is
-    // either a quantized Bytes (from the loop above) or an inlined Bytes (here).
+    // Second pass: inline small remaining Deferred constants from the weight file.
+    // Large constants (embeddings, etc.) stay Deferred for the streaming path.
+    // Threshold: 16 MB — biases and norm weights are << 1 MB, embedding tables
+    // are 100+ MB. This keeps the graph serializable via rkyv.
+    const INLINE_THRESHOLD: u64 = 16 * 1024 * 1024; // 16 MB
     if let Some(wf) = weight_file {
         let store = graph.constant_store();
         let n = store.len();
         let mut inlined = 0usize;
         let mut inlined_bytes = 0u64;
-        // Collect Deferred constants first to avoid borrow issues.
         let deferred: Vec<(ConstantId, u64, u64)> = (0..n)
             .filter_map(|i| {
                 let cid = ConstantId::new(i as u32);
@@ -239,7 +254,9 @@ pub fn resolve_encodings(
                     ConstantData::Deferred {
                         byte_size,
                         source_id,
-                    } if *byte_size > 0 => Some((cid, *source_id, *byte_size)),
+                    } if *byte_size > 0 && *byte_size <= INLINE_THRESHOLD => {
+                        Some((cid, *source_id, *byte_size))
+                    }
                     _ => None,
                 }
             })
@@ -268,7 +285,7 @@ pub fn resolve_encodings(
             tracing::info!(
                 inlined,
                 inlined_mb = inlined_bytes / (1024 * 1024),
-                "inlined remaining Deferred constants"
+                "inlined small Deferred constants (< 16 MB)"
             );
         }
     }
