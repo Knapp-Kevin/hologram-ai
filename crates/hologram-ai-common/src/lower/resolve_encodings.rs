@@ -67,22 +67,23 @@ pub fn resolve_encodings(
     quant_cache: &mut HashMap<ConstantId, (ConstantId, QuantLevel)>,
     weight_file: WeightFile<'_>,
 ) -> anyhow::Result<ResolveStats> {
-    if matches!(strategy, QuantStrategy::None | QuantStrategy::Auto) {
-        return Ok(ResolveStats::default());
-    }
+    let skip_quantization = matches!(strategy, QuantStrategy::None | QuantStrategy::Auto) || {
+        // Models < 500M params are too small for meaningful quantization.
+        let q8_min_params: u64 = 500_000_000;
+        let too_small = total_params < q8_min_params;
+        if too_small && !matches!(strategy, QuantStrategy::None) {
+            tracing::info!(
+                total_params,
+                threshold = q8_min_params,
+                "model too small for quantization — skipping"
+            );
+        }
+        too_small
+    };
 
-    // Models < 500M params are too small for meaningful quantization —
-    // the quality loss is too high. Skip entirely.
-    let q8_min_params: u64 = 500_000_000;
-    if total_params < q8_min_params && !matches!(strategy, QuantStrategy::None) {
-        tracing::info!(
-            total_params,
-            threshold = q8_min_params,
-            "model too small for quantization — skipping"
-        );
-        return Ok(ResolveStats::default());
-    }
+    let mut stats = ResolveStats::default();
 
+    if !skip_quantization {
     let q4_min_params: u64 = 750_000_000;
     let effective_level = if matches!(strategy, QuantStrategy::Q4_0) && total_params < q4_min_params
     {
@@ -157,8 +158,6 @@ pub fn resolve_encodings(
         candidates = candidates.len(),
         "resolve_encodings: found candidates"
     );
-
-    let mut stats = ResolveStats::default();
 
     for (node_id, weight_cid, original_op) in candidates {
         // Check cache first.
@@ -255,11 +254,11 @@ pub fn resolve_encodings(
             "encoded weight"
         );
     }
+    } // end if !skip_quantization
 
-    // Second pass: inline remaining Deferred constants from the weight file.
-    // After quantization, the remaining Deferred data is much smaller (only
-    // embeddings, biases, norms). We inline everything up to a total budget
-    // to keep the graph serializable via rkyv. rkyv can handle ~2 GB per graph.
+    // Inline remaining Deferred constants from the weight file.
+    // Runs unconditionally (even without quantization) to eliminate streaming
+    // overhead for small models that skip quantization.
     const INLINE_BUDGET: u64 = 1500 * 1024 * 1024; // 1.5 GB max total inlined
     if let Some(wf) = weight_file {
         let store = graph.constant_store();
