@@ -98,6 +98,24 @@ pub fn resolve_encodings(
         "resolve_encodings: scanning"
     );
 
+    // Build consumer map: for each Constant node, count how many non-Constant
+    // ops consume it (via successors/edges). Tied weights (e.g., Qwen2 embedding
+    // + lm_head) have a single Constant node consumed by both Embed and MatMul.
+    // We only clear Deferred data when the Constant is consumed exclusively by
+    // the quantized MatMul (consumer_count == 1).
+    let constant_consumer_count: HashMap<ConstantId, usize> = {
+        let mut cc: HashMap<ConstantId, usize> = HashMap::new();
+        for nid in graph.node_ids() {
+            if let Some(node) = graph.get(nid) {
+                if let GraphOp::Constant(cid) = &node.op {
+                    let n_consumers = graph.successors(nid).len();
+                    cc.insert(*cid, n_consumers);
+                }
+            }
+        }
+        cc
+    };
+
     // Collect candidates: MatMul/Gemm/Conv2d nodes with weight constant predecessors.
     let candidates: Vec<(NodeId, ConstantId, GraphOp)> = graph
         .node_ids()
@@ -198,10 +216,14 @@ pub fn resolve_encodings(
         // stats.content_entries after all graphs are compiled.
         let effective_cid = graph.add_constant(ConstantData::Bytes(serialized.clone()));
 
-        // The original Deferred constant is left as-is. The inlining pass
-        // below handles converting remaining Deferred→Bytes within budget.
-        // This avoids breaking tied weights (e.g., Embed + lm_head sharing
-        // the same ConstantId for Qwen2's embedding table).
+        // Replace the original f32 Deferred with empty Bytes — but only if
+        // the Constant node has exactly 1 consumer (the MatMul we just replaced).
+        // Tied weights (Qwen2 embedding+lm_head) have 2+ consumers and must
+        // stay Deferred so the Embed op can still access the table data.
+        let consumers = constant_consumer_count.get(&weight_cid).copied().unwrap_or(0);
+        if consumers <= 1 && graph.get_constant(weight_cid).map_or(false, |c| c.is_deferred()) {
+            graph.replace_constant(weight_cid, ConstantData::Bytes(vec![]));
+        }
 
         quant_cache.insert(weight_cid, (effective_cid, level));
 
@@ -230,6 +252,26 @@ pub fn resolve_encodings(
     if let Some(wf) = weight_file {
         let store = graph.constant_store();
         let n = store.len();
+        // Debug: count remaining Deferred
+        let deferred_count = (0..n)
+            .filter(|&i| {
+                store
+                    .get(ConstantId::new(i as u32))
+                    .map_or(false, |c| c.is_deferred())
+            })
+            .count();
+        let deferred_total_bytes: u64 = (0..n)
+            .filter_map(|i| match store.get(ConstantId::new(i as u32))? {
+                ConstantData::Deferred { byte_size, .. } => Some(*byte_size),
+                _ => None,
+            })
+            .sum();
+        tracing::info!(
+            deferred_count,
+            deferred_total_mb = deferred_total_bytes / (1024 * 1024),
+            store_len = n,
+            "pre-inline: remaining Deferred constants"
+        );
         let mut inlined = 0usize;
         let mut inlined_bytes = 0u64;
         // Collect all remaining Deferred constants, sorted by size ascending
