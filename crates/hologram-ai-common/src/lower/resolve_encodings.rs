@@ -71,6 +71,18 @@ pub fn resolve_encodings(
         return Ok(ResolveStats::default());
     }
 
+    // Models < 500M params are too small for meaningful quantization —
+    // the quality loss is too high. Skip entirely.
+    let q8_min_params: u64 = 500_000_000;
+    if total_params < q8_min_params && !matches!(strategy, QuantStrategy::None) {
+        tracing::info!(
+            total_params,
+            threshold = q8_min_params,
+            "model too small for quantization — skipping"
+        );
+        return Ok(ResolveStats::default());
+    }
+
     let q4_min_params: u64 = 750_000_000;
     let effective_level = if matches!(strategy, QuantStrategy::Q4_0) && total_params < q4_min_params
     {
