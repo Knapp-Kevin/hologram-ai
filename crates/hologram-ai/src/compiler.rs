@@ -3193,6 +3193,64 @@ fn apply_spatial_scale(graph: &mut AiGraph, scale: u32) {
             }
         }
     }
+
+    // Scale 1D int64 constant params used as Reshape/Resize/Pad shape inputs.
+    // Without this, DataPropagation folds the original ONNX shape values
+    // (e.g. [1, 32, 65536] for a GroupNorm reshape on an unscaled 64×64 latent)
+    // into known_i64_values, which the second ShapePropagation pass uses to
+    // override our scaled tensor shapes. By rewriting the param data in place,
+    // both DataProp and downstream ShapeProp see the correctly-scaled values.
+    let shape_input_tids: std::collections::HashSet<hologram_ai_common::TensorId> = graph
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.op {
+            hologram_ai_common::AiOp::Reshape { .. }
+            | hologram_ai_common::AiOp::Expand
+            | hologram_ai_common::AiOp::Pad { .. } => node.inputs.get(1).copied(),
+            hologram_ai_common::AiOp::Resize { .. } => {
+                node.inputs.get(3).or_else(|| node.inputs.get(1)).copied()
+            }
+            _ => None,
+        })
+        .collect();
+    for tid in &shape_input_tids {
+        let Some(param) = graph.params.get(tid) else { continue };
+        if !matches!(param.info().logical_dtype, hologram_ai_common::DType::INT64) {
+            continue;
+        }
+        let info = param.info();
+        if info.shape.len() != 1 {
+            continue;
+        }
+        let n_elements = match info.shape[0].as_concrete() {
+            Some(n) if n >= 4 => n as usize,
+            _ => continue,
+        };
+        let hologram_ai_common::AiParam::Inline { data, .. } = param else { continue };
+        if data.len() != n_elements * 8 {
+            continue;
+        }
+        // Read i64 values, scale spatial dims (axes 2..N), re-pack.
+        let mut values: Vec<i64> = data
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().expect("8 bytes")))
+            .collect();
+        let mut changed = false;
+        for v in values.iter_mut().skip(2) {
+            if *v > 1 {
+                let scaled = ((*v as u64) / s).max(1) as i64;
+                if scaled != *v {
+                    *v = scaled;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            let new_bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let new_param = hologram_ai_common::AiParam::inline(new_bytes, info.clone());
+            graph.params.insert(*tid, new_param);
+        }
+    }
 }
 
 // Re-export items that were moved to `crate::runner` for backward compatibility.
