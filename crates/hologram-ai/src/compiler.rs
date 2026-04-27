@@ -3213,6 +3213,7 @@ fn apply_spatial_scale(graph: &mut AiGraph, scale: u32) {
             _ => None,
         })
         .collect();
+    let s_sq = s * s;
     for tid in &shape_input_tids {
         let Some(param) = graph.params.get(tid) else { continue };
         if !matches!(param.info().logical_dtype, hologram_ai_common::DType::INT64) {
@@ -3223,24 +3224,60 @@ fn apply_spatial_scale(graph: &mut AiGraph, scale: u32) {
             continue;
         }
         let n_elements = match info.shape[0].as_concrete() {
-            Some(n) if n >= 4 => n as usize,
+            Some(n) if n >= 2 => n as usize,
             _ => continue,
         };
         let hologram_ai_common::AiParam::Inline { data, .. } = param else { continue };
         if data.len() != n_elements * 8 {
             continue;
         }
-        // Read i64 values, scale spatial dims (axes 2..N), re-pack.
         let mut values: Vec<i64> = data
             .chunks_exact(8)
             .map(|c| i64::from_le_bytes(c.try_into().expect("8 bytes")))
             .collect();
         let mut changed = false;
-        for v in values.iter_mut().skip(2) {
-            if *v > 1 {
-                let scaled = ((*v as u64) / s).max(1) as i64;
-                if scaled != *v {
-                    *v = scaled;
+        let rank = values.len();
+        // Choose the scale factor based on how the spatial axes are encoded:
+        //   - 4D [N, C, H, W]:        positions 2-3 each carry one spatial → /s.
+        //   - 3D [N, G, C/G * H*W]:   GroupNorm flattens at position 2 → /s².
+        //   - 3D [N, H*W, C]:         attention flattens at position 1 → /s².
+        // For 3D constants, the H*W position is whichever of {1, 2} is larger
+        // and divisible by s² — channels are typically smaller than flattened
+        // spatial, and dividing the smaller dim by s² would zero out reasonable
+        // channel counts. Only that one dim gets /s²; everything else stays.
+        if rank == 4 {
+            for (i, v) in values.iter_mut().enumerate() {
+                if i < 2 || *v <= 1 {
+                    continue;
+                }
+                let val = *v as u64;
+                if val.is_multiple_of(s) {
+                    let scaled = (val / s).max(1) as i64;
+                    if scaled != *v {
+                        *v = scaled;
+                        changed = true;
+                    }
+                }
+            }
+        } else if rank == 3 {
+            // Pick the position (1 or 2) that's a multiple of s² and has the
+            // larger value — that one carries the flattened H*W.
+            let mid = values[1] as u64;
+            let last = values[2] as u64;
+            let target_idx = match (
+                mid > 1 && mid.is_multiple_of(s_sq),
+                last > 1 && last.is_multiple_of(s_sq),
+            ) {
+                (true, true) => Some(if mid >= last { 1 } else { 2 }),
+                (true, false) => Some(1),
+                (false, true) => Some(2),
+                (false, false) => None,
+            };
+            if let Some(idx) = target_idx {
+                let val = values[idx] as u64;
+                let scaled = (val / s_sq).max(1) as i64;
+                if scaled != values[idx] {
+                    values[idx] = scaled;
                     changed = true;
                 }
             }
