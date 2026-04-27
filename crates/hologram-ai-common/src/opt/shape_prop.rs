@@ -99,16 +99,25 @@ fn propagate_shapes(mut graph: AiGraph, protect_settled: bool) -> anyhow::Result
             // input[1] and multiply by input spatial dims.
             AiOp::Resize { .. } => {
                 let inputs_ref = &graph.nodes[idx].inputs;
-                // Try sizes input first.
-                let sizes = inputs_ref
-                    .get(3)
-                    .or_else(|| inputs_ref.get(1))
-                    .and_then(|tid| {
-                        graph
-                            .tensor_info
-                            .get(tid)
-                            .and_then(|ti| ti.known_i64_values.clone())
-                    });
+                // ONNX Resize signature:
+                //   v10: Resize(X, scales)            — inputs[1] is scales (f32)
+                //   v11+: Resize(X, roi, scales, sizes) — inputs[3] is sizes (i64)
+                //
+                // Only inputs[3] is unambiguously "sizes". inputs[1] could be
+                // scales OR sizes depending on opset, so we don't read it as
+                // sizes — we'd otherwise interpret f32 scales like [1.0, 1.0, 2.0, 2.0]
+                // (cast to i64 by DataPropagation as [1, 1, 2, 2]) as absolute
+                // output dimensions, producing tiny wrong shapes.
+                //
+                // If inputs[1] is actually sizes (rare), the scales fallback below
+                // will fail to read it as f32 and we keep input shape — safer than
+                // wrongly using scales as absolute sizes.
+                let sizes = inputs_ref.get(3).and_then(|tid| {
+                    graph
+                        .tensor_info
+                        .get(tid)
+                        .and_then(|ti| ti.known_i64_values.clone())
+                });
                 if sizes.is_some() {
                     sizes
                 } else {
