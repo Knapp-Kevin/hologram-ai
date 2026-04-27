@@ -76,7 +76,7 @@ fn ensure_compiled_full(
     let archive = compiler
         .compile(ModelSource::OnnxPath(onnx.to_path_buf()))
         .expect("compilation failed");
-    std::fs::write(holo, &archive.bytes).expect("writing archive");
+    archive.save(holo).expect("writing archive");
     true
 }
 

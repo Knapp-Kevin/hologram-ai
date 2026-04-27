@@ -50,17 +50,7 @@ fn ensure_compiled() -> bool {
     let archive = ModelCompiler::default()
         .compile(ModelSource::OnnxPath(onnx))
         .expect("SD UNet ONNX compilation failed");
-
-    // Streaming compilation writes directly to a temp file (bytes is empty).
-    // Move the temp file to the final path; fall back to writing bytes.
-    if let Some(src) = &archive.path {
-        std::fs::rename(src, &holo)
-            .or_else(|_| std::fs::copy(src, &holo).map(|_| ()))
-            .expect("moving streamed archive to final path");
-    } else {
-        std::fs::write(&holo, &archive.bytes).expect("writing archive to disk");
-    }
-    // Drop archive immediately to free ~3.4GB.
+    archive.save(&holo).expect("saving SD UNet archive");
     drop(archive);
     true
 }

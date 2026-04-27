@@ -132,12 +132,21 @@ pub struct DebugMap {
 
 impl HoloArchive {
     /// Write the compiled `.holo` archive to `path`.
+    ///
+    /// Handles both archive modes:
+    /// - In-memory (`bytes` populated): writes bytes to `path`.
+    /// - Streaming (`path` set, `bytes` empty): copies the streamed file to `path`.
     pub fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("creating output directory {parent:?}"))?;
             }
+        }
+        if let Some(src) = &self.path {
+            std::fs::copy(src, path)
+                .with_context(|| format!("copying streamed archive {src:?} to {path:?}"))?;
+            return Ok(());
         }
         std::fs::write(path, &self.bytes)
             .with_context(|| format!("writing .holo archive to {path:?}"))
@@ -736,7 +745,7 @@ impl ModelCompiler {
         } else {
             // ── Non-LLM: single graph ───────────────────────────────────────
             let (ai_graph, seq_dim_positions) =
-                concretize_all_dims(ai_graph, self.seq_len_override)
+                concretize_all_dims(ai_graph, self.seq_len_override, self.spatial_scale)
                     .context("shape concretization failed")?;
             let mut ai_graph = post_concretization_repair(ai_graph)?;
             zero_seq_dims_for_lowering(&mut ai_graph, &seq_dim_positions);
@@ -911,7 +920,7 @@ impl ModelCompiler {
         // Infer LLM metadata from GQA nodes (same as compile()).
         infer_llm_metadata_from_graph(&mut ai_graph);
 
-        let (ai_graph, seq_dim_positions) = concretize_all_dims(ai_graph, self.seq_len_override)
+        let (ai_graph, seq_dim_positions) = concretize_all_dims(ai_graph, self.seq_len_override, self.spatial_scale)
             .context("shape concretization failed")?;
 
         // Post-concretization repair (same as compile()).
@@ -1014,7 +1023,7 @@ impl ModelCompiler {
         let ai_graph = OptPipeline::mvp()
             .run(ai_graph)
             .context("optimization pass failed")?;
-        let (ai_graph, seq_dim_positions) = concretize_all_dims(ai_graph, self.seq_len_override)
+        let (ai_graph, seq_dim_positions) = concretize_all_dims(ai_graph, self.seq_len_override, self.spatial_scale)
             .context("shape concretization failed")?;
 
         let mut ai_graph = post_concretization_repair(ai_graph)?;
@@ -1334,7 +1343,7 @@ impl ModelCompiler {
                 };
 
                 // Concretize.
-                let (ai_graph, seq_dim_positions) = concretize_all_dims(ai_graph, seq_len)
+                let (ai_graph, seq_dim_positions) = concretize_all_dims(ai_graph, seq_len, self.spatial_scale)
                     .with_context(|| format!("concretizing component '{}'", comp.name))?;
                 let mut ai_graph = post_concretization_repair(ai_graph)?;
                 zero_seq_dims_for_lowering(&mut ai_graph, &seq_dim_positions);
@@ -1734,7 +1743,8 @@ fn prepare_llm_component(
 ) -> anyhow::Result<PreparedComponent> {
     let _span =
         tracing::info_span!("compile_prepare", component = component_name).entered();
-    let (graph, seq_dim_positions) = concretize_all_dims(ai_graph, seq_len)
+    // LLM components are 1D-token-stream models — no spatial scale needed.
+    let (graph, seq_dim_positions) = concretize_all_dims(ai_graph, seq_len, None)
         .with_context(|| format!("{component_name} concretization failed"))?;
     let mut graph = post_concretization_repair(graph)?;
     if zero_seq_dims {
@@ -2730,6 +2740,7 @@ fn zero_seq_dims_for_lowering(
 fn concretize_all_dims(
     mut graph: AiGraph,
     seq_len_override: Option<u64>,
+    spatial_scale: Option<u32>,
 ) -> anyhow::Result<(
     AiGraph,
     std::collections::HashSet<(hologram_ai_common::TensorId, usize)>,
@@ -2786,8 +2797,10 @@ fn concretize_all_dims(
             entry.fixed = Some(context_len);
         } else if name_lower.contains("height") || name_lower.contains("width") {
             // Spatial dims for diffusion models: default to 128 (1024×1024
-            // image ÷ 8 VAE downscale). Overridden by spatial_scale if set.
-            let spatial_default = 128u64;
+            // image ÷ 8 VAE downscale). When spatial_scale is set, divide by it
+            // so a 4× scale gives 32, a 8× scale gives 16, etc.
+            let spatial_default = 128u64 / spatial_scale.unwrap_or(1) as u64;
+            let spatial_default = spatial_default.max(1);
             debug!(var = %entry.name, value = spatial_default, "concretizing spatial dim");
             entry.fixed = Some(spatial_default);
         } else if name_lower.contains("channel") {

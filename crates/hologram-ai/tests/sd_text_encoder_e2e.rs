@@ -27,10 +27,12 @@ fn ensure_compiled() -> bool {
     if !onnx.exists() {
         return false;
     }
-    let archive = ModelCompiler::default()
+    let mut compiler = ModelCompiler::default();
+    compiler.seq_len_override = Some(77);
+    let archive = compiler
         .compile(ModelSource::OnnxPath(onnx))
         .expect("text encoder compilation failed");
-    std::fs::write(&holo, &archive.bytes).expect("writing archive");
+    archive.save(&holo).expect("writing archive");
     true
 }
 
@@ -57,6 +59,13 @@ fn sd_text_encoder_executes() {
         .expect("loading pipeline failed");
     let plan = pipeline.into_first_model().expect("no model in pipeline");
 
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
     eprintln!("graph nodes: {}", plan.graph().nodes.len());
     eprintln!("weights: {} bytes", plan.weights().len());
 
@@ -64,7 +73,11 @@ fn sd_text_encoder_executes() {
 
     // CLIP text encoder input: input_ids [1, 77] (INT64)
     // SD v1.5 uses max 77 tokens.
-    let seq_len = 77;
+    let seq_len: usize = std::env::var("SD_SEQ_LEN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(77);
+    eprintln!("seq_len={seq_len}");
     let input_ids: Vec<i64> = (0..seq_len).map(|i| (i % 49408) as i64).collect();
     let input_bytes: Vec<u8> = input_ids.iter().flat_map(|v| v.to_le_bytes()).collect();
 

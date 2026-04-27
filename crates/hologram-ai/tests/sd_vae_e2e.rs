@@ -37,7 +37,7 @@ fn ensure_compiled() -> bool {
     let archive = ModelCompiler::default()
         .compile(ModelSource::OnnxPath(onnx))
         .expect("VAE decoder compilation failed");
-    std::fs::write(&holo, &archive.bytes).expect("writing archive");
+    archive.save(&holo).expect("writing archive");
     true
 }
 
@@ -56,7 +56,7 @@ fn ensure_compiled_small() -> bool {
     let archive = compiler
         .compile(ModelSource::OnnxPath(onnx))
         .expect("VAE decoder small compilation failed");
-    std::fs::write(&holo, &archive.bytes).expect("writing archive");
+    archive.save(&holo).expect("writing archive");
     true
 }
 
@@ -159,6 +159,13 @@ fn sd_vae_decoder_executes_small() {
         eprintln!("skipping: VAE model not found");
         return;
     }
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
     assert!(ensure_compiled_small(), "small compilation failed");
 
     let holo_path = vae_holo_small_path();
