@@ -49,7 +49,7 @@ pub struct RunArgs {
     #[arg(long, value_name = "FILE")]
     pub tokenizer: Option<PathBuf>,
     /// Weight quantization for the growable (model-source) generation path:
-    /// `none`/`f32`, `q4_0`, `q8_0`, `q2_0`. Ignored when running a precompiled
+    /// `none`/`f32`, `int8`, `int4`. Ignored when running a precompiled
     /// `.holo` (it is already quantized as compiled).
     #[arg(long, value_name = "SCHEME")]
     pub quantize: Option<String>,
@@ -414,11 +414,10 @@ fn parse_quant(s: Option<&str>) -> Result<hologram_ai_common::lower::QuantStrate
     use hologram_ai_common::lower::QuantStrategy;
     Ok(match s.map(|s| s.to_ascii_lowercase()).as_deref() {
         None | Some("none") | Some("f32") => QuantStrategy::None,
-        Some("q2_0") => QuantStrategy::Q2_0,
-        Some("q4_0") => QuantStrategy::Q4_0,
-        Some("q8_0") => QuantStrategy::Q8_0,
+        Some("int8") => QuantStrategy::Int8,
+        Some("int4") => QuantStrategy::Int4,
         Some(other) => {
-            bail!("unknown quantization scheme {other:?} (expected none/q2_0/q4_0/q8_0)")
+            bail!("unknown quantization scheme {other:?} (expected none/int8/int4)")
         }
     })
 }

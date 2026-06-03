@@ -29,7 +29,7 @@ pub struct KnownModel {
     /// Approximate `.holo` archive size after compile, for the "you'll need
     /// ~X GB free" hint.
     pub approx_archive_mb: u32,
-    /// Default quantization scheme (`q4_0`, `q8_0`, etc.).
+    /// Quantization scheme passed to `--quantize` (one of `none`, `int8`, `int4`).
     pub quantize: &'static str,
     /// Optional prompt-template suggestion (Jinja-style or plain).
     pub prompt_template: Option<&'static str>,
@@ -60,7 +60,7 @@ pub const CATALOGUE: &[KnownModel] = &[
         modality: Modality::TextChat,
         size: "1.1B",
         approx_archive_mb: 700,
-        quantize: "q4_0",
+        quantize: "none",
         prompt_template: Some("<|user|>\n{prompt}</s>\n<|assistant|>\n"),
         stop: &["</s>"],
         chat_turn_separator: Some("</s>\n<|assistant|>\n{response}</s>\n<|user|>\n"),
@@ -78,7 +78,7 @@ pub const CATALOGUE: &[KnownModel] = &[
         modality: Modality::TextChat,
         size: "0.5B",
         approx_archive_mb: 350,
-        quantize: "q8_0",
+        quantize: "none",
         prompt_template: Some(
             "<|im_start|>system\nYou are a helpful assistant<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
         ),
