@@ -6,11 +6,10 @@ name: Deploy web GUI to GitHub Pages
 on:
   push:
     branches: [main]
-    paths:
-      - "crates/**"
-      - "apps/web/**"
-      - ".github/workflows/pages.yml"
   workflow_dispatch:
+
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 permissions:
   contents: write
