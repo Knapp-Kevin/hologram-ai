@@ -57,8 +57,7 @@ fn validate_tiny_mlp_onnx() {
         report.total_params >= 2,
         "expected at least 2 params (embed + linear weights)"
     );
-    // Note: compiled_node_count is currently 0 because the compiler doesn't
-    // populate it yet (TODO in compiler.rs). Test compilation_ok instead.
+    assert!(report.compiled_node_count > 0, "expected compiled nodes");
 }
 
 #[test]

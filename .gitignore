@@ -27,3 +27,5 @@ apps/*/vite.config.d.ts
 apps/*/vite.config.js
 tests/fixtures/onnx-node/
 .worktrees/
+node_modules/
+dist/

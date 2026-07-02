@@ -511,11 +511,13 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
             raw_attrs: vec![],
         },
 
-        // ── Fallback ──────────────────────────────────────────────────────
-        _ => Opaque {
-            op_type: ctx.op_type.to_string(),
-            raw_attrs: vec![],
-        },
+        // ── Unmapped Operators ────────────────────────────────────────────
+        _ => {
+            return Err(anyhow::anyhow!(
+                "Unsupported ONNX operator: {}",
+                ctx.op_type
+            ));
+        }
     };
 
     Ok(Some(op))

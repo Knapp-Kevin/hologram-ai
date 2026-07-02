@@ -1,9 +1,8 @@
 //! Content-addressed constant deduplication.
 //!
 //! Addresses every `AiParam::Inline` weight to its **uor-addr content
-//! fingerprint** — the canonical BLAKE3 content address
-//! ([`hologram_archive::WeightFingerprint`], the same address hologram's
-//! `WeightStore` dedups by and the same hasher family as a model's κ-label) —
+//! fingerprint** — the canonical holospaces::Kappa content address
+//! (the same address space the domain model uses for arbitrary model identifiers) —
 //! and merges weights that share an address by remapping TensorIds. A weight's
 //! identity is thus its uor-address, not its bytes: structurally-equal weights
 //! collapse to one, consistent with the canonical-forms model (the IR operates
@@ -16,7 +15,7 @@
 
 use super::pipeline::Pass;
 use crate::ir::{AiGraph, AiParam, DType, Shape, TensorId};
-use hologram_archive::WeightFingerprint;
+use holospaces::{address, Kappa};
 use std::collections::HashMap;
 
 /// Deduplicate inline constants by their uor-addr content fingerprint.
@@ -42,7 +41,7 @@ impl Pass for ConstantDeduplication {
         // rank-2 k-mismatch check, but the right fix is to never merge
         // them in the first place. Tensor identity = (content, dtype,
         // shape).
-        let mut canonical: HashMap<(WeightFingerprint, DType, Shape), TensorId> = HashMap::new();
+        let mut canonical: HashMap<(Kappa, DType, Shape), TensorId> = HashMap::new();
         let mut remap: HashMap<TensorId, TensorId> = HashMap::new();
 
         // Collect param TIDs sorted so we get deterministic canonical choices.
@@ -60,11 +59,7 @@ impl Pass for ConstantDeduplication {
                 continue;
             }
 
-            let key = (
-                WeightFingerprint::of(data),
-                info.logical_dtype,
-                info.shape.clone(),
-            );
+            let key = (address(data), info.logical_dtype, info.shape.clone());
 
             if let Some(&canon_tid) = canonical.get(&key) {
                 remap.insert(tid, canon_tid);

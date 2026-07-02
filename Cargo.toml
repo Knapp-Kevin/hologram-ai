@@ -30,6 +30,7 @@ hologram-exec     = { git = "https://github.com/Hologram-Technologies/hologram.g
 hologram-archive  = { git = "https://github.com/Hologram-Technologies/hologram.git", branch = "main", features = ["model-formats"] }
 hologram-backend  = { git = "https://github.com/Hologram-Technologies/hologram.git", branch = "main" }
 hologram-host     = { git = "https://github.com/Hologram-Technologies/hologram.git", branch = "main" }
+holospaces        = { git = "https://github.com/Hologram-Technologies/holospaces.git", branch = "main" }
 
 # workspace-internal
 hologram-ai-quant  = { path = "crates/hologram-ai-quant" }

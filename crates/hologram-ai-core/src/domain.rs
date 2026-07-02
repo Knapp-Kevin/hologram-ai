@@ -1,43 +1,24 @@
 //! Stable domain model for AI holospace applications.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 
-/// Adapter boundary to `holospaces::realizations::Kappa`.
-///
-/// This crate does not mint, hash, verify, or otherwise pretend to implement
-/// content addressing locally. `KappaRef` is a typed string wrapper for κ-labels
-/// already produced by the hologram/holospaces substrate.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
-pub struct KappaRef(String);
+/// A Serde-compatible wrapper around holospaces::Kappa.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Kappa(pub holospaces::Kappa);
 
-impl KappaRef {
-    /// Create a new κ-label reference from an existing substrate-produced label.
-    pub fn new(label: impl Into<String>) -> Self {
-        Self(label.into())
-    }
-
-    /// Borrow the underlying κ-label string.
-    pub fn as_str(&self) -> &str {
-        &self.0
+impl Serialize for Kappa {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0.to_string())
     }
 }
 
-impl From<String> for KappaRef {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl From<&str> for KappaRef {
-    fn from(value: &str) -> Self {
-        Self(value.to_string())
-    }
-}
-
-impl core::fmt::Display for KappaRef {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(self.as_str())
+impl<'de> Deserialize<'de> for Kappa {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        holospaces::Kappa::from_bytes(s.as_bytes())
+            .map(Kappa)
+            .map_err(|_| serde::de::Error::custom("invalid kappa"))
     }
 }
 
@@ -56,24 +37,24 @@ pub enum AppEntryKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiAppManifest {
     /// Canonical app manifest κ-label.
-    pub app_kappa: KappaRef,
+    pub app_kappa: Kappa,
     /// Stable human-readable name.
     pub name: String,
     /// How the app is launched within holospaces.
     pub entry_kind: AppEntryKind,
     /// Model manifests the app expects to reference.
-    pub model_kappas: Vec<KappaRef>,
+    pub model_kappas: Vec<Kappa>,
     /// Default runner manifest κ-label, when one is pinned in the app manifest.
-    pub default_runner_kappa: Option<KappaRef>,
+    pub default_runner_kappa: Option<Kappa>,
 }
 
 /// Content-addressed model manifest for a compiled or importable model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelManifest {
     /// Canonical model manifest κ-label.
-    pub model_kappa: KappaRef,
+    pub model_kappa: Kappa,
     /// κ-label of the compiled `.holo` archive or other model artifact.
-    pub archive_kappa: KappaRef,
+    pub archive_kappa: Kappa,
     /// Stable model name.
     pub name: String,
     /// Optional human-readable description.
@@ -84,7 +65,7 @@ pub struct ModelManifest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunnerManifest {
     /// Canonical runner manifest κ-label.
-    pub runner_kappa: KappaRef,
+    pub runner_kappa: Kappa,
     /// Stable runner name.
     pub name: String,
     /// Execution kind.
@@ -106,7 +87,7 @@ pub enum RunnerKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct InferenceParams {
     /// Canonical κ-label of the parameter object, when one already exists.
-    pub params_kappa: Option<KappaRef>,
+    pub params_kappa: Option<Kappa>,
     /// Maximum number of output tokens requested.
     pub max_output_tokens: Option<u32>,
     /// Temperature expressed in thousandths to avoid floating-point ambiguity.
@@ -119,7 +100,7 @@ pub struct InferenceParams {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Prompt {
     /// Canonical prompt/input κ-label.
-    pub prompt_kappa: KappaRef,
+    pub prompt_kappa: Kappa,
     /// User-visible text content.
     pub text: String,
 }
@@ -128,13 +109,13 @@ pub struct Prompt {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferenceRequest {
     /// Canonical request κ-label.
-    pub request_kappa: KappaRef,
+    pub request_kappa: Kappa,
     /// Optional application manifest κ-label that originated the request.
-    pub app_kappa: Option<KappaRef>,
+    pub app_kappa: Option<Kappa>,
     /// Model manifest κ-label selected for execution.
-    pub model_kappa: KappaRef,
+    pub model_kappa: Kappa,
     /// Runner manifest κ-label selected for execution.
-    pub runner_kappa: KappaRef,
+    pub runner_kappa: Kappa,
     /// Prompt payload.
     pub prompt: Prompt,
     /// Canonical execution parameters.
@@ -145,30 +126,30 @@ pub struct InferenceRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferenceProvenance {
     /// Request κ-label.
-    pub request_kappa: KappaRef,
+    pub request_kappa: Kappa,
     /// PromptSubmitted event κ-label that introduced the request.
-    pub input_event_kappa: KappaRef,
+    pub input_event_kappa: Kappa,
     /// Prompt/input κ-label.
-    pub prompt_kappa: KappaRef,
+    pub prompt_kappa: Kappa,
     /// Model manifest κ-label.
-    pub model_kappa: KappaRef,
+    pub model_kappa: Kappa,
     /// Runner manifest κ-label.
-    pub runner_kappa: KappaRef,
+    pub runner_kappa: Kappa,
     /// Worker identity κ-label.
-    pub worker_kappa: KappaRef,
+    pub worker_kappa: Kappa,
     /// Canonical parameter object κ-label when separately addressed.
-    pub params_kappa: Option<KappaRef>,
+    pub params_kappa: Option<Kappa>,
     /// Output payload κ-label.
-    pub output_kappa: KappaRef,
+    pub output_kappa: Kappa,
 }
 
 /// Completed inference payload returned by a runner.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferenceOutput {
     /// Request κ-label this output satisfies.
-    pub request_kappa: KappaRef,
+    pub request_kappa: Kappa,
     /// Canonical output κ-label.
-    pub output_kappa: KappaRef,
+    pub output_kappa: Kappa,
     /// User-visible output content.
     pub content: String,
     /// Output provenance.
@@ -181,49 +162,49 @@ pub enum AiEvent {
     /// Registers a model manifest with the application.
     ModelRegistered {
         /// Event κ-label.
-        event_kappa: KappaRef,
+        event_kappa: Kappa,
         /// Registered model manifest.
         manifest: ModelManifest,
     },
     /// Submits a prompt and creates a pending inference request.
     PromptSubmitted {
         /// Event κ-label.
-        event_kappa: KappaRef,
+        event_kappa: Kappa,
         /// Request to enqueue.
         request: InferenceRequest,
     },
     /// Records that a worker has started executing a request.
     InferenceStarted {
         /// Event κ-label.
-        event_kappa: KappaRef,
+        event_kappa: Kappa,
         /// Request κ-label.
-        request_kappa: KappaRef,
+        request_kappa: Kappa,
         /// Model κ-label being executed.
-        model_kappa: KappaRef,
+        model_kappa: Kappa,
         /// Runner manifest selected by the worker.
         runner: RunnerManifest,
         /// Worker identity κ-label.
-        worker_kappa: KappaRef,
+        worker_kappa: Kappa,
     },
     /// Records a completed inference result.
     InferenceCompleted {
         /// Event κ-label.
-        event_kappa: KappaRef,
+        event_kappa: Kappa,
         /// Completed output payload.
         output: InferenceOutput,
     },
     /// Records a failed inference attempt.
     InferenceFailed {
         /// Event κ-label.
-        event_kappa: KappaRef,
+        event_kappa: Kappa,
         /// Request κ-label.
-        request_kappa: KappaRef,
+        request_kappa: Kappa,
         /// Model κ-label being executed.
-        model_kappa: KappaRef,
+        model_kappa: Kappa,
         /// Runner manifest κ-label.
-        runner_kappa: KappaRef,
+        runner_kappa: Kappa,
         /// Worker identity κ-label.
-        worker_kappa: KappaRef,
+        worker_kappa: Kappa,
         /// Stable failure description.
         error: String,
     },
@@ -231,7 +212,7 @@ pub enum AiEvent {
 
 impl AiEvent {
     /// Borrow the event's κ-label irrespective of variant.
-    pub fn event_kappa(&self) -> &KappaRef {
+    pub fn event_kappa(&self) -> &Kappa {
         match self {
             Self::ModelRegistered { event_kappa, .. }
             | Self::PromptSubmitted { event_kappa, .. }
@@ -255,13 +236,13 @@ pub enum PendingPhase {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingInference {
     /// PromptSubmitted event κ-label.
-    pub submission_event_kappa: KappaRef,
+    pub submission_event_kappa: Kappa,
     /// Original request payload.
     pub request: InferenceRequest,
     /// Runner manifest once the job has started.
     pub runner: Option<RunnerManifest>,
     /// Worker identity once the job has started.
-    pub worker_kappa: Option<KappaRef>,
+    pub worker_kappa: Option<Kappa>,
     /// Current pending phase.
     pub phase: PendingPhase,
 }
@@ -270,7 +251,7 @@ pub struct PendingInference {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletedInference {
     /// Completion event κ-label.
-    pub completion_event_kappa: KappaRef,
+    pub completion_event_kappa: Kappa,
     /// Original request payload.
     pub request: InferenceRequest,
     /// Completed output payload.
@@ -281,15 +262,15 @@ pub struct CompletedInference {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailedInference {
     /// Failure event κ-label.
-    pub failure_event_kappa: KappaRef,
+    pub failure_event_kappa: Kappa,
     /// Original request payload, when the prompt has been seen.
     pub request: Option<InferenceRequest>,
     /// Model κ-label.
-    pub model_kappa: KappaRef,
+    pub model_kappa: Kappa,
     /// Runner κ-label.
-    pub runner_kappa: KappaRef,
+    pub runner_kappa: Kappa,
     /// Worker κ-label.
-    pub worker_kappa: KappaRef,
+    pub worker_kappa: Kappa,
     /// Stable failure description.
     pub error: String,
 }
@@ -298,11 +279,11 @@ pub struct FailedInference {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AiView {
     /// Registered models by manifest κ-label.
-    pub models: BTreeMap<KappaRef, ModelManifest>,
+    pub models: BTreeMap<Kappa, ModelManifest>,
     /// Pending inference jobs by request κ-label.
-    pub pending_jobs: BTreeMap<KappaRef, PendingInference>,
+    pub pending_jobs: BTreeMap<Kappa, PendingInference>,
     /// Completed inference jobs by request κ-label.
-    pub completed_jobs: BTreeMap<KappaRef, CompletedInference>,
+    pub completed_jobs: BTreeMap<Kappa, CompletedInference>,
     /// Failed inference jobs by request κ-label.
-    pub failed_jobs: BTreeMap<KappaRef, FailedInference>,
+    pub failed_jobs: BTreeMap<Kappa, FailedInference>,
 }

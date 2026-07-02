@@ -663,7 +663,7 @@ pub(crate) fn eval_reshape(
                 return None; // Only one -1 allowed.
             }
             infer_idx = Some(i);
-            out_shape.push(0); // Placeholder.
+            out_shape.push(0); // Overwritten after loop.
         } else if v == 0 {
             // Keep original dim.
             let orig = input_shapes[0].get(i).copied().unwrap_or(1);

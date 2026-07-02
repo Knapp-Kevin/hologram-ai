@@ -895,3 +895,106 @@ pub fn kv_slot_injection_rule() -> Rule {
 pub fn kv_slot_injection_rules() -> RuleSet {
     RuleSet::new().with_rule(kv_slot_injection_rule())
 }
+
+// ── AttentionFusion: SDPA chain → GroupedQueryAttention ─────────────────
+
+fn attention_fusion_rewrite(
+    graph: &mut crate::ir::AiGraph,
+    _binds: &std::collections::HashMap<super::VarId, crate::ir::TensorId>,
+    root_idx: usize,
+) -> Option<crate::ir::AiNode> {
+    use crate::opt::graph_utils::{
+        build_consumer_map, build_producer_map, extract_heads_dim, find_pre_transpose_with_scale,
+        infer_all_head_params, match_sdpa_chain, trace_past_expand,
+    };
+
+    let force_causal = graph
+        .output_names
+        .iter()
+        .any(|n| n == "logits" || n == "output");
+
+    let node = graph.nodes.get(root_idx)?;
+    let q_tid = node.inputs.first().copied()?;
+    let k_tid = node.inputs.get(1).copied()?;
+    let qkt_out = node.outputs.first().copied()?;
+
+    let tid_to_node = build_producer_map(graph);
+    let consumers = build_consumer_map(graph);
+
+    let chain = match_sdpa_chain(qkt_out, &tid_to_node, &consumers, graph)?;
+    let v_tid = chain.v_tid;
+
+    let (num_heads, num_kv_heads_inferred, head_dim) =
+        infer_all_head_params(q_tid, k_tid, v_tid, graph);
+
+    if num_heads == 0 || head_dim == 0 {
+        return None;
+    }
+
+    let (k_pre_transpose, effective_scale) =
+        find_pre_transpose_with_scale(k_tid, &tid_to_node, graph);
+    let effective_scale = effective_scale.unwrap_or(1.0) * chain.scale;
+
+    let k_actual = trace_past_expand(k_pre_transpose, &tid_to_node, graph);
+    let v_actual = trace_past_expand(v_tid, &tid_to_node, graph);
+
+    let k_actual_heads = extract_heads_dim(k_actual, graph);
+    let num_kv_heads = k_actual_heads
+        .map(|h| h as u32)
+        .unwrap_or(num_kv_heads_inferred);
+
+    let out_tid = chain.output_tid;
+
+    // Fix output dtype
+    let q_info = graph.tensor_info.get(&q_tid).cloned();
+    if let (Some(qi), Some(out_info)) = (q_info, graph.tensor_info.get_mut(&out_tid)) {
+        out_info.shape = qi.shape;
+        out_info.logical_dtype = qi.logical_dtype;
+        out_info.storage_dtype = qi.storage_dtype;
+    }
+
+    // Since we are matching the root MatMul (Q@K^T), we replace IT with the GQA node,
+    // and we must eliminate the REST of the chain.
+    // However, the rule engine replaces the `root_idx` node automatically and keeps the graph valid.
+    // Wait, the rule engine only replaces the nodes bound in the Pattern!
+    // If our pattern only matches the `Q@K^T` MatMul, the engine will NOT remove the Add/Softmax/etc.
+    // We must manually remove them from `graph.nodes`!
+    // But modifying `graph.nodes` length during a rewrite breaks the engine's iteration!
+    // Actually, `Replacement::custom` in the engine replaces the `root_idx` node and DOES NOT remove others unless we return `AiNode` for them, or if we mark them dead.
+    // Wait, the dead node elimination pass runs AFTER this! So if we just wire the output of GQA to `chain.output_tid`, the intermediate nodes become dead and `DeadNodeElimination` will sweep them!
+
+    Some(crate::ir::AiNode::new(
+        graph.nodes[root_idx].id,
+        AiOp::GroupedQueryAttention {
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            scale: Some(effective_scale),
+            causal: chain.has_mask || force_causal,
+            heads_first: true,
+            qk_norm: false,
+            rope: false,
+            rope_base: 0.0,
+        },
+        vec![q_tid, k_actual, v_actual],
+        vec![out_tid],
+    ))
+}
+
+pub fn attention_fusion_rule() -> Rule {
+    let q = super::VarId(1);
+    let k_t = super::VarId(2);
+    Rule {
+        name: "attention_fusion",
+        witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
+        pattern: Pattern::op(
+            super::OpMatcher::exact_matmul(),
+            vec![Pattern::Var(q), Pattern::Var(k_t)],
+        ),
+        replacement: Replacement::custom(attention_fusion_rewrite),
+    }
+}
+
+pub fn attention_fusion_rules() -> RuleSet {
+    RuleSet::new().with_rule(attention_fusion_rule())
+}

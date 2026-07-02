@@ -2,10 +2,12 @@
 
 use thiserror::Error;
 
-use crate::{InferenceOutput, InferenceRequest, RunnerManifest};
+use crate::domain::{InferenceOutput, InferenceRequest, RunnerManifest};
 
 #[cfg(test)]
-use crate::{InferenceProvenance, KappaRef};
+use crate::domain::InferenceProvenance;
+#[cfg(test)]
+use crate::domain::Kappa;
 
 /// A capability-scoped model runner.
 ///
@@ -38,14 +40,14 @@ pub enum ModelRunnerError {
 /// the caller so tests remain explicit about the adapter boundary.
 pub struct DeterministicEchoRunner {
     manifest: RunnerManifest,
-    worker_kappa: KappaRef,
-    output_kappa: KappaRef,
+    worker_kappa: Kappa,
+    output_kappa: Kappa,
 }
 
 #[cfg(test)]
 impl DeterministicEchoRunner {
     /// Create a deterministic echo runner for tests.
-    pub fn new(manifest: RunnerManifest, worker_kappa: KappaRef, output_kappa: KappaRef) -> Self {
+    pub fn new(manifest: RunnerManifest, worker_kappa: Kappa, output_kappa: Kappa) -> Self {
         Self {
             manifest,
             worker_kappa,

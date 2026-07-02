@@ -40,47 +40,15 @@ jobs:
           owner: Hologram-Technologies
           repositories: hologram
 
-      - name: Configure git auth for cargo
-        run: |
-          git config --global \
-            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
-            "https://github.com/Hologram-Technologies/"
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
+      - name: Build site
+        uses: ./.github/actions/build-site
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Rust toolchain + wasm target
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup target add wasm32-unknown-unknown
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-
-      - uses: pnpm/action-setup@v4
-        with: { version: 9 }
-      - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: pnpm, cache-dependency-path: apps/web/pnpm-lock.yaml }
-
-      - name: Build wasm (no parallel — wasm32 is single-threaded)
-        run: wasm-pack build crates/hologram-ai-wasm --target web --out-dir ../../apps/web/src/wasm --release
-
-      - name: Build web bundle
-        working-directory: apps/web
-        env:
-          VITE_BASE: /hologram-ai/
-          # Don't let pnpm's pre-run deps check fail on build-script approval.
-          npm_config_verify_deps_before_run: "false"
-        run: |
-          pnpm install --no-frozen-lockfile
-          pnpm rebuild esbuild
-          pnpm exec tsc -b
-          pnpm exec vite build
+          app-token: ${{ steps.app-token.outputs.token }}
+          out-dir: _site
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
-        with: { path: apps/web/dist }
+        with: { path: _site }
 
   deploy:
     needs: build

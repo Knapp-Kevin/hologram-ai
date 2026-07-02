@@ -1,4 +1,3 @@
-pub mod attention_fusion;
 pub mod const_dedup;
 pub mod const_eval;
 pub mod const_eval_ops;
@@ -21,7 +20,6 @@ pub mod shape_inference;
 pub mod shape_prop;
 pub mod shared_input_projection_fusion;
 
-pub use attention_fusion::AttentionFusion;
 pub use const_dedup::ConstantDeduplication;
 pub use decompose::OpDecomposition;
 pub use oracle::ShapeOraclePass;

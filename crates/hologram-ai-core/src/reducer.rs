@@ -1,7 +1,7 @@
 //! Deterministic reducer for AI app event streams.
 
 use crate::domain::{
-    AiEvent, AiView, CompletedInference, FailedInference, PendingInference, PendingPhase,
+    AiEvent, AiView, InferenceOutput, InferenceRequest, Kappa, PendingPhase, RunnerManifest,
 };
 
 /// Fold an append-only AI event stream into stable application state.
@@ -55,15 +55,11 @@ fn apply_event(view: &mut AiView, event: &AiEvent) {
     }
 }
 
-fn register_prompt(
-    view: &mut AiView,
-    event_kappa: &crate::KappaRef,
-    request: &crate::InferenceRequest,
-) {
+fn register_prompt(view: &mut AiView, event_kappa: &Kappa, request: &InferenceRequest) {
     clear_terminal_state(view, &request.request_kappa);
     view.pending_jobs.insert(
         request.request_kappa.clone(),
-        PendingInference {
+        crate::domain::PendingInference {
             submission_event_kappa: event_kappa.clone(),
             request: request.clone(),
             runner: None,
@@ -75,9 +71,9 @@ fn register_prompt(
 
 fn mark_started(
     view: &mut AiView,
-    request_kappa: &crate::KappaRef,
-    runner: &crate::RunnerManifest,
-    worker_kappa: &crate::KappaRef,
+    request_kappa: &Kappa,
+    runner: &RunnerManifest,
+    worker_kappa: &Kappa,
 ) {
     let Some(existing) = view.pending_jobs.get_mut(request_kappa) else {
         return;
@@ -87,11 +83,7 @@ fn mark_started(
     existing.phase = PendingPhase::Running;
 }
 
-fn mark_completed(
-    view: &mut AiView,
-    event_kappa: &crate::KappaRef,
-    output: &crate::InferenceOutput,
-) {
+fn mark_completed(view: &mut AiView, event_kappa: &Kappa, output: &InferenceOutput) {
     let request = request_for_completion(view, output);
     view.pending_jobs.remove(&output.request_kappa);
     view.failed_jobs.remove(&output.request_kappa);
@@ -100,7 +92,7 @@ fn mark_completed(
     };
     view.completed_jobs.insert(
         output.request_kappa.clone(),
-        CompletedInference {
+        crate::domain::CompletedInference {
             completion_event_kappa: event_kappa.clone(),
             request,
             output: output.clone(),
@@ -108,10 +100,7 @@ fn mark_completed(
     );
 }
 
-fn request_for_completion(
-    view: &AiView,
-    output: &crate::InferenceOutput,
-) -> Option<crate::InferenceRequest> {
+fn request_for_completion(view: &AiView, output: &InferenceOutput) -> Option<InferenceRequest> {
     if let Some(pending) = view.pending_jobs.get(&output.request_kappa) {
         return Some(pending.request.clone());
     }
@@ -125,11 +114,11 @@ fn request_for_completion(
 
 fn mark_failed(
     view: &mut AiView,
-    event_kappa: &crate::KappaRef,
-    request_kappa: &crate::KappaRef,
-    model_kappa: &crate::KappaRef,
-    runner_kappa: &crate::KappaRef,
-    worker_kappa: &crate::KappaRef,
+    event_kappa: &Kappa,
+    request_kappa: &Kappa,
+    model_kappa: &Kappa,
+    runner_kappa: &Kappa,
+    worker_kappa: &Kappa,
     error: &str,
 ) {
     let request = view
@@ -145,7 +134,7 @@ fn mark_failed(
     view.completed_jobs.remove(request_kappa);
     view.failed_jobs.insert(
         request_kappa.clone(),
-        FailedInference {
+        crate::domain::FailedInference {
             failure_event_kappa: event_kappa.clone(),
             request,
             model_kappa: model_kappa.clone(),
@@ -156,7 +145,7 @@ fn mark_failed(
     );
 }
 
-fn clear_terminal_state(view: &mut AiView, request_kappa: &crate::KappaRef) {
+fn clear_terminal_state(view: &mut AiView, request_kappa: &Kappa) {
     view.completed_jobs.remove(request_kappa);
     view.failed_jobs.remove(request_kappa);
 }

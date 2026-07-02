@@ -185,8 +185,7 @@ impl Pass for SharedInputProjectionFusion {
                 }
 
                 // Try gate+up fusion: exactly 2 members with equal N.
-                // TODO: re-enable after fixing rkyv serialization for large Q4 weights
-                if false && group.len() >= 2 {
+                if group.len() >= 2 {
                     // Find pairs with equal N.
                     let mut n_groups: HashMap<usize, Vec<&MatMulInfo>> = HashMap::new();
                     for m in group {

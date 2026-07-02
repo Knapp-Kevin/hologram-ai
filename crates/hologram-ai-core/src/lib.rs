@@ -6,15 +6,18 @@
 
 #![forbid(unsafe_code)]
 
-mod domain;
+pub mod domain;
 mod reducer;
 mod runner;
 
+pub use domain::{AppEntryKind, PendingPhase, RunnerKind};
+
 pub use domain::{
-    AiAppManifest, AiEvent, AiView, AppEntryKind, CompletedInference, FailedInference,
-    InferenceOutput, InferenceParams, InferenceProvenance, InferenceRequest, KappaRef,
-    ModelManifest, PendingInference, PendingPhase, Prompt, RunnerKind, RunnerManifest,
+    AiAppManifest, AiEvent, AiView, CompletedInference, FailedInference, InferenceOutput,
+    InferenceParams, InferenceProvenance, InferenceRequest, ModelManifest, PendingInference,
+    Prompt, RunnerManifest,
 };
+
 pub use reducer::reduce;
 pub use runner::{ModelRunner, ModelRunnerError};
 
@@ -23,8 +26,8 @@ mod tests {
     use super::*;
     use crate::runner::DeterministicEchoRunner;
 
-    fn kappa(label: &str) -> KappaRef {
-        KappaRef::new(label)
+    fn kappa(label: &str) -> crate::domain::Kappa {
+        crate::domain::Kappa(holospaces::address(label.as_bytes()))
     }
 
     fn model_manifest() -> ModelManifest {
