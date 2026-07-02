@@ -159,7 +159,16 @@ export async function listKnownModels(): Promise<KnownModelStatus[]> {
     let compiledArchive: string | null = null;
     
     if (localDir) {
-      downloaded = (await getOpfsFileIfExists(localDir, "model.onnx")) !== null;
+      // Find the .onnx file recursively in localDir
+      async function hasOnnx(dir: FileSystemDirectoryHandle): Promise<boolean> {
+        // @ts-ignore
+        for await (const [name, handle] of dir.entries()) {
+          if (handle.kind === 'file' && name.endsWith('.onnx')) return true;
+          if (handle.kind === 'directory' && await hasOnnx(handle as FileSystemDirectoryHandle)) return true;
+        }
+        return false;
+      }
+      downloaded = await hasOnnx(localDir);
       if (await getOpfsFileIfExists(localDir, `${model.id}.holo`)) {
         compiledArchive = `models/${localName}/${model.id}.holo`;
       }
@@ -346,11 +355,26 @@ export async function generate(opts: GenerateOpts): Promise<number> {
   const holoFile = await holoHandle.getFile();
   const holoBytes = new Uint8Array(await holoFile.arrayBuffer());
   
+  async function findFileRecursive(dir: FileSystemDirectoryHandle, targetName: string): Promise<FileSystemFileHandle | null> {
+    for await (const [name, handle] of (dir as any).entries()) {
+      if (handle.kind === 'file' && name === targetName) {
+        return handle as FileSystemFileHandle;
+      }
+      if (handle.kind === 'directory') {
+        const found = await findFileRecursive(handle as FileSystemDirectoryHandle, targetName);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
   let tokenizerBytes: Uint8Array | undefined;
   try {
-    const tokHandle = await localDir.getFileHandle("tokenizer.json");
-    const tokFile = await tokHandle.getFile();
-    tokenizerBytes = new Uint8Array(await tokFile.arrayBuffer());
+    const tokHandle = await findFileRecursive(localDir, "tokenizer.json");
+    if (tokHandle) {
+      const tokFile = await tokHandle.getFile();
+      tokenizerBytes = new Uint8Array(await tokFile.arrayBuffer());
+    }
   } catch {
     // optional
   }

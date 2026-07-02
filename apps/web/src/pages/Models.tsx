@@ -18,8 +18,6 @@ export function Models() {
   const [busy, setBusy] = useState<Busy>(null);
   const [tail, setTail] = useState<string[]>([]);
 
-
-
   async function refresh() {
     const [p, m] = await Promise.all([workspacePaths(), listKnownModels()]);
     setPaths(p);
