@@ -24,6 +24,7 @@ fn le_to_f32(b: &[u8]) -> Vec<f32> {
 }
 
 #[derive(Debug, Default, cucumber::World)]
+#[allow(dead_code)]
 struct HologramWorld {
     model_name: String,
     manifest: Option<ModelManifest>,
@@ -104,7 +105,7 @@ async fn when_holo_execute(w: &mut HologramWorld) {
 
 #[cfg(not(feature = "conformance"))]
 #[when(expr = "the fixture is compiled and executed via the holographic compiler")]
-async fn when_holo_execute_skip(w: &mut HologramWorld) {}
+async fn when_holo_execute_skip(_w: &mut HologramWorld) {}
 
 #[cfg(feature = "conformance")]
 #[then(expr = "the outputs must exactly match the ONNX Runtime authoritative execution")]
@@ -124,7 +125,7 @@ async fn then_match_ort(w: &mut HologramWorld) {
 
 #[cfg(not(feature = "conformance"))]
 #[then(expr = "the outputs must exactly match the ONNX Runtime authoritative execution")]
-async fn then_match_ort_skip(w: &mut HologramWorld) {}
+async fn then_match_ort_skip(_w: &mut HologramWorld) {}
 
 #[tokio::main]
 async fn main() {
