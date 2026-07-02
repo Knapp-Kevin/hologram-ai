@@ -52,17 +52,17 @@ export interface ProcessLine {
 
 const DEFAULT_CATALOGUE: Omit<KnownModelStatus, "localDir" | "downloaded" | "compiledArchive">[] = [
   {
-    id: "tinyllama-1.1b-chat",
-    hfId: "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    displayName: "TinyLlama 1.1B Chat",
+    id: "smollm2-135m-instruct",
+    hfId: "HuggingFaceTB/SmolLM2-135M-Instruct",
+    displayName: "SmolLM2 135M Instruct",
     description: "Lightweight chat model — fastest path to a working demo.",
     modality: "text-chat",
-    size: "1.1B",
-    approxArchiveMb: 700,
+    size: "135M",
+    approxArchiveMb: 150,
     quantize: "none",
-    promptTemplate: "<|user|>\n{prompt}</s>\n<|assistant|>\n",
-    stop: ["</s>"],
-    chatTurnSeparator: "</s>\n<|assistant|>\n{response}</s>\n<|user|>\n",
+    promptTemplate: "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
+    stop: ["<|im_end|>"],
+    chatTurnSeparator: "<|im_end|>\n<|im_start|>assistant\n{response}<|im_end|>\n<|im_start|>user\n",
   },
   {
     id: "qwen2.5-0.5b-instruct",
@@ -224,26 +224,49 @@ export async function downloadKnownModel(id: string): Promise<number> {
   const modelsDir = await root.getDirectoryHandle("models", { create: true });
   const localDir = await modelsDir.getDirectoryHandle(localName, { create: true });
   
-  const files = ["model.onnx", "tokenizer.json"];
+  const candidates = ["onnx/model.onnx", "model.onnx"];
+  let onnxPath = null;
+  for (const c of candidates) {
+    const url = `https://huggingface.co/${model.hfId}/resolve/main/${c}`;
+    emitLine("models://download-line", { stream: "stdout", line: `Checking ${url}...` });
+    try {
+      const res = await fetch(url, { method: 'HEAD' });
+      if (res.ok || res.status === 302) {
+        onnxPath = c;
+        break;
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  if (!onnxPath) {
+    throw new Error(`No ONNX export found in repository. The web version requires pre-exported models.`);
+  }
+
+  const files = [
+    { remote: onnxPath, local: "model.onnx", optional: false },
+    { remote: "tokenizer.json", local: "tokenizer.json", optional: true }
+  ];
   
   for (const file of files) {
-    const url = `https://huggingface.co/${model.hfId}/resolve/main/${file}`;
+    const url = `https://huggingface.co/${model.hfId}/resolve/main/${file.remote}`;
     emitLine("models://download-line", { stream: "stdout", line: `Fetching ${url}...` });
     
     const res = await fetch(url);
     if (!res.ok) {
-      if (file === "tokenizer.json") {
-        emitLine("models://download-line", { stream: "stderr", line: `tokenizer.json not found, continuing without it.` });
+      if (file.optional) {
+        emitLine("models://download-line", { stream: "stderr", line: `${file.local} not found, continuing without it.` });
         continue;
       }
-      throw new Error(`Failed to fetch ${file}: ${res.statusText}`);
+      throw new Error(`Failed to fetch ${file.local}: ${res.statusText}`);
     }
     
-    const fileHandle = await localDir.getFileHandle(file, { create: true });
+    const fileHandle = await localDir.getFileHandle(file.local, { create: true });
     const writable = await fileHandle.createWritable();
     await res.body!.pipeTo(writable);
     
-    emitLine("models://download-line", { stream: "stdout", line: `Saved ${file}.` });
+    emitLine("models://download-line", { stream: "stdout", line: `Saved ${file.local}.` });
   }
   
   emitLine("models://download-line", { stream: "stdout", line: `Download complete.` });
