@@ -80,7 +80,7 @@ export function Models() {
       const q = encodeURIComponent(searchQuery.trim());
       // Parametric search for models
       const [res1] = await Promise.all([
-        fetch(`https://huggingface.co/api/models?search=${q}&tags=onnx&sort=downloads&direction=-1&limit=20`)
+        fetch(`https://huggingface.co/api/models?search=${q}&sort=downloads&direction=-1&limit=20`)
       ]);
       if (!res1.ok) throw new Error(`Search failed`);
       

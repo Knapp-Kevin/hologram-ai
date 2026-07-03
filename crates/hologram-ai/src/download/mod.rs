@@ -1,4 +1,3 @@
-mod convert;
 mod hf_api;
 mod progress;
 
@@ -36,10 +35,6 @@ pub struct DownloadArgs {
     #[arg(long)]
     pub quantization: Option<String>,
 
-    /// Keep Python virtualenv after conversion.
-    #[arg(long)]
-    pub keep_venv: bool,
-
     /// HuggingFace API token (or set HF_TOKEN env var).
     #[arg(long)]
     pub token: Option<String>,
@@ -55,8 +50,7 @@ pub enum DownloadFormat {
 
 enum ResolvedDownload {
     Onnx { filenames: Vec<String> },
-    ConvertToOnnx,
-    ConvertDiffusionToOnnx,
+    Safetensors { filenames: Vec<String> },
 }
 
 fn resolve_format(
@@ -68,21 +62,13 @@ fn resolve_format(
         DownloadFormat::Onnx | DownloadFormat::Auto => {
             if let Some(r) = try_resolve_onnx(info) {
                 r
-            } else if is_diffusion_pipeline(info) {
-                ResolvedDownload::ConvertDiffusionToOnnx
+            } else if let Some(r) = try_resolve_safetensors(info) {
+                r
             } else {
-                ResolvedDownload::ConvertToOnnx
+                panic!("No ONNX or Safetensors files found in the repository.");
             }
         }
     }
-}
-
-/// Detect diffusion pipelines by looking for `model_index.json` — the marker
-/// file that `diffusers` uses to describe a multi-component pipeline.
-fn is_diffusion_pipeline(info: &ModelInfo) -> bool {
-    info.siblings
-        .iter()
-        .any(|f| f.filename == "model_index.json")
 }
 
 fn try_resolve_onnx(info: &ModelInfo) -> Option<ResolvedDownload> {
@@ -99,6 +85,23 @@ fn try_resolve_onnx(info: &ModelInfo) -> Option<ResolvedDownload> {
 
     Some(ResolvedDownload::Onnx {
         filenames: onnx_files,
+    })
+}
+
+fn try_resolve_safetensors(info: &ModelInfo) -> Option<ResolvedDownload> {
+    let safetensors_files: Vec<String> = info
+        .siblings
+        .iter()
+        .filter(|f| f.filename.ends_with(".safetensors"))
+        .map(|f| f.filename.clone())
+        .collect();
+
+    if safetensors_files.is_empty() {
+        return None;
+    }
+
+    Some(ResolvedDownload::Safetensors {
+        filenames: safetensors_files,
     })
 }
 
@@ -140,19 +143,19 @@ async fn run_async(args: DownloadArgs) -> anyhow::Result<()> {
             )
             .await?;
         }
-        ResolvedDownload::ConvertToOnnx => {
-            eprintln!("No pre-built ONNX found. Converting via Python...");
-            let result = convert::convert_to_onnx(&args.model_id, &output_dir, args.keep_venv)?;
-            eprintln!("Converted: {}", result.model_path.display());
-        }
-        ResolvedDownload::ConvertDiffusionToOnnx => {
-            eprintln!("Diffusion pipeline detected. Exporting components to ONNX via optimum...");
-            let result =
-                convert::convert_diffusion_to_onnx(&args.model_id, &output_dir, args.keep_venv)?;
-            eprintln!("Exported: {}", result.model_path.display());
-            for f in &result.companion_files {
-                eprintln!("  component: {}", f.display());
-            }
+        ResolvedDownload::Safetensors { filenames } => {
+            eprintln!(
+                "No pre-built ONNX found. Downloading Safetensors for parametric compilation..."
+            );
+            download_onnx(
+                &client,
+                &args.model_id,
+                &args.revision,
+                &filenames,
+                &output_dir,
+                &info,
+            )
+            .await?;
         }
     }
 
@@ -304,17 +307,17 @@ mod tests {
     }
 
     #[test]
-    fn resolve_triggers_conversion_when_no_formats() {
+    #[should_panic(expected = "No ONNX or Safetensors files found in the repository.")]
+    fn resolve_triggers_panic_when_no_formats() {
         let info = mock_info(&["pytorch_model.bin"]);
-        let resolved = resolve_format(&info, &DownloadFormat::Auto, None);
-        assert!(matches!(resolved, ResolvedDownload::ConvertToOnnx));
+        resolve_format(&info, &DownloadFormat::Auto, None);
     }
 
     #[test]
-    fn resolve_explicit_onnx_with_no_onnx_triggers_convert() {
+    #[should_panic(expected = "No ONNX or Safetensors files found in the repository.")]
+    fn resolve_explicit_onnx_with_no_onnx_triggers_panic() {
         let info = mock_info(&["pytorch_model.bin"]);
-        let resolved = resolve_format(&info, &DownloadFormat::Onnx, None);
-        assert!(matches!(resolved, ResolvedDownload::ConvertToOnnx));
+        resolve_format(&info, &DownloadFormat::Onnx, None);
     }
 
     #[test]

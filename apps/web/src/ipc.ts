@@ -1,4 +1,4 @@
-import { compile, generate as wasmGenerate, computeKappa } from "./holo";
+import { compile, compileSafetensors, generate as wasmGenerate, computeKappa } from "./holo";
 import { type GenOpts } from "./holo";
 
 export interface WorkspacePaths {
@@ -288,15 +288,16 @@ export async function downloadKnownModel(id: string): Promise<number> {
   const siblings = info.siblings || [];
   
   const onnxFiles = siblings.filter((f: any) => f.rfilename.endsWith('.onnx') || f.rfilename.endsWith('.onnx_data') || f.rfilename.endsWith('.onnx.data'));
+  const safetensorsFiles = siblings.filter((f: any) => f.rfilename.endsWith('.safetensors'));
   
-  if (onnxFiles.length === 0) {
-    throw new Error(`No ONNX export found in repository. The web version requires pre-exported ONNX models.`);
+  if (onnxFiles.length === 0 && safetensorsFiles.length === 0) {
+    throw new Error(`No ONNX or Safetensors export found in repository. The web version requires pre-exported or Safetensors models.`);
   }
 
   const companionNames = ["tokenizer.json", "config.json", "tokenizer_config.json", "special_tokens_map.json"];
   const companions = siblings.filter((f: any) => companionNames.includes(f.rfilename.split('/').pop()!));
 
-  const filesToDownload = [...onnxFiles, ...companions];
+  const filesToDownload = [...(onnxFiles.length > 0 ? onnxFiles : safetensorsFiles), ...companions];
   
   for (const file of filesToDownload) {
     const url = `https://huggingface.co/${model.hfId}/resolve/main/${file.rfilename}`;
@@ -345,7 +346,7 @@ export async function compileKnownModel(id: string, specificOnnx?: string): Prom
   // Find the .onnx file recursively in localDir
   async function findOnnx(dir: FileSystemDirectoryHandle): Promise<FileSystemFileHandle | null> {
     for await (const [name, handle] of (dir as any).entries()) {
-      if (handle.kind === 'file' && name.endsWith('.onnx')) {
+      if (handle.kind === 'file' && (name.endsWith('.onnx') || name.endsWith('.safetensors'))) {
         return handle as FileSystemFileHandle;
       }
       if (handle.kind === 'directory') {
@@ -373,8 +374,17 @@ export async function compileKnownModel(id: string, specificOnnx?: string): Prom
   const onnxFile = await onnxHandle.getFile();
   const onnxBytes = new Uint8Array(await onnxFile.arrayBuffer());
   
-  emitLine("models://compile-line", { stream: "stdout", line: `Loaded ONNX (${onnxBytes.length} bytes). Compiling via wasm...` });
-  const holoBytes = await compile(onnxBytes);
+  let holoBytes: Uint8Array;
+  if (onnxHandle.name.endsWith('.safetensors')) {
+    emitLine("models://compile-line", { stream: "stdout", line: `Loaded Safetensors (${onnxBytes.length} bytes). Reading config.json...` });
+    const configHandle = await getSpecificFile(localDir, "config.json");
+    const configFile = await configHandle.getFile();
+    const configText = await configFile.text();
+    holoBytes = await compileSafetensors(configText, onnxBytes);
+  } else {
+    emitLine("models://compile-line", { stream: "stdout", line: `Loaded ONNX (${onnxBytes.length} bytes). Compiling via wasm...` });
+    holoBytes = await compile(onnxBytes);
+  }
   
   const kappa = await computeKappa(holoBytes);
   const holoName = `${kappa}.holo`;

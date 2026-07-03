@@ -20,6 +20,11 @@ pub enum ModelSource {
     OnnxBytes(Vec<u8>),
     /// Pre-built `AiGraph` (bypass importer).
     AiGraph(AiGraph),
+    /// Raw Safetensors config.json bytes and safetensors file bytes.
+    Safetensors {
+        config_json: String,
+        safetensors_bytes: Vec<u8>,
+    },
 }
 
 /// Input specification for a single component in a multi-ONNX model.
@@ -312,6 +317,14 @@ impl ModelCompiler {
                     .context("importing ONNX from bytes")
             }
             ModelSource::AiGraph(g) => Ok(g),
+            ModelSource::Safetensors {
+                config_json,
+                safetensors_bytes,
+            } => hologram_ai_safetensors::build_graph_from_safetensors(
+                &config_json,
+                &safetensors_bytes,
+            )
+            .context("importing from safetensors"),
         }
     }
 }
@@ -502,6 +515,9 @@ fn source_kappa_label(source: &ModelSource) -> Option<String> {
             crate::address::model_kappa_label(&bytes)
         }
         ModelSource::AiGraph(_) => return None,
+        ModelSource::Safetensors {
+            safetensors_bytes, ..
+        } => crate::address::model_kappa_label(safetensors_bytes),
     };
     match label {
         Ok(l) => Some(l),

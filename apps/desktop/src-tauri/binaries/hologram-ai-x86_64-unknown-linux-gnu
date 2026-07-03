@@ -1,3 +1,0 @@
-#!/bin/sh
-echo 'hologram-ai sidecar placeholder - rebuild for production' >&2
-exit 127
