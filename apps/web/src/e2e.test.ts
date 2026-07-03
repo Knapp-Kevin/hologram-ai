@@ -89,4 +89,51 @@ describe('End-to-End Model Pipeline', () => {
       throw e;
     }
   }, 15000);
+  it('should reject models that exceed WebAssembly memory limits', async () => {
+    // Mock File.size to simulate a 3GB safetensors shard
+    const originalSizeDescriptor = Object.getOwnPropertyDescriptor(File.prototype, 'size');
+    Object.defineProperty(File.prototype, 'size', {
+      get() {
+        if (this.name === 'huge.safetensors') {
+          return 3 * 1024 * 1024 * 1024; // 3GB
+        }
+        return originalSizeDescriptor?.get?.call(this);
+      },
+      configurable: true
+    });
+
+    try {
+      const { addCustomModel } = await import('./ipc');
+      
+      // Setup a dummy catalogue entry so compileKnownModel finds it
+      const oldFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn().mockImplementation(async (url: string | Request | URL) => {
+        const urlStr = url.toString();
+        if (urlStr.includes('/api/models/test/huge-model')) {
+          return new Response(JSON.stringify({
+            id: "test/huge-model",
+            siblings: [{ rfilename: "huge.safetensors", size: 3 * 1024 * 1024 * 1024 }]
+          }));
+        }
+        return oldFetch(url);
+      });
+      await addCustomModel('test/huge-model');
+      globalThis.fetch = oldFetch;
+
+      // Seed the OPFS with the dummy file so compileSafetensors attempts to read it
+      const root = await getOpfsDir();
+      const modelsDir = await root.getDirectoryHandle('models', { create: true });
+      const modelDir = await modelsDir.getDirectoryHandle('huge-model', { create: true });
+      await modelDir.getFileHandle('huge.safetensors', { create: true });
+      await modelDir.getFileHandle('config.json', { create: true });
+
+      // Compiling should throw the specific WASM error
+      await expect(compileKnownModel('huge-model')).rejects.toThrow(/Model is too large .* to compile in the browser due to WebAssembly 32-bit memory limits/);
+    } finally {
+      // Restore File.size
+      if (originalSizeDescriptor) {
+        Object.defineProperty(File.prototype, 'size', originalSizeDescriptor);
+      }
+    }
+  });
 });
