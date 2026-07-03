@@ -210,7 +210,10 @@ fn zm_2_addressed_output_resolves_without_extra_copy() {
     let n = 64;
     let bytes = hologram_ai_conformance::ort_runner::onnx_builder::unary_op("Sigmoid", n);
     let archive = ModelCompiler::default()
-        .compile(ModelSource::OnnxBytes(bytes))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: bytes,
+            external_data: None,
+        })
         .expect("compile");
     let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load");
 

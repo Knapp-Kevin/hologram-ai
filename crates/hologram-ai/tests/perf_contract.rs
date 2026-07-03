@@ -141,7 +141,10 @@ fn content_addressed_reuse_beats_recompute() {
     // reuse = same κ-labels → whole-graph memo hit (O(1), no compute/copy).
     let model = onnx_builder::matmul(256, 256, 256);
     let archive = ModelCompiler::default()
-        .compile(ModelSource::OnnxBytes(model))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: model,
+            external_data: None,
+        })
         .expect("compile");
     let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load");
 
@@ -291,7 +294,10 @@ fn matmul_sweep_runs_at_every_size() {
     // hologram-ai end to end (no size is special-cased or capped).
     for n in [64usize, 128, 256, 512] {
         let archive = ModelCompiler::default()
-            .compile(ModelSource::OnnxBytes(onnx_builder::matmul(n, n, n)))
+            .compile(ModelSource::OnnxBytes {
+                model_bytes: onnx_builder::matmul(n, n, n),
+                external_data: None,
+            })
             .unwrap_or_else(|e| panic!("matmul {n}³ compile failed: {e:#}"));
         let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load");
         let ins: Vec<Vec<u8>> = runner

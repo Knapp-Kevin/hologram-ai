@@ -9,6 +9,7 @@ import init, {
   generate as wasmGenerate,
   compute_kappa as wasmComputeKappa,
   compile_safetensors as wasmCompileSafetensors,
+  compile_onnx_with_data as wasmCompileOnnxWithData,
 } from "./wasm/hologram_ai_wasm.js";
 
 export interface Port {
@@ -61,6 +62,11 @@ export async function run(
 export async function compile(onnx: Uint8Array): Promise<Uint8Array> {
   await ensureReady();
   return wasmCompile(onnx);
+}
+
+export async function compileOnnxWithData(onnxBytes: Uint8Array, externalData: Uint8Array): Promise<Uint8Array> {
+  await ensureReady();
+  return wasmCompileOnnxWithData(onnxBytes, externalData);
 }
 
 export async function compileSafetensors(configJson: string, safetensorsShards: Uint8Array[]): Promise<Uint8Array> {

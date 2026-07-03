@@ -423,7 +423,10 @@ fn cf_1_compile_emits_a_canonical_graph() {
     // at archive decode (dynamically, by tag).
     let bytes = onnx_builder::matmul(32, 32, 32);
     let archive = ModelCompiler::default()
-        .compile(ModelSource::OnnxBytes(bytes))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: bytes,
+            external_data: None,
+        })
         .expect("compile must succeed against the canonical boundary");
     let runner = HoloRunner::from_bytes(archive.bytes).expect("load");
     assert!(
@@ -443,7 +446,10 @@ fn cf_3_canonical_graph_satisfies_ce_and_zm() {
     // and content-addressed weight dedup (ZM) on identical inputs.
     let bytes = onnx_builder::matmul(64, 64, 64);
     let archive = ModelCompiler::default()
-        .compile(ModelSource::OnnxBytes(bytes))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: bytes,
+            external_data: None,
+        })
         .expect("compile");
     let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load");
     let kernels = runner.kernel_count();

@@ -202,8 +202,8 @@ mod tests {
         use crate::ort_runner::onnx_builder;
 
         let model_bytes = onnx_builder::rms_norm(2, 16, 1e-6);
-        let graph =
-            hologram_ai_onnx::import_onnx(&model_bytes, Default::default()).expect("import failed");
+        let graph = hologram_ai_onnx::import_onnx(&model_bytes, None, Default::default())
+            .expect("import failed");
 
         eprintln!(
             "Imported {} nodes, {} params",

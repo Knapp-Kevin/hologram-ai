@@ -27,7 +27,10 @@ const SIZES: &[usize] = &[64, 128, 256, 512];
 
 fn compile(model: Vec<u8>) -> HoloRunner {
     let archive = ModelCompiler::default()
-        .compile(ModelSource::OnnxBytes(model))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: model,
+            external_data: None,
+        })
         .expect("compile failed");
     HoloRunner::from_bytes(archive.bytes).expect("load failed")
 }
@@ -115,7 +118,10 @@ fn bench_imported_forward(c: &mut Criterion) {
             seq_len_override: Some(64),
             ..Default::default()
         }
-        .compile(ModelSource::OnnxBytes(model))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: model,
+            external_data: None,
+        })
         .expect("compile failed");
         HoloRunner::from_bytes(archive.bytes).expect("load failed")
     };

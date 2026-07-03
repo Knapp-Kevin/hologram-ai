@@ -41,7 +41,10 @@ static GLOBAL: CountingAllocator = CountingAllocator::new();
 fn small_runner() -> HoloRunner {
     let bytes = onnx_builder::unary_op("Sigmoid", 16);
     let archive = ModelCompiler::default()
-        .compile(ModelSource::OnnxBytes(bytes))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: bytes,
+            external_data: None,
+        })
         .expect("sigmoid compile");
     HoloRunner::from_bytes(archive.bytes).expect("load")
 }
@@ -136,13 +139,19 @@ fn za_2_relower_same_graph_is_bounded() {
     // First compile: warm any one-shot global init.
     let (_a, first) = measure(|| {
         ModelCompiler::default()
-            .compile(ModelSource::OnnxBytes(onnx.clone()))
+            .compile(ModelSource::OnnxBytes {
+                model_bytes: onnx.clone(),
+                external_data: None,
+            })
             .expect("compile #1");
     });
     // Second compile: must be bounded by the first within slack.
     let (_b, second) = measure(|| {
         ModelCompiler::default()
-            .compile(ModelSource::OnnxBytes(onnx.clone()))
+            .compile(ModelSource::OnnxBytes {
+                model_bytes: onnx.clone(),
+                external_data: None,
+            })
             .expect("compile #2");
     });
 

@@ -62,7 +62,10 @@ fn shared_interior_runner(n: usize) -> HoloRunner {
         &[],
     );
     let archive = ModelCompiler::default()
-        .compile(ModelSource::OnnxBytes(bytes))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: bytes,
+            external_data: None,
+        })
         .expect("shared-interior compile");
     HoloRunner::from_bytes(archive.bytes).expect("load")
 }
@@ -70,7 +73,10 @@ fn shared_interior_runner(n: usize) -> HoloRunner {
 fn matmul_runner(n: usize) -> HoloRunner {
     let bytes = onnx_builder::matmul(n, n, n);
     let archive = ModelCompiler::default()
-        .compile(ModelSource::OnnxBytes(bytes))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: bytes,
+            external_data: None,
+        })
         .expect("matmul compile");
     HoloRunner::from_bytes(archive.bytes).expect("load")
 }

@@ -16,8 +16,11 @@ use tracing::{debug, info};
 pub enum ModelSource {
     /// Path to an ONNX model file.
     OnnxPath(PathBuf),
-    /// Raw ONNX bytes.
-    OnnxBytes(Vec<u8>),
+    /// Raw ONNX bytes and optional external data bytes.
+    OnnxBytes {
+        model_bytes: Vec<u8>,
+        external_data: Option<Vec<u8>>,
+    },
     /// Pre-built `AiGraph` (bypass importer).
     AiGraph(AiGraph),
     /// Raw Safetensors config.json bytes and safetensors file shards.
@@ -312,21 +315,24 @@ impl ModelCompiler {
                 hologram_ai_onnx::import_onnx_path(&path, Default::default())
                     .with_context(|| format!("importing ONNX from {path:?}"))
             }
-            ModelSource::OnnxBytes(bytes) => {
-                hologram_ai_onnx::import_onnx(&bytes, Default::default())
-                    .context("importing ONNX from bytes")
-            }
+            ModelSource::OnnxBytes {
+                model_bytes,
+                external_data,
+            } => hologram_ai_onnx::import_onnx(
+                &model_bytes,
+                external_data.as_deref(),
+                Default::default(),
+            )
+            .context("importing ONNX from bytes"),
             ModelSource::AiGraph(g) => Ok(g),
             ModelSource::Safetensors {
                 config_json,
                 safetensors_shards,
             } => {
-                let shards_refs: Vec<&[u8]> = safetensors_shards.iter().map(|s| s.as_slice()).collect();
-                hologram_ai_safetensors::build_graph_from_safetensors(
-                    &config_json,
-                    &shards_refs,
-                )
-                .context("importing from safetensors")
+                let shards_refs: Vec<&[u8]> =
+                    safetensors_shards.iter().map(|s| s.as_slice()).collect();
+                hologram_ai_safetensors::build_graph_from_safetensors(&config_json, &shards_refs)
+                    .context("importing from safetensors")
             }
         }
     }
@@ -512,7 +518,9 @@ fn extract_metadata(graph: &AiGraph) -> ModelMetadata {
 /// failure to mint it never fails the compile.
 fn source_kappa_label(source: &ModelSource) -> Option<String> {
     let label = match source {
-        ModelSource::OnnxBytes(bytes) => crate::address::model_kappa_label(bytes),
+        ModelSource::OnnxBytes { model_bytes, .. } => {
+            crate::address::model_kappa_label(model_bytes)
+        }
         ModelSource::OnnxPath(path) => {
             let bytes = std::fs::read(path).ok()?;
             crate::address::model_kappa_label(&bytes)
@@ -520,11 +528,13 @@ fn source_kappa_label(source: &ModelSource) -> Option<String> {
         ModelSource::AiGraph(_) => return None,
         ModelSource::Safetensors {
             safetensors_shards, ..
-        } => if let Some(first) = safetensors_shards.first() {
-            crate::address::model_kappa_label(first)
-        } else {
-            Err(anyhow::anyhow!("No safetensors shards"))
-        },
+        } => {
+            if let Some(first) = safetensors_shards.first() {
+                crate::address::model_kappa_label(first)
+            } else {
+                Err(anyhow::anyhow!("No safetensors shards"))
+            }
+        }
     };
     match label {
         Ok(l) => Some(l),

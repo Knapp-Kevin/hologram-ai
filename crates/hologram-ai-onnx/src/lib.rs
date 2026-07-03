@@ -62,8 +62,12 @@ pub struct OnnxImportOptions {
 ///
 /// Note: models using external data (weights in separate files) must be loaded
 /// via [`import_onnx_path`] so the model directory can be resolved.
-pub fn import_onnx(bytes: &[u8], opts: OnnxImportOptions) -> anyhow::Result<AiGraph> {
-    import_onnx_inner(bytes, opts, None)
+pub fn import_onnx(
+    bytes: &[u8],
+    external_data: Option<&[u8]>,
+    opts: OnnxImportOptions,
+) -> anyhow::Result<AiGraph> {
+    import_onnx_inner(bytes, opts, None, external_data)
 }
 
 /// Import an ONNX model from a file path.
@@ -76,13 +80,14 @@ pub fn import_onnx_path(
     let bytes =
         std::fs::read(path).map_err(|e| anyhow::anyhow!("reading ONNX file {path:?}: {e}"))?;
     let model_dir = path.parent();
-    import_onnx_inner(&bytes, opts, model_dir)
+    import_onnx_inner(&bytes, opts, model_dir, None)
 }
 
 fn import_onnx_inner(
     bytes: &[u8],
     opts: OnnxImportOptions,
     model_dir: Option<&std::path::Path>,
+    external_data: Option<&[u8]>,
 ) -> anyhow::Result<AiGraph> {
     let model = onnx_pb::ModelProto::decode(bytes).map_err(OnnxError::Decode)?;
 
@@ -111,7 +116,7 @@ fn import_onnx_inner(
     };
 
     let (mut ai_graph, oracle) =
-        graph_builder::build_ai_graph(&graph_proto, graph_name, model_dir)?;
+        graph_builder::build_ai_graph(&graph_proto, graph_name, model_dir, external_data)?;
 
     // Resolve optional op parameters from weight/input shapes.
     // Must run before shape propagation so Conv kernel_shape etc. are available.
@@ -379,14 +384,14 @@ mod tests {
     #[test]
     fn import_identity_model() {
         let bytes = minimal_identity_model();
-        let g = import_onnx(&bytes, Default::default()).expect("import failed");
+        let g = import_onnx(&bytes, None, Default::default()).expect("import failed");
         assert_eq!(g.nodes.len(), 1);
         assert!(g.validate().is_empty());
     }
 
     #[test]
     fn import_rejects_empty_bytes() {
-        assert!(import_onnx(&[], Default::default()).is_err());
+        assert!(import_onnx(&[], None, Default::default()).is_err());
     }
 
     /// An intermediate tensor whose shape appears in value_info should have
@@ -447,7 +452,7 @@ mod tests {
         let mut buf = Vec::new();
         model.encode(&mut buf).unwrap();
 
-        let g = import_onnx(&buf, Default::default()).expect("import failed");
+        let g = import_onnx(&buf, None, Default::default()).expect("import failed");
 
         // The intermediate tensor 'y' should have shape [2, 8] from the oracle.
         let y_tid = g.nodes[0].outputs[0];

@@ -23,7 +23,7 @@ pub fn build_parametric_graph(config: &Value, safetensors_shards: &[&[u8]]) -> R
         let st = SafeTensors::deserialize(shard)?;
         st_instances.push(st);
     }
-    
+
     // We just need the keys to infer layers.
     let mut keys = Vec::new();
     for st in &st_instances {

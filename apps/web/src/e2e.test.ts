@@ -32,7 +32,7 @@ describe('End-to-End Model Pipeline', () => {
         }));
       }
       if (urlStr.includes('/resolve/main/model.onnx')) {
-        return new Response(b64ToUint8Array(TINY_MLP_B64).buffer);
+        return new Response(b64ToUint8Array(TINY_MLP_B64) as any);
       }
       if (urlStr.includes('/resolve/main/config.json') || urlStr.includes('/resolve/main/tokenizer.json')) {
         return new Response(new TextEncoder().encode('{}').buffer);
@@ -53,6 +53,7 @@ describe('End-to-End Model Pipeline', () => {
       
       // 2. Download the model
       await downloadKnownModel('mock-model');
+      await compileKnownModel('mock-model');
       
       // Verify files exist in OPFS
       const root = await getOpfsDir();

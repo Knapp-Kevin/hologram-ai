@@ -15,6 +15,7 @@ use std::path::Path;
 pub fn tensor_to_param(
     t: &TensorProto,
     model_dir: Option<&Path>,
+    external_data: Option<&[u8]>,
 ) -> anyhow::Result<(AiParam, TensorInfo)> {
     let dtype = onnx_dtype(t.data_type).with_context(|| {
         format!(
@@ -34,16 +35,63 @@ pub fn tensor_to_param(
         semantic: SemanticHint::Unknown,
     };
 
-    // Use Mmap for external data to avoid loading multi-GB weight files into memory.
+    // External data mode.
     if t.data_location == crate::onnx_pb::tensor_proto::DataLocation::External as i32 {
-        let param = mmap_external_data(t, model_dir, info.clone())?;
-        return Ok((param, info));
+        if let Some(ext_bytes) = external_data {
+            let data = extract_raw_bytes_external(t, ext_bytes)?;
+            let param = AiParam::inline(data, info.clone());
+            return Ok((param, info));
+        } else {
+            let param = mmap_external_data(t, model_dir, info.clone())?;
+            return Ok((param, info));
+        }
     }
 
     let data = extract_raw_bytes(t, dtype, model_dir)?;
     let param = AiParam::inline(data, info.clone());
 
     Ok((param, info))
+}
+
+fn extract_raw_bytes_external(t: &TensorProto, external_data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let mut offset: u64 = 0;
+    let mut length: Option<u64> = None;
+
+    for entry in &t.external_data {
+        match entry.key.as_str() {
+            "offset" => {
+                offset = entry.value.parse().with_context(|| {
+                    format!(
+                        "tensor '{}': invalid external_data offset '{}'",
+                        t.name, entry.value
+                    )
+                })?
+            }
+            "length" => {
+                length = Some(entry.value.parse().with_context(|| {
+                    format!(
+                        "tensor '{}': invalid external_data length '{}'",
+                        t.name, entry.value
+                    )
+                })?)
+            }
+            _ => {}
+        }
+    }
+
+    let file_len = external_data.len() as u64;
+    let len = length.unwrap_or(file_len.saturating_sub(offset));
+
+    if offset + len > file_len {
+        anyhow::bail!(
+            "tensor '{}': external data offset + length exceeds buffer size",
+            t.name
+        );
+    }
+
+    let start = offset as usize;
+    let end = start + len as usize;
+    Ok(external_data[start..end].to_vec())
 }
 
 /// Extract raw bytes from a `TensorProto` (handles external data, `raw_data`, and typed fields).

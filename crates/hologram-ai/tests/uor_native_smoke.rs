@@ -24,7 +24,10 @@ fn compile_and_run(name: &str) {
         ..Default::default()
     };
     let archive = compiler
-        .compile(ModelSource::OnnxBytes(bytes))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: bytes,
+            external_data: None,
+        })
         .unwrap_or_else(|e| panic!("[{name}] compile failed: {e:#}"));
     assert!(!archive.bytes.is_empty(), "[{name}] empty archive");
 
@@ -91,7 +94,10 @@ fn gather_shape_const_folds_and_runs() {
         ..Default::default()
     };
     let archive = compiler
-        .compile(ModelSource::OnnxBytes(bytes))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: bytes,
+            external_data: None,
+        })
         .expect("gather_shape compile failed");
 
     let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load failed");
@@ -125,7 +131,10 @@ fn addressed_execution_matches_byte_execution() {
         ..Default::default()
     };
     let archive = compiler
-        .compile(ModelSource::OnnxBytes(bytes))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: bytes,
+            external_data: None,
+        })
         .expect("compile failed");
     let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load failed");
 

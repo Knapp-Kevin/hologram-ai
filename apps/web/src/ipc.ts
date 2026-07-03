@@ -1,4 +1,4 @@
-import { compile, compileSafetensors, generate as wasmGenerate, computeKappa } from "./holo";
+import { compile, compileSafetensors, compileOnnxWithData, generate as wasmGenerate, computeKappa } from "./holo";
 import { type GenOpts } from "./holo";
 
 export interface WorkspacePaths {
@@ -238,8 +238,7 @@ export async function downloadKnownModel(id: string): Promise<number> {
   while (infoAttempts < 3) {
     infoAttempts++;
     try {
-      const fetchOptions = (window as any).__HOLOSPACES_EXTENSION_INSTALLED__ ? { credentials: "include" as RequestCredentials } : undefined;
-      const response = await fetch(`https://huggingface.co/api/models/${model.hfId}`, fetchOptions);
+      const response = await fetch(`https://huggingface.co/api/models/${model.hfId}`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       info = await response.json();
       break;
@@ -263,7 +262,30 @@ export async function downloadKnownModel(id: string): Promise<number> {
   const companionNames = ["tokenizer.json", "config.json", "tokenizer_config.json", "special_tokens_map.json"];
   const companions = siblings.filter((f: any) => companionNames.includes(f.rfilename.split('/').pop()!));
 
-  const filesToDownload = [...(onnxFiles.length > 0 ? onnxFiles : safetensorsFiles), ...companions];
+  let selectedOnnxFiles: any[] = [];
+  if (onnxFiles.length > 0) {
+    // If there are multiple .onnx files, try to pick one intelligently (prefer 'cpu' or 'int4')
+    const mainOnnxFiles = onnxFiles.filter((f: any) => f.rfilename.endsWith('.onnx'));
+    let chosenMain = mainOnnxFiles[0];
+    for (const f of mainOnnxFiles) {
+      const name = f.rfilename.toLowerCase();
+      if (name.includes('cpu') || name.includes('int4')) {
+        chosenMain = f;
+        if (name.includes('cpu') && name.includes('int4')) break; // optimal for wasm
+      }
+    }
+    if (chosenMain) {
+      selectedOnnxFiles.push(chosenMain);
+      // Also grab its external data file if present
+      const expectedDataName = chosenMain.rfilename + '.data';
+      const dataFile = onnxFiles.find((f: any) => f.rfilename === expectedDataName || f.rfilename === chosenMain.rfilename + '_data');
+      if (dataFile) selectedOnnxFiles.push(dataFile);
+    } else {
+      selectedOnnxFiles = onnxFiles; // fallback
+    }
+  }
+
+  const filesToDownload = [...(selectedOnnxFiles.length > 0 ? selectedOnnxFiles : safetensorsFiles), ...companions];
   
   for (const file of filesToDownload) {
     const url = `https://huggingface.co/${model.hfId}/resolve/main/${file.rfilename}`;
@@ -274,8 +296,7 @@ export async function downloadKnownModel(id: string): Promise<number> {
     while (attempts < 3) {
       attempts++;
       try {
-        const fetchOptions = (window as any).__HOLOSPACES_EXTENSION_INSTALLED__ ? { credentials: "include" as RequestCredentials } : undefined;
-        response = await fetch(url, fetchOptions);
+        response = await fetch(url);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         break; // Success
       } catch (err) {
@@ -329,9 +350,9 @@ export async function downloadKnownModel(id: string): Promise<number> {
     emitLine("models://download-line", { stream: "stdout", line: `Saved ${file.rfilename}.` });
   }
   
-  emitLine("models://download-line", { stream: "stdout", line: `Download complete. Starting compilation...` });
+  emitLine("models://download-line", { stream: "stdout", line: `Download complete.` });
   
-  return await compileKnownModel(id);
+  return 0;
 }
 
 export async function compileKnownModel(id: string, specificOnnx?: string): Promise<number> {
@@ -347,10 +368,10 @@ export async function compileKnownModel(id: string, specificOnnx?: string): Prom
   const localDir = await modelsDir.getDirectoryHandle(localName);
   
   // Find the .onnx file recursively in localDir
-  async function findOnnx(dir: FileSystemDirectoryHandle): Promise<FileSystemFileHandle | null> {
+  async function findOnnx(dir: FileSystemDirectoryHandle): Promise<{ file: FileSystemFileHandle, parent: FileSystemDirectoryHandle } | null> {
     for await (const [name, handle] of (dir as any).entries()) {
       if (handle.kind === 'file' && name.endsWith('.onnx')) {
-        return handle as FileSystemFileHandle;
+        return { file: handle as FileSystemFileHandle, parent: dir };
       }
       if (handle.kind === 'directory') {
         const found = await findOnnx(handle as FileSystemDirectoryHandle);
@@ -375,24 +396,52 @@ export async function compileKnownModel(id: string, specificOnnx?: string): Prom
   }
 
   // Get a specific file handle by path relative to localDir
-  async function getSpecificFile(dir: FileSystemDirectoryHandle, path: string): Promise<FileSystemFileHandle> {
+  async function getSpecificFile(dir: FileSystemDirectoryHandle, path: string): Promise<{ file: FileSystemFileHandle, parent: FileSystemDirectoryHandle }> {
     const parts = path.split('/');
     const fileName = parts.pop()!;
     let currentDir = dir;
     for (const part of parts) {
       currentDir = await currentDir.getDirectoryHandle(part);
     }
-    return await currentDir.getFileHandle(fileName);
+    return { file: await currentDir.getFileHandle(fileName), parent: currentDir };
   }
   
-  const onnxHandle = specificOnnx ? await getSpecificFile(localDir, specificOnnx) : await findOnnx(localDir);
+  const onnxResult = specificOnnx ? await getSpecificFile(localDir, specificOnnx) : await findOnnx(localDir);
   let holoBytes: Uint8Array;
 
-  if (onnxHandle && onnxHandle.name.endsWith('.onnx')) {
+  if (onnxResult && onnxResult.file.name.endsWith('.onnx')) {
+    const onnxHandle = onnxResult.file;
+    const parentDir = onnxResult.parent;
     const onnxFile = await onnxHandle.getFile();
     const onnxBytes = new Uint8Array(await onnxFile.arrayBuffer());
-    emitLine("models://compile-line", { stream: "stdout", line: `Loaded ONNX (${onnxBytes.length} bytes). Compiling via wasm...` });
-    holoBytes = await compile(onnxBytes);
+    
+    // Check if there is an external data file
+    let externalDataBytes: Uint8Array | null = null;
+    try {
+      let dataHandle: FileSystemFileHandle | null = null;
+      try {
+        dataHandle = await parentDir.getFileHandle(`${onnxHandle.name}.data`);
+      } catch (e) {
+        try {
+          dataHandle = await parentDir.getFileHandle(`${onnxHandle.name}_data`);
+        } catch (e2) {}
+      }
+      
+      if (dataHandle) {
+        const dataFile = await dataHandle.getFile();
+        externalDataBytes = new Uint8Array(await dataFile.arrayBuffer());
+      }
+    } catch (e) {
+      // Ignore
+    }
+
+    if (externalDataBytes) {
+      emitLine("models://compile-line", { stream: "stdout", line: `Loaded ONNX (${onnxBytes.length} bytes) and external data (${externalDataBytes.length} bytes). Compiling via wasm...` });
+      holoBytes = await compileOnnxWithData(onnxBytes, externalDataBytes);
+    } else {
+      emitLine("models://compile-line", { stream: "stdout", line: `Loaded ONNX (${onnxBytes.length} bytes). Compiling via wasm...` });
+      holoBytes = await compile(onnxBytes);
+    }
   } else {
     const safetensorsHandles = await findAllSafetensors(localDir);
     if (safetensorsHandles.length === 0) {
@@ -401,7 +450,7 @@ export async function compileKnownModel(id: string, specificOnnx?: string): Prom
     
     emitLine("models://compile-line", { stream: "stdout", line: `Loaded ${safetensorsHandles.length} Safetensors shards. Reading config.json...` });
     const configHandle = await getSpecificFile(localDir, "config.json");
-    const configFile = await configHandle.getFile();
+    const configFile = await configHandle.file.getFile();
     const configText = await configFile.text();
     
     const shards: Uint8Array[] = [];

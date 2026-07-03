@@ -153,7 +153,10 @@ fn compile_populates_model_kappa_label() {
         ..Default::default()
     };
     let archive = compiler
-        .compile(ModelSource::OnnxBytes(bytes))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: bytes,
+            external_data: None,
+        })
         .expect("compile failed");
 
     assert_eq!(

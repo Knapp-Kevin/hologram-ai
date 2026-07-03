@@ -26,6 +26,7 @@ pub fn build_ai_graph(
     g: &GraphProto,
     graph_name: &str,
     model_dir: Option<&Path>,
+    external_data: Option<&[u8]>,
 ) -> anyhow::Result<(AiGraph, HashMap<TensorId, TensorInfo>)> {
     let mut next_tid: TensorId = 0;
     // name → TensorId mapping.
@@ -49,7 +50,7 @@ pub fn build_ai_graph(
     // ── Initializers (weights) ────────────────────────────────────────────
     for init in &g.initializer {
         let tid = alloc_tid(&init.name, &mut name_to_tid);
-        match tensor_to_param(init, model_dir) {
+        match tensor_to_param(init, model_dir, external_data) {
             Ok((param, info)) => {
                 tensor_info.insert(tid, info);
                 params.insert(tid, param);
@@ -1137,7 +1138,7 @@ pub fn build_ai_graph(
             if let Some(tensor_attr) = n.attribute.iter().find(|a| a.name == "value") {
                 if let Some(ref tensor_proto) = tensor_attr.t {
                     if let Some(&out_tid) = output_tids.first() {
-                        match tensor_to_param(tensor_proto, model_dir) {
+                        match tensor_to_param(tensor_proto, model_dir, external_data) {
                             Ok((param, info)) => {
                                 tensor_info.insert(out_tid, info);
                                 params.insert(out_tid, param);
@@ -1198,6 +1199,7 @@ pub fn build_ai_graph(
                 &mut subgraphs,
                 &mut warnings,
                 model_dir,
+                external_data,
             );
             // Rewrite placeholder branch names to actual subgraph keys.
             if let Some(node) = nodes.last_mut() {
@@ -1753,6 +1755,7 @@ fn import_subgraph_attrs(
     subgraphs: &mut HashMap<String, AiGraph>,
     warnings: &mut Vec<ImportWarning>,
     model_dir: Option<&Path>,
+    external_data: Option<&[u8]>,
 ) {
     let branch_attrs: Vec<(&str, &str)> = match op_type {
         "If" => vec![
@@ -1767,7 +1770,7 @@ fn import_subgraph_attrs(
     for (attr_name, key_prefix) in branch_attrs {
         if let Some(graph_proto) = ctx.attr_g(attr_name) {
             let subgraph_key = format!("{key_prefix}_{node_id}");
-            match build_ai_graph(graph_proto, &subgraph_key, model_dir) {
+            match build_ai_graph(graph_proto, &subgraph_key, model_dir, external_data) {
                 Ok((child_graph, _oracle)) => {
                     tracing::debug!(
                         node_id,

@@ -34,7 +34,21 @@ fn err(e: impl std::fmt::Display) -> JsValue {
 #[wasm_bindgen]
 pub fn compile(onnx: &[u8]) -> Result<Vec<u8>, JsValue> {
     let archive = ModelCompiler::default()
-        .compile(ModelSource::OnnxBytes(onnx.to_vec()))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: onnx.to_vec(),
+            external_data: None,
+        })
+        .map_err(|e| err(format!("compile: {e:#}")))?;
+    Ok(archive.bytes)
+}
+
+#[wasm_bindgen]
+pub fn compile_onnx_with_data(onnx: &[u8], external_data_bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
+    let archive = ModelCompiler::default()
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: onnx.to_vec(),
+            external_data: Some(external_data_bytes.to_vec()),
+        })
         .map_err(|e| err(format!("compile: {e:#}")))?;
     Ok(archive.bytes)
 }

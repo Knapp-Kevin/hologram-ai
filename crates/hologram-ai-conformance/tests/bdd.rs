@@ -75,7 +75,7 @@ async fn when_holo_execute(w: &mut HologramWorld) {
 
     // Import to graph first to get original node count
     let ai_graph =
-        hologram_ai_onnx::import_onnx(&model, Default::default()).expect("import failed");
+        hologram_ai_onnx::import_onnx(&model, None, Default::default()).expect("import failed");
     w.original_node_count = ai_graph.nodes.len();
 
     let archive = ModelCompiler {

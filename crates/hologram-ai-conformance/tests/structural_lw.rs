@@ -39,7 +39,10 @@ use hologram_ai_conformance::ort_runner::onnx_builder;
 fn run_unary(op: &'static str, x: &[f32]) -> Vec<f32> {
     let bytes = onnx_builder::unary_op(op, x.len());
     let archive = ModelCompiler::default()
-        .compile(ModelSource::OnnxBytes(bytes))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: bytes,
+            external_data: None,
+        })
         .unwrap_or_else(|e| panic!("compile {op}: {e}"));
     let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load");
     let x_bytes: &[u8] = bytemuck::cast_slice(x);
@@ -52,7 +55,10 @@ fn run_binary(op: &'static str, a: &[f32], b: &[f32]) -> Vec<f32> {
     assert_eq!(a.len(), b.len());
     let bytes = onnx_builder::binary_op(op, a.len());
     let archive = ModelCompiler::default()
-        .compile(ModelSource::OnnxBytes(bytes))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: bytes,
+            external_data: None,
+        })
         .unwrap_or_else(|e| panic!("compile {op}: {e}"));
     let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load");
     let ab: &[u8] = bytemuck::cast_slice(a);
@@ -202,7 +208,10 @@ fn lw_2_matmul_matches_f64_reference() {
 
     let bytes = onnx_builder::matmul(m, k, n);
     let archive = ModelCompiler::default()
-        .compile(ModelSource::OnnxBytes(bytes))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: bytes,
+            external_data: None,
+        })
         .expect("matmul compile");
     let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load");
     let ab: &[u8] = bytemuck::cast_slice(&a);
@@ -236,7 +245,10 @@ fn lw_2_softmax_normalizes_to_one() {
         .collect();
     let bytes = onnx_builder::softmax(rows, size);
     let archive = ModelCompiler::default()
-        .compile(ModelSource::OnnxBytes(bytes))
+        .compile(ModelSource::OnnxBytes {
+            model_bytes: bytes,
+            external_data: None,
+        })
         .expect("softmax compile");
     let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load");
     let xb: &[u8] = bytemuck::cast_slice(&x);

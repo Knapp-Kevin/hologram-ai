@@ -43,7 +43,10 @@ fn mini_transformer_matches_ort() {
         seq_len_override: Some(seq as u64),
         ..Default::default()
     }
-    .compile(ModelSource::OnnxBytes(model.clone()))
+    .compile(ModelSource::OnnxBytes {
+        model_bytes: model.clone(),
+        external_data: None,
+    })
     .expect("hologram-ai compile failed");
     let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load failed");
     let out = runner
