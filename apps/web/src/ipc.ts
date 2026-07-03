@@ -336,10 +336,7 @@ export async function streamSafetensorsForCompile(url: string, fileName: string)
           results.dtypes.push(tensor.meta.dtype);
           currentTensorIdx++;
           if (currentTensorIdx < tensors.length) {
-            currentHasher.free();
             currentHasher = new KappaHasher();
-          } else {
-            currentHasher.free();
           }
         }
       } else {
