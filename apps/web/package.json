@@ -8,6 +8,7 @@
     "wasm": "wasm-pack build ../../crates/hologram-ai-wasm --target web --out-dir ../../apps/web/src/wasm --release",
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test": "vitest run --browser.headless",
     "preview": "vite preview"
   },
   "dependencies": {

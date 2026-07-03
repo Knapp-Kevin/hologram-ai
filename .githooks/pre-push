@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -e
+
+echo "Running pre-push hook..."
+
+echo "1. Checking rust formatting..."
+cargo fmt --all -- --check
+
+echo "2. Running rust clippy..."
+cargo clippy --workspace --tests --bins --exclude hologram-ai-desktop -- -D warnings
+
+echo "3. Running rust tests..."
+cargo test --workspace --exclude hologram-ai-desktop
+
+echo "4. Building web app..."
+cd apps/web
+pnpm install
+pnpm run build
+
+echo "5. Running web app tests..."
+pnpm run test
+
+echo "Pre-push checks passed successfully!"
