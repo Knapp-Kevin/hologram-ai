@@ -413,7 +413,19 @@ export async function compileKnownModel(id: string, specificOnnx?: string): Prom
     const onnxHandle = onnxResult.file;
     const parentDir = onnxResult.parent;
     const onnxFile = await onnxHandle.getFile();
-    const onnxBytes = new Uint8Array(await onnxFile.arrayBuffer());
+    if (onnxFile.size > 2 * 1024 * 1024 * 1024) {
+      throw new Error(`Model is too large (${(onnxFile.size / 1024 / 1024 / 1024).toFixed(1)}GB) to compile in the browser due to WebAssembly 32-bit memory limits (max 2-4GB). Please use the hologram-ai desktop or CLI for models larger than 2GB, or use a smaller/quantized model.`);
+    }
+    
+    let onnxBytes: Uint8Array;
+    try {
+      onnxBytes = new Uint8Array(await onnxFile.arrayBuffer());
+    } catch (err: any) {
+      if (err.name === 'NotReadableError') {
+        throw new Error(`Failed to read ONNX file into memory (file too large for browser ArrayBuffer). Please use a smaller model or the desktop CLI.`);
+      }
+      throw err;
+    }
     
     // Check if there is an external data file
     let externalDataBytes: Uint8Array | null = null;
@@ -429,7 +441,15 @@ export async function compileKnownModel(id: string, specificOnnx?: string): Prom
       
       if (dataHandle) {
         const dataFile = await dataHandle.getFile();
-        externalDataBytes = new Uint8Array(await dataFile.arrayBuffer());
+        if (dataFile.size > 2 * 1024 * 1024 * 1024 || (onnxFile.size + dataFile.size) > 2.5 * 1024 * 1024 * 1024) {
+           throw new Error(`Model with external data is too large to compile in the browser due to WebAssembly limits. Please use the desktop CLI.`);
+        }
+        try {
+          externalDataBytes = new Uint8Array(await dataFile.arrayBuffer());
+        } catch (err: any) {
+          if (err.name === 'NotReadableError') throw new Error(`Failed to read ONNX external data into memory (too large).`);
+          throw err;
+        }
       }
     } catch (e) {
       // Ignore
@@ -454,9 +474,27 @@ export async function compileKnownModel(id: string, specificOnnx?: string): Prom
     const configText = await configFile.text();
     
     const shards: Uint8Array[] = [];
+    let totalBytes = 0;
     for (const stHandle of safetensorsHandles) {
       const stFile = await stHandle.getFile();
-      shards.push(new Uint8Array(await stFile.arrayBuffer()));
+      totalBytes += stFile.size;
+    }
+    
+    // WASM32 has a strict 4GB memory limit. ArrayBuffer in V8 often fails >2GB.
+    if (totalBytes > 2 * 1024 * 1024 * 1024) {
+      throw new Error(`Model is too large (${(totalBytes / 1024 / 1024 / 1024).toFixed(1)}GB) to compile in the browser due to WebAssembly 32-bit memory limits (max 2-4GB). Please use the hologram-ai desktop or CLI for models larger than 2GB, or use a smaller/quantized model.`);
+    }
+
+    for (const stHandle of safetensorsHandles) {
+      const stFile = await stHandle.getFile();
+      try {
+        shards.push(new Uint8Array(await stFile.arrayBuffer()));
+      } catch (err: any) {
+        if (err.name === 'NotReadableError') {
+          throw new Error(`Failed to read Safetensors shard into memory (file too large for browser ArrayBuffer). Please use a smaller model or the desktop CLI.`);
+        }
+        throw err;
+      }
     }
     
     holoBytes = await compileSafetensors(configText, shards);
