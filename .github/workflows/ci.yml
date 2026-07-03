@@ -63,13 +63,13 @@ jobs:
       # available on ubuntu-latest by default. Its build/test is exercised
       # by the dedicated macOS release-desktop workflow.
       - name: Clippy
-        run: cargo clippy --workspace --tests --bins --exclude hologram-ai-desktop -- -D warnings
+        run: cargo clippy --workspace --tests --bins -- -D warnings
 
       - name: Build
-        run: cargo build --workspace --tests --bins --exclude hologram-ai-desktop
+        run: cargo build --workspace --tests --bins
 
       - name: Unit tests
-        run: cargo test --workspace --exclude hologram-ai-desktop
+        run: cargo test --workspace
 
   structural:
     name: Structural V&V (CE/ZA/ZM/CF/LW/IM)
