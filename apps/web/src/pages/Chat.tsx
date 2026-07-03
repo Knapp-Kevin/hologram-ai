@@ -142,7 +142,7 @@ export function Chat() {
   const [archive, setArchive] = useState<string>("");
   const [knownModels, setKnownModels] = useState<KnownModelStatus[]>([]);
   const [prompt, setPrompt] = useState("");
-  const [maxTokens, setMaxTokens] = useState(512);
+
   const [temperature, setTemperature] = useState(0.7);
   const [running, setRunning] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -230,7 +230,7 @@ export function Chat() {
       await generate({
         archive,
         prompt: promptForModel,
-        maxTokens,
+        maxTokens: 8192,
         temperature,
         stop: stopStrings,
         promptTemplate: selectedKnown?.promptTemplate ?? undefined,
@@ -273,16 +273,6 @@ export function Chat() {
               </option>
             ))}
           </select>
-          <input
-            type="number"
-            value={maxTokens}
-            min={1}
-            max={4096}
-            onChange={(e) => setMaxTokens(Number(e.target.value))}
-            style={{ width: 80 }}
-            disabled={running}
-            title="max tokens"
-          />
           <input
             type="number"
             value={temperature}

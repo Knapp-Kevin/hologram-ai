@@ -1,4 +1,4 @@
-import { compile, generate as wasmGenerate } from "./holo";
+import { compile, generate as wasmGenerate, computeKappa } from "./holo";
 import { type GenOpts } from "./holo";
 
 export interface WorkspacePaths {
@@ -99,14 +99,6 @@ async function getOpfsDir() {
   return await navigator.storage.getDirectory();
 }
 
-async function getOpfsFileIfExists(dir: FileSystemDirectoryHandle, name: string): Promise<FileSystemFileHandle | null> {
-  try {
-    return await dir.getFileHandle(name);
-  } catch {
-    return null;
-  }
-}
-
 async function getOpfsDirIfExists(dir: FileSystemDirectoryHandle, name: string): Promise<FileSystemDirectoryHandle | null> {
   try {
     return await dir.getDirectoryHandle(name);
@@ -163,14 +155,20 @@ export async function listKnownModels(): Promise<KnownModelStatus[]> {
       async function hasOnnx(dir: FileSystemDirectoryHandle): Promise<boolean> {
         // @ts-ignore
         for await (const [name, handle] of dir.entries()) {
-          if (handle.kind === 'file' && name.endsWith('.onnx')) return true;
+          if (handle.kind === 'file' && (name.endsWith('.onnx') || name.endsWith('.safetensors'))) return true;
           if (handle.kind === 'directory' && await hasOnnx(handle as FileSystemDirectoryHandle)) return true;
         }
         return false;
       }
       downloaded = await hasOnnx(localDir);
-      if (await getOpfsFileIfExists(localDir, `${model.id}.holo`)) {
-        compiledArchive = `models/${localName}/${model.id}.holo`;
+      
+      // Find the compiled archive by looking for any .holo file (kappa cache collapse)
+      // @ts-ignore
+      for await (const [childName, childHandle] of localDir.entries()) {
+        if (childHandle.kind === 'file' && childName.endsWith('.holo')) {
+          compiledArchive = `models/${localName}/${childName}`;
+          break;
+        }
       }
     }
     
@@ -221,59 +219,106 @@ function emitLine(event: string, line: ProcessLine) {
   addLog(line.stream === "stderr" ? "error" : "info", event, line.line);
 }
 
+export async function fetchViaExtension(url: string): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    // @ts-ignore
+    if (typeof chrome === "undefined" || !chrome.runtime) {
+      return reject(new Error("Chrome extension not available. Please install the holospaces egress extension."));
+    }
+    // @ts-ignore
+    const port = chrome.runtime.connect("dpglhmgmgahapmncpldmchmllfnkkcjf", { name: "holospaces-content" });
+    const id = Math.floor(Math.random() * 1000000);
+    const chunks: Uint8Array[] = [];
+    let totalLen = 0;
+    
+    port.onMessage.addListener((msg: any) => {
+      if (msg.id !== id) return;
+      if (msg.type === "head") {
+        if (msg.status >= 400) reject(new Error(`HTTP ${msg.status}`));
+      } else if (msg.type === "chunk") {
+        chunks.push(new Uint8Array(msg.bytes));
+        totalLen += msg.bytes.length;
+      } else if (msg.type === "end") {
+        const full = new Uint8Array(totalLen);
+        let offset = 0;
+        for (const c of chunks) {
+          full.set(c, offset);
+          offset += c.length;
+        }
+        resolve(full);
+      } else if (msg.type === "error") {
+        reject(new Error(msg.error));
+      }
+    });
+    
+    port.postMessage({ type: "fetch", id, url, method: "GET" });
+  });
+}
+
 export async function downloadKnownModel(id: string): Promise<number> {
   const catalogue = getCatalogue();
   const model = catalogue.find(m => m.id === id);
   if (!model) throw new Error("Unknown model");
   
-  emitLine("models://download-line", { stream: "stdout", line: `Downloading ${model.hfId} from HuggingFace...` });
+  emitLine("models://download-line", { stream: "stdout", line: `Downloading ${model.hfId} from HuggingFace via holospaces extension...` });
   
   const localName = model.hfId.split("/").pop() || model.hfId;
   const root = await getOpfsDir();
   const modelsDir = await root.getDirectoryHandle("models", { create: true });
   const localDir = await modelsDir.getDirectoryHandle(localName, { create: true });
   
-  const infoRes = await fetch(`https://huggingface.co/api/models/${model.hfId}`);
-  if (!infoRes.ok) throw new Error(`Failed to fetch model info: ${infoRes.statusText}`);
-  const info = await infoRes.json();
+  let info: any;
+  try {
+    const infoBytes = await fetchViaExtension(`https://huggingface.co/api/models/${model.hfId}`);
+    const infoText = new TextDecoder().decode(infoBytes);
+    info = JSON.parse(infoText);
+  } catch (err) {
+    throw new Error(`Failed to fetch model info: ${err}`);
+  }
   const siblings = info.siblings || [];
   
   const onnxFiles = siblings.filter((f: any) => f.rfilename.endsWith('.onnx') || f.rfilename.endsWith('.onnx_data') || f.rfilename.endsWith('.onnx.data'));
-  if (onnxFiles.length === 0) {
-    throw new Error(`No ONNX export found in repository. The web version requires pre-exported models.`);
+  const safetensorsFiles = siblings.filter((f: any) => f.rfilename.endsWith('.safetensors'));
+  
+  if (onnxFiles.length === 0 && safetensorsFiles.length === 0) {
+    throw new Error(`No ONNX or Safetensors export found in repository. The web version requires pre-exported or Safetensors models.`);
   }
 
   const companionNames = ["tokenizer.json", "config.json", "tokenizer_config.json", "special_tokens_map.json"];
   const companions = siblings.filter((f: any) => companionNames.includes(f.rfilename.split('/').pop()!));
 
-  const filesToDownload = [...onnxFiles, ...companions];
+  const filesToDownload = [...(onnxFiles.length > 0 ? onnxFiles : safetensorsFiles), ...companions];
   
   for (const file of filesToDownload) {
     const url = `https://huggingface.co/${model.hfId}/resolve/main/${file.rfilename}`;
     emitLine("models://download-line", { stream: "stdout", line: `Fetching ${url}...` });
     
-    const res = await fetch(url);
-    if (!res.ok) {
-      throw new Error(`Failed to fetch ${file.rfilename}: ${res.statusText}`);
+    let buffer: Uint8Array;
+    try {
+      buffer = await fetchViaExtension(url);
+    } catch (err) {
+      throw new Error(`Failed to fetch ${file.rfilename}: ${err}`);
     }
     
-    // Create subdirectories if necessary (OPFS requires creating directories one by one)
+    // Write to OPFS
     const parts = file.rfilename.split('/');
-    const fileName = parts.pop()!;
     let currentDir = localDir;
-    for (const part of parts) {
-      currentDir = await currentDir.getDirectoryHandle(part, { create: true });
+    for (let i = 0; i < parts.length - 1; i++) {
+      currentDir = await currentDir.getDirectoryHandle(parts[i], { create: true });
     }
-
-    const fileHandle = await currentDir.getFileHandle(fileName, { create: true });
-    const writable = await fileHandle.createWritable();
-    await res.body!.pipeTo(writable);
+    const fileName = parts[parts.length - 1];
+    
+    const handle = await currentDir.getFileHandle(fileName, { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(buffer as any);
+    await writable.close();
     
     emitLine("models://download-line", { stream: "stdout", line: `Saved ${file.rfilename}.` });
   }
   
-  emitLine("models://download-line", { stream: "stdout", line: `Download complete.` });
-  return 0;
+  emitLine("models://download-line", { stream: "stdout", line: `Download complete. Starting compilation...` });
+  
+  return await compileKnownModel(id);
 }
 
 export async function compileKnownModel(id: string, specificOnnx?: string): Promise<number> {
@@ -291,7 +336,7 @@ export async function compileKnownModel(id: string, specificOnnx?: string): Prom
   // Find the .onnx file recursively in localDir
   async function findOnnx(dir: FileSystemDirectoryHandle): Promise<FileSystemFileHandle | null> {
     for await (const [name, handle] of (dir as any).entries()) {
-      if (handle.kind === 'file' && name.endsWith('.onnx')) {
+      if (handle.kind === 'file' && (name.endsWith('.onnx') || name.endsWith('.safetensors'))) {
         return handle as FileSystemFileHandle;
       }
       if (handle.kind === 'directory') {
@@ -323,12 +368,15 @@ export async function compileKnownModel(id: string, specificOnnx?: string): Prom
   
   const holoBytes = await compile(onnxBytes);
   
-  const holoHandle = await localDir.getFileHandle(`${model.id}.holo`, { create: true });
+  const kappa = await computeKappa(holoBytes);
+  const holoName = `${kappa}.holo`;
+  
+  const holoHandle = await localDir.getFileHandle(holoName, { create: true });
   const writable = await holoHandle.createWritable();
   await writable.write(holoBytes as any);
   await writable.close();
   
-  emitLine("models://compile-line", { stream: "stdout", line: `Compiled and saved to ${model.id}.holo (${holoBytes.length} bytes).` });
+  emitLine("models://compile-line", { stream: "stdout", line: `Compiled and saved to ${holoName} (${holoBytes.length} bytes).` });
   
   return 0;
 }

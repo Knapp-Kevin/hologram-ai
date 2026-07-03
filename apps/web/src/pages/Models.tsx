@@ -78,10 +78,10 @@ export function Models() {
     setTail([]);
     try {
       const q = encodeURIComponent(searchQuery.trim());
-      // Parametric search for models with ONNX exports
+      // Parametric search for models
       const [res1, res2] = await Promise.all([
-        fetch(`https://huggingface.co/api/models?search=${q}&filter=onnx&sort=downloads&direction=-1&limit=10`),
-        fetch(`https://huggingface.co/api/models?search=${q}%20onnx&filter=onnx&sort=downloads&direction=-1&limit=10`)
+        fetch(`https://huggingface.co/api/models?search=${q}&sort=downloads&direction=-1&limit=10`),
+        fetch(`https://huggingface.co/api/models?search=${q}%20safetensors&sort=downloads&direction=-1&limit=10`)
       ]);
       if (!res1.ok || !res2.ok) throw new Error(`Search failed`);
       
@@ -157,6 +157,11 @@ export function Models() {
           Models are stored in <code>{paths?.modelsDir ?? "models/"}</code> and compiled to a{" "}
           <code>.holo</code> archive for WebAssembly execution.
         </p>
+
+        <div style={{ background: "var(--bg-accent)", padding: 12, borderRadius: 6, marginBottom: 16 }}>
+          <strong style={{ display: "block", marginBottom: 4 }}>Notice: Egress Extension Required</strong>
+          <span style={{ fontSize: 13 }}>To download arbitrary models directly from HuggingFace in the browser, you must install the <a href="https://github.com/Hologram-Technologies/holospaces" target="_blank" style={{ color: "var(--fg)" }}>Holospaces Egress Extension</a> for Chrome.</span>
+        </div>
 
         <div style={{ marginBottom: 16, display: "flex", gap: 8 }}>
           <input

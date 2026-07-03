@@ -7,6 +7,7 @@ import init, {
   run as wasmRun,
   compile as wasmCompile,
   generate as wasmGenerate,
+  compute_kappa as wasmComputeKappa,
 } from "./wasm/hologram_ai_wasm.js";
 
 export interface Port {
@@ -59,6 +60,12 @@ export async function run(
 export async function compile(onnx: Uint8Array): Promise<Uint8Array> {
   await ensureReady();
   return wasmCompile(onnx);
+}
+
+/** Compute the holospaces Kappa label for a byte array. */
+export async function computeKappa(bytes: Uint8Array): Promise<string> {
+  await ensureReady();
+  return wasmComputeKappa(bytes);
 }
 
 /** Generation options (all optional). */

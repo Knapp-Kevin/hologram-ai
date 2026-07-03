@@ -39,6 +39,11 @@ pub fn compile(onnx: &[u8]) -> Result<Vec<u8>, JsValue> {
     Ok(archive.bytes)
 }
 
+#[wasm_bindgen]
+pub fn compute_kappa(bytes: &[u8]) -> String {
+    holospaces::address(bytes).as_str().to_string()
+}
+
 // ── describe ────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize)]
@@ -412,5 +417,13 @@ mod tests {
         // Deterministic (greedy).
         let opts2 = serde_wasm_bindgen::to_value(&serde_json::json!({"max_tokens": 3})).unwrap();
         assert_eq!(generate(&holo, None, "a", opts2).unwrap(), out);
+    }
+
+    #[wasm_bindgen_test]
+    fn compute_kappa_works() {
+        let bytes = b"hello world";
+        let expected = holospaces::address(bytes).as_str().to_string();
+        let result = compute_kappa(bytes);
+        assert_eq!(result, expected);
     }
 }

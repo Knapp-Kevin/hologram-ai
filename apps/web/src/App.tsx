@@ -43,6 +43,8 @@ export function App() {
       <h1>hologram-ai · browser</h1>
       <p style={{ color: "#555" }}>
         The real compile/run pipeline, client-side via WebAssembly. Load a compiled <code>.holo</code> and run it.
+        <br/><br/>
+        <strong>Note:</strong> To download models, please download and install the <a href="/extension.zip" download>holospaces egress extension</a> (load unpacked).
       </p>
 
       <section>
