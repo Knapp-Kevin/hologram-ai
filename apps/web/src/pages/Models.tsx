@@ -77,14 +77,25 @@ export function Models() {
     setIsSearching(true);
     setTail([]);
     try {
-      // Query HuggingFace catalog for ONNX models matching the query
-      const url = `https://huggingface.co/api/models?search=${encodeURIComponent(searchQuery.trim())}&sort=downloads&direction=-1&limit=10`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`Search failed: ${res.statusText}`);
-      const data = await res.json();
-      setSearchResults(data);
+      const q = encodeURIComponent(searchQuery.trim());
+      // Parametric search for models with ONNX exports
+      const [res1, res2] = await Promise.all([
+        fetch(`https://huggingface.co/api/models?search=${q}&filter=onnx&sort=downloads&direction=-1&limit=10`),
+        fetch(`https://huggingface.co/api/models?search=${q}%20onnx&filter=onnx&sort=downloads&direction=-1&limit=10`)
+      ]);
+      if (!res1.ok || !res2.ok) throw new Error(`Search failed`);
+      
+      const data1 = await res1.json();
+      const data2 = await res2.json();
+      
+      // Merge and deduplicate
+      const merged = [...data1, ...data2];
+      const unique = Array.from(new Map(merged.map(item => [item.id, item])).values());
+      unique.sort((a, b) => b.downloads - a.downloads);
+      
+      setSearchResults(unique.slice(0, 10));
     } catch (e) {
-      setTail((t) => [...t, `error: ${String(e)}`]);
+      setTail((t) => [...t, `search error: ${String(e)}`]);
     } finally {
       setIsSearching(false);
     }
