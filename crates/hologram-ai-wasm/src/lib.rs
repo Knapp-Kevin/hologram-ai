@@ -75,8 +75,106 @@ pub fn compile_safetensors(
 }
 
 #[wasm_bindgen]
+pub fn compile_safetensors_streamed(
+    config_json: &str,
+    keys_js: &js_sys::Array,
+    kappas_js: &js_sys::Array,
+    tensor_shapes_js: &js_sys::Array,
+    tensor_dtypes_js: &js_sys::Array,
+) -> Result<Vec<u8>, JsValue> {
+    let mut keys = Vec::new();
+    let mut kappas = Vec::new();
+    let mut shapes = Vec::new();
+    let mut dtypes = Vec::new();
+    for i in 0..keys_js.length() {
+        let key = keys_js.get(i).as_string().unwrap();
+        let kappa = kappas_js.get(i).as_string().unwrap();
+        let shape_str = tensor_shapes_js.get(i).as_string().unwrap();
+        let dtype_str = tensor_dtypes_js.get(i).as_string().unwrap();
+
+        let shape: Vec<u64> = serde_json::from_str(&shape_str).unwrap();
+
+        let dtype = match dtype_str.as_str() {
+            "F32" => hologram_ai_common::DType::F32,
+            "F16" => hologram_ai_common::DType::F16,
+            "I64" | "INT64" => hologram_ai_common::DType::INT64,
+            "I32" | "INT32" => hologram_ai_common::DType::INT32,
+            _ => hologram_ai_common::DType::F16,
+        };
+
+        keys.push(key);
+        kappas.push(kappa);
+        shapes.push(shape);
+        dtypes.push(dtype);
+    }
+
+    let config: serde_json::Value =
+        serde_json::from_str(config_json).map_err(|e| err(e.to_string()))?;
+    let mut graph =
+        hologram_ai_safetensors::parametric::build_parametric_graph_from_keys(&config, &keys)
+            .map_err(|e| err(e.to_string()))?;
+
+    // Inject AiParam::External for each key so the compiled `.holo` has the `holospaces.kappa_map`.
+    // The parametric compiler doesn't add parameters, so we add them here.
+    let next_id = graph.tensor_names.keys().max().copied().unwrap_or(0) + 1;
+    for (i, key) in keys.iter().enumerate() {
+        let id = next_id + i as u32;
+
+        graph.tensor_names.insert(id, key.clone());
+        let info = hologram_ai_common::TensorInfo::new(
+            dtypes[i],
+            hologram_ai_common::shape_from_concrete(&shapes[i]),
+        );
+        graph.tensor_info.insert(id, info.clone());
+        graph.params.insert(
+            id,
+            hologram_ai_common::AiParam::External {
+                kappa: kappas[i].clone(),
+                info,
+            },
+        );
+    }
+
+    let archive = ModelCompiler::default()
+        .compile(ModelSource::AiGraph(graph))
+        .map_err(|e| err(format!("compile_safetensors_streamed: {e:#}")))?;
+
+    Ok(archive.bytes)
+}
+
+#[wasm_bindgen]
 pub fn compute_kappa(bytes: &[u8]) -> String {
     holospaces::address(bytes).as_str().to_string()
+}
+
+#[wasm_bindgen]
+pub struct KappaHasher {
+    hasher: blake3::Hasher,
+}
+
+impl Default for KappaHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[wasm_bindgen]
+impl KappaHasher {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            hasher: blake3::Hasher::new(),
+        }
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.hasher.update(bytes);
+    }
+
+    pub fn finalize(self) -> String {
+        let hash = self.hasher.finalize();
+        format!("blake3:{}", hash.to_hex())
+    }
 }
 
 // ── describe ────────────────────────────────────────────────────────────────
@@ -286,6 +384,7 @@ pub fn generate(
     tokenizer_json: Option<Vec<u8>>,
     prompt: &str,
     opts: JsValue,
+    callback: Option<js_sys::Function>,
 ) -> Result<String, JsValue> {
     let opts: GenOpts = if opts.is_undefined() || opts.is_null() {
         GenOpts::default()
@@ -314,12 +413,35 @@ pub fn generate(
     };
     let templated = apply_template(opts.prompt_template.as_deref(), prompt);
 
+    struct CallbackSink<'a> {
+        buffer: Vec<u8>,
+        callback: Option<&'a js_sys::Function>,
+    }
+
+    impl<'a> std::io::Write for CallbackSink<'a> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.buffer.extend_from_slice(buf);
+            if let Some(cb) = self.callback {
+                if let Ok(s) = String::from_utf8(self.buffer.clone()) {
+                    let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(&s));
+                }
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     // A precompiled `.holo` is a fixed-window session.
     let mut session = FixedSession::new(runner);
-    let mut sink: Vec<u8> = Vec::new();
+    let mut sink = CallbackSink {
+        buffer: Vec::new(),
+        callback: callback.as_ref(),
+    };
     generate_stream(&mut session, &tokenizer, &templated, &cfg, &mut sink)
         .map_err(|e| err(format!("generate: {e:#}")))?;
-    String::from_utf8(sink).map_err(err)
+    String::from_utf8(sink.buffer).map_err(err)
 }
 
 #[cfg(test)]
@@ -443,7 +565,7 @@ mod tests {
         // embedded tokenizer and runs the real loop entirely in the browser.
         let holo = lm_with_tokenizer();
         let opts = serde_wasm_bindgen::to_value(&serde_json::json!({"max_tokens": 3})).unwrap();
-        let out = generate(&holo, None, "a", opts).unwrap();
+        let out = generate(&holo, None, "a", opts, None).unwrap();
         // Every step argmaxes to token 1 ("a") ⇒ output is all 'a', non-empty.
         assert!(
             !out.is_empty() && out.chars().all(|c| c == 'a'),
@@ -451,7 +573,7 @@ mod tests {
         );
         // Deterministic (greedy).
         let opts2 = serde_wasm_bindgen::to_value(&serde_json::json!({"max_tokens": 3})).unwrap();
-        assert_eq!(generate(&holo, None, "a", opts2).unwrap(), out);
+        assert_eq!(generate(&holo, None, "a", opts2, None).unwrap(), out);
     }
 
     #[wasm_bindgen_test]

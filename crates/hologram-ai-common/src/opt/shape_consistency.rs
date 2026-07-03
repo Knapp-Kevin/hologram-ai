@@ -85,6 +85,16 @@ fn check_param_shapes(graph: &AiGraph, errors: &mut Vec<ShapeError>) {
         let actual_bytes = match param {
             crate::ir::param::AiParam::Inline { data, .. } => data.len() as u64,
             crate::ir::param::AiParam::Mmap { len, .. } => *len,
+            crate::ir::param::AiParam::External { info, .. } => {
+                info.shape
+                    .iter()
+                    .map(|d| match d {
+                        crate::ir::Dim::Concrete(n) => *n,
+                        _ => 1,
+                    })
+                    .product::<u64>()
+                    * info.logical_dtype.byte_size().unwrap_or(0) as u64
+            }
         };
 
         if expected_bytes > 0 && actual_bytes > 0 && expected_bytes != actual_bytes {

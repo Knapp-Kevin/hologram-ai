@@ -12,3 +12,8 @@ Feature: Arbitrary Models
     Given the external authoritative ONNX fixture "mlp"
     When the fixture is compiled and executed via the holographic compiler
     Then the outputs must exactly match the ONNX Runtime authoritative execution
+
+  Scenario: Streamed safetensors compilation
+    Given an arbitrary model name "test_safetensors"
+    When the safetensors metadata is streamed to the holographic compiler
+    Then the compiled holographic archive must contain external parameter mappings

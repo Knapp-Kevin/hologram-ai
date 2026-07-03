@@ -218,6 +218,8 @@ impl<'a> Ctx<'a> {
     }
 
     fn emit_params(&mut self) -> Result<()> {
+        let mut kappa_map = String::new();
+
         // Deterministic order for reproducible content addresses.
         let mut params: Vec<TensorId> = self.ai.params.keys().copied().collect();
         params.sort_unstable();
@@ -235,7 +237,17 @@ impl<'a> Ctx<'a> {
                 shape,
             });
             self.tid_to_src.insert(tid, InputSource::Constant(cid));
+
+            if let AiParam::External { kappa, .. } = param {
+                kappa_map.push_str(&format!("{:?}:{kappa}\n", cid));
+            }
         }
+
+        if !kappa_map.is_empty() {
+            self.graph
+                .add_extension("holospaces.kappa_map", kappa_map.into_bytes());
+        }
+
         Ok(())
     }
 
@@ -2073,6 +2085,12 @@ fn param_bytes(param: &AiParam) -> Result<(Vec<u8>, TensorInfo)> {
             let mut buf = vec![0u8; *len as usize];
             f.read_exact(&mut buf)?;
             Ok((buf, info.clone()))
+        }
+        AiParam::External { info, .. } => {
+            // Bytes are not stored locally; the holospaces runtime resolves it.
+            // We return an empty buffer. Hologram's compiler supports 0-byte constants
+            // if we serialize the kappa mapping into an extension block.
+            Ok((Vec::new(), info.clone()))
         }
     }
 }

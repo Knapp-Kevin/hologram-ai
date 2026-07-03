@@ -68,6 +68,7 @@ fn read_i64_param(
     let (data, info) = match param {
         AiParam::Inline { data, info } => (data.as_slice(), info),
         AiParam::Mmap { .. } => return None, // Can't read mmap at compile time easily
+        AiParam::External { .. } => return None,
     };
     if data.is_empty() {
         return None;

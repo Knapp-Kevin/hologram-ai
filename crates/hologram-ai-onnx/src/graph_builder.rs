@@ -1696,6 +1696,7 @@ fn extract_i64_const(
             file.read_exact(&mut buf).ok()?;
             std::borrow::Cow::Owned(buf)
         }
+        hologram_ai_common::AiParam::External { .. } => return None,
     };
 
     match info.logical_dtype {

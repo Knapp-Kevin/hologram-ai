@@ -14,6 +14,8 @@ half.workspace     = true
 anyhow.workspace   = true
 thiserror.workspace = true
 tracing.workspace  = true
+memmap2 = "0.9"
+
 
 [build-dependencies]
 prost-build = "0.13"

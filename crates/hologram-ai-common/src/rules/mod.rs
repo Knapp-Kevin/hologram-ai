@@ -435,6 +435,7 @@ impl<'a> MatchView<'a> {
         let bytes: &[u8] = match param {
             AiParam::Inline { data, .. } => data.as_ref(),
             AiParam::Mmap { .. } => return None,
+            AiParam::External { .. } => return None,
         };
         if !bytes.len().is_multiple_of(8) {
             return None;

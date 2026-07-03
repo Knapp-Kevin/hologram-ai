@@ -1,5 +1,6 @@
-import { compile, compileSafetensors, compileOnnxWithData, generate as wasmGenerate, computeKappa } from "./holo";
+import { compileOnnxWithData, computeKappa, compileSafetensorsStreamed, KappaHasher } from "./holo";
 import { type GenOpts } from "./holo";
+import GenerateWorker from "./generate.worker?worker";
 
 export interface WorkspacePaths {
   root: string;
@@ -221,12 +222,165 @@ function emitLine(event: string, line: ProcessLine) {
 
 
 
+export async function streamSafetensorsForCompile(url: string, fileName: string) {
+  let response: Response | null = null;
+  let attempts = 0;
+  while (attempts < 3) {
+    attempts++;
+    try {
+      response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      break;
+    } catch (err) {
+      if (attempts >= 3) throw err;
+      await new Promise(r => setTimeout(r, (1 << attempts) * 1000));
+    }
+  }
+  if (!response || !response.body) throw new Error(`Failed to fetch ${fileName}`);
+
+  const reader = response.body.getReader();
+  let downloadedBytes = 0;
+  const totalBytes = Number(response.headers.get("content-length")) || 0;
+  let lastEmit = 0;
+  
+  let headerLengthBuf = new Uint8Array(8);
+  let headerLengthRead = 0;
+  let chunks: Uint8Array[] = [];
+  
+  while (headerLengthRead < 8) {
+    const { done, value } = await reader.read();
+    if (done) throw new Error("EOF before reading safetensors length");
+    downloadedBytes += value.length;
+    chunks.push(value);
+    const needed = 8 - headerLengthRead;
+    const toCopy = Math.min(needed, value.length);
+    headerLengthBuf.set(value.slice(0, toCopy), headerLengthRead);
+    headerLengthRead += toCopy;
+  }
+  
+  const view = new DataView(headerLengthBuf.buffer);
+  const headerLen = view.getUint32(0, true); 
+  
+  let headerBuf = new Uint8Array(headerLen);
+  let headerRead = 0;
+  let offsetInChunks = 8;
+  
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    if (offsetInChunks < chunk.length) {
+      const remainingInChunk = chunk.length - offsetInChunks;
+      const needed = headerLen - headerRead;
+      if (needed <= 0) break;
+      const toCopy = Math.min(needed, remainingInChunk);
+      headerBuf.set(chunk.slice(offsetInChunks, offsetInChunks + toCopy), headerRead);
+      headerRead += toCopy;
+      offsetInChunks += toCopy;
+    } else {
+      offsetInChunks -= chunk.length;
+    }
+  }
+  
+  while (headerRead < headerLen) {
+    const { done, value } = await reader.read();
+    if (done) throw new Error("EOF before reading safetensors header");
+    downloadedBytes += value.length;
+    chunks.push(value);
+    const needed = headerLen - headerRead;
+    const toCopy = Math.min(needed, value.length);
+    headerBuf.set(value.slice(0, toCopy), headerRead);
+    headerRead += toCopy;
+  }
+  
+  const headerStr = new TextDecoder().decode(headerBuf);
+  const header = JSON.parse(headerStr);
+  
+  const tensors: any[] = [];
+  for (const [key, meta] of Object.entries(header)) {
+    if (key === "__metadata__") continue;
+    tensors.push({ key, meta: meta as any });
+  }
+  tensors.sort((a, b) => a.meta.data_offsets[0] - b.meta.data_offsets[0]);
+  
+  const results = {
+    keys: [] as string[],
+    kappas: [] as string[],
+    shapes: [] as string[],
+    dtypes: [] as string[]
+  };
+  
+  let currentTensorIdx = 0;
+  let currentHasher = new KappaHasher();
+  const baseOffset = 8 + headerLen;
+  
+  function processBytes(globalOffset: number, bytes: Uint8Array) {
+    let localOffset = 0;
+    while (localOffset < bytes.length && currentTensorIdx < tensors.length) {
+      const tensor = tensors[currentTensorIdx];
+      const tensorStart = baseOffset + tensor.meta.data_offsets[0];
+      const tensorEnd = baseOffset + tensor.meta.data_offsets[1];
+      const currentGlobal = globalOffset + localOffset;
+      
+      if (currentGlobal < tensorStart) {
+        const toSkip = Math.min(tensorStart - currentGlobal, bytes.length - localOffset);
+        localOffset += toSkip;
+      } else if (currentGlobal < tensorEnd) {
+        const toFeed = Math.min(tensorEnd - currentGlobal, bytes.length - localOffset);
+        currentHasher.update(bytes.slice(localOffset, localOffset + toFeed));
+        localOffset += toFeed;
+        if (currentGlobal + toFeed === tensorEnd) {
+          const kappa = currentHasher.finalize();
+          results.keys.push(tensor.key);
+          results.kappas.push(kappa);
+          results.shapes.push(JSON.stringify(tensor.meta.shape));
+          results.dtypes.push(tensor.meta.dtype);
+          currentTensorIdx++;
+          if (currentTensorIdx < tensors.length) {
+            currentHasher.free();
+            currentHasher = new KappaHasher();
+          } else {
+            currentHasher.free();
+          }
+        }
+      } else {
+        localOffset++;
+      }
+    }
+  }
+  
+  let processedOffset = 0;
+  for (const chunk of chunks) {
+    processBytes(processedOffset, chunk);
+    processedOffset += chunk.length;
+  }
+  
+  while (currentTensorIdx < tensors.length) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    processBytes(downloadedBytes, value);
+    downloadedBytes += value.length;
+    const now = Date.now();
+    if (now - lastEmit > 500) {
+      lastEmit = now;
+      if (totalBytes > 0) {
+        const percent = Math.round((downloadedBytes / totalBytes) * 100);
+        emitLine("models://download-progress", { stream: "stdout", line: `Streaming ${fileName}: ${percent}% (${(downloadedBytes / 1024 / 1024).toFixed(1)}MB)` });
+      }
+    }
+  }
+  
+  if (currentTensorIdx < tensors.length) {
+    throw new Error(`EOF before finishing tensor ${tensors[currentTensorIdx].key}`);
+  }
+  emitLine("models://download-line", { stream: "stdout", line: `Finished streaming ${fileName}.` });
+  return results;
+}
+
 export async function downloadKnownModel(id: string): Promise<number> {
   const catalogue = getCatalogue();
   const model = catalogue.find(m => m.id === id);
   if (!model) throw new Error("Unknown model");
   
-  emitLine("models://download-line", { stream: "stdout", line: `Downloading ${model.hfId} from HuggingFace via holospaces extension...` });
+  emitLine("models://download-line", { stream: "stdout", line: `Downloading and Compiling ${model.hfId}...` });
   
   const localName = model.hfId.split("/").pop() || model.hfId;
   const root = await getOpfsDir();
@@ -256,160 +410,195 @@ export async function downloadKnownModel(id: string): Promise<number> {
   const safetensorsFiles = siblings.filter((f: any) => f.rfilename.endsWith('.safetensors'));
   
   if (onnxFiles.length === 0 && safetensorsFiles.length === 0) {
-    throw new Error(`No ONNX or Safetensors export found in repository. The web version requires pre-exported or Safetensors models.`);
+    throw new Error(`No ONNX or Safetensors export found in repository.`);
   }
 
-  const companionNames = ["tokenizer.json", "config.json", "tokenizer_config.json", "special_tokens_map.json"];
-  const companions = siblings.filter((f: any) => companionNames.includes(f.rfilename.split('/').pop()!));
-
-  let selectedOnnxFiles: any[] = [];
-  if (onnxFiles.length > 0) {
-    // If there are multiple .onnx files, try to pick one intelligently (prefer 'cpu' or 'int4')
-    const mainOnnxFiles = onnxFiles.filter((f: any) => f.rfilename.endsWith('.onnx'));
-    let chosenMain = mainOnnxFiles[0];
-    for (const f of mainOnnxFiles) {
-      const name = f.rfilename.toLowerCase();
-      if (name.includes('cpu') || name.includes('int4')) {
-        chosenMain = f;
-        if (name.includes('cpu') && name.includes('int4')) break; // optimal for wasm
-      }
-    }
-    if (chosenMain) {
-      selectedOnnxFiles.push(chosenMain);
-      // Also grab its external data file if present
-      const expectedDataName = chosenMain.rfilename + '.data';
-      const dataFile = onnxFiles.find((f: any) => f.rfilename === expectedDataName || f.rfilename === chosenMain.rfilename + '_data');
-      if (dataFile) selectedOnnxFiles.push(dataFile);
-    } else {
-      selectedOnnxFiles = onnxFiles; // fallback
-    }
-  }
-
-  const filesToDownload = [...(selectedOnnxFiles.length > 0 ? selectedOnnxFiles : safetensorsFiles), ...companions];
+  if (safetensorsFiles.length > 0) {
+    // Safetensors flow
+    const companionNames = ["config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"];
+    const companions = siblings.filter((f: any) => companionNames.includes(f.rfilename.split('/').pop()!));
   
-  for (const file of filesToDownload) {
-    const url = `https://huggingface.co/${model.hfId}/resolve/main/${file.rfilename}`;
-    emitLine("models://download-line", { stream: "stdout", line: `Fetching ${url}...` });
+    let configText = "";
     
-    let response: Response | null = null;
-    let attempts = 0;
-    while (attempts < 3) {
-      attempts++;
-      try {
-        response = await fetch(url);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        break; // Success
-      } catch (err) {
-        if (attempts >= 3) {
-          throw new Error(`Failed to fetch ${file.rfilename} after 3 attempts: ${err}`);
+    // Download companions to OPFS
+    for (const file of companions) {
+      const url = `https://huggingface.co/${model.hfId}/resolve/main/${file.rfilename}`;
+      emitLine("models://download-line", { stream: "stdout", line: `Fetching ${file.rfilename}...` });
+      
+      let response: Response | null = null;
+      for (let attempts = 1; attempts <= 3; attempts++) {
+        try {
+          response = await fetch(url);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          break;
+        } catch (err) {
+          if (attempts >= 3) throw new Error(`Failed to fetch ${file.rfilename}`);
+          await new Promise(r => setTimeout(r, (1 << attempts) * 1000));
         }
-        emitLine("models://download-line", { stream: "stdout", line: `Download failed (attempt ${attempts}/3). Retrying in ${1 << attempts}s...` });
-        await new Promise(r => setTimeout(r, (1 << attempts) * 1000));
+      }
+      
+      const text = await response!.text();
+      if (file.rfilename.endsWith("config.json")) {
+        configText = text;
+      }
+      
+      const parts = file.rfilename.split('/');
+      let currentDir = localDir;
+      for (let i = 0; i < parts.length - 1; i++) {
+        currentDir = await currentDir.getDirectoryHandle(parts[i], { create: true });
+      }
+      const fileName = parts[parts.length - 1];
+      const handle = await currentDir.getFileHandle(fileName, { create: true });
+      const writable = await handle.createWritable();
+      await writable.write(text);
+      await writable.close();
+    }
+    
+    if (!configText) {
+      throw new Error("Missing config.json");
+    }
+  
+    // Stream safetensors to compute hashes
+    const allKeys: string[] = [];
+    const allKappas: string[] = [];
+    const allShapes: string[] = [];
+    const allDtypes: string[] = [];
+    
+    for (const file of safetensorsFiles) {
+      const url = `https://huggingface.co/${model.hfId}/resolve/main/${file.rfilename}`;
+      emitLine("models://download-line", { stream: "stdout", line: `Streaming ${file.rfilename}...` });
+      const res = await streamSafetensorsForCompile(url, file.rfilename);
+      allKeys.push(...res.keys);
+      allKappas.push(...res.kappas);
+      allShapes.push(...res.shapes);
+      allDtypes.push(...res.dtypes);
+    }
+    
+    emitLine("models://compile-line", { stream: "stdout", line: `Compiling streamed tensors...` });
+    
+    const holoBytes = await compileSafetensorsStreamed(
+      configText,
+      allKeys,
+      allKappas,
+      allShapes,
+      allDtypes
+    );
+    
+    const kappa = await computeKappa(holoBytes);
+    const holoName = `${kappa}.holo`;
+    const holoHandle = await localDir.getFileHandle(holoName, { create: true });
+    const writable = await holoHandle.createWritable();
+    await writable.write(holoBytes as any);
+    await writable.close();
+    
+    emitLine("models://compile-line", { stream: "stdout", line: `Compiled and saved to ${holoName} (${holoBytes.length} bytes).` });
+  } else {
+    // ONNX flow
+    const companionNames = ["tokenizer.json", "config.json", "tokenizer_config.json", "special_tokens_map.json"];
+    const companions = siblings.filter((f: any) => companionNames.includes(f.rfilename.split('/').pop()!));
+  
+    let selectedOnnxFiles: any[] = [];
+    if (onnxFiles.length > 0) {
+      const mainOnnxFiles = onnxFiles.filter((f: any) => f.rfilename.endsWith('.onnx'));
+      let chosenMain = mainOnnxFiles[0];
+      for (const f of mainOnnxFiles) {
+        const name = f.rfilename.toLowerCase();
+        if (name.includes('cpu') || name.includes('int4')) {
+          chosenMain = f;
+          if (name.includes('cpu') && name.includes('int4')) break;
+        }
+      }
+      if (chosenMain) {
+        selectedOnnxFiles.push(chosenMain);
+        const expectedDataName = chosenMain.rfilename + '.data';
+        const dataFile = onnxFiles.find((f: any) => f.rfilename === expectedDataName || f.rfilename === chosenMain.rfilename + '_data');
+        if (dataFile) selectedOnnxFiles.push(dataFile);
+      } else {
+        selectedOnnxFiles = onnxFiles;
       }
     }
-    if (!response) throw new Error(`Failed to fetch ${file.rfilename}`);
+  
+    const filesToDownload = [...selectedOnnxFiles, ...companions];
     
-    // Write to OPFS
-    const parts = file.rfilename.split('/');
-    let currentDir = localDir;
-    for (let i = 0; i < parts.length - 1; i++) {
-      currentDir = await currentDir.getDirectoryHandle(parts[i], { create: true });
-    }
-    const fileName = parts[parts.length - 1];
-    
-    const handle = await currentDir.getFileHandle(fileName, { create: true });
-    const writable = await handle.createWritable();
-    
-    if (response.body) {
-      const contentLength = response.headers.get("content-length");
-      const total = contentLength ? parseInt(contentLength, 10) : 0;
-      let loaded = 0;
-      let lastEmit = 0;
+    for (const file of filesToDownload) {
+      const url = `https://huggingface.co/${model.hfId}/resolve/main/${file.rfilename}`;
+      emitLine("models://download-line", { stream: "stdout", line: `Fetching ${url}...` });
       
-      const reader = response.body.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        await writable.write(value);
-        loaded += value.length;
+      let response: Response | null = null;
+      let attempts = 0;
+      while (attempts < 3) {
+        attempts++;
+        try {
+          response = await fetch(url);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          break; // Success
+        } catch (err) {
+          if (attempts >= 3) {
+            throw new Error(`Failed to fetch ${file.rfilename} after 3 attempts: ${err}`);
+          }
+          emitLine("models://download-line", { stream: "stdout", line: `Download failed (attempt ${attempts}/3). Retrying in ${1 << attempts}s...` });
+          await new Promise(r => setTimeout(r, (1 << attempts) * 1000));
+        }
+      }
+      if (!response) throw new Error(`Failed to fetch ${file.rfilename}`);
+      
+      // Write to OPFS
+      const parts = file.rfilename.split('/');
+      let currentDir = localDir;
+      for (let i = 0; i < parts.length - 1; i++) {
+        currentDir = await currentDir.getDirectoryHandle(parts[i], { create: true });
+      }
+      const fileName = parts[parts.length - 1];
+      
+      const handle = await currentDir.getFileHandle(fileName, { create: true });
+      const writable = await handle.createWritable();
+      
+      if (response.body) {
+        const contentLength = response.headers.get("content-length");
+        const total = contentLength ? parseInt(contentLength, 10) : 0;
+        let loaded = 0;
+        let lastEmit = 0;
         
-        const now = Date.now();
-        if (now - lastEmit > 500) {
-          lastEmit = now;
-          if (total > 0) {
-            const percent = Math.round((loaded / total) * 100);
-            emitLine("models://download-progress", { stream: "stdout", line: `Downloading ${file.rfilename}: ${percent}% (${(loaded / 1024 / 1024).toFixed(1)}MB / ${(total / 1024 / 1024).toFixed(1)}MB)` });
-          } else {
-            emitLine("models://download-progress", { stream: "stdout", line: `Downloading ${file.rfilename}: ${(loaded / 1024 / 1024).toFixed(1)}MB` });
+        const reader = response.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          await writable.write(value);
+          loaded += value.length;
+          
+          const now = Date.now();
+          if (now - lastEmit > 500) {
+            lastEmit = now;
+            if (total > 0) {
+              const percent = Math.round((loaded / total) * 100);
+              emitLine("models://download-progress", { stream: "stdout", line: `Downloading ${file.rfilename}: ${percent}% (${(loaded / 1024 / 1024).toFixed(1)}MB / ${(total / 1024 / 1024).toFixed(1)}MB)` });
+            } else {
+              emitLine("models://download-progress", { stream: "stdout", line: `Downloading ${file.rfilename}: ${(loaded / 1024 / 1024).toFixed(1)}MB` });
+            }
           }
         }
       }
+      await writable.close();
+      emitLine("models://download-line", { stream: "stdout", line: `Saved ${file.rfilename}.` });
     }
-    await writable.close();
     
-    emitLine("models://download-line", { stream: "stdout", line: `Saved ${file.rfilename}.` });
-  }
-  
-  emitLine("models://download-line", { stream: "stdout", line: `Download complete.` });
-  
-  return 0;
-}
-
-export async function compileKnownModel(id: string, specificOnnx?: string): Promise<number> {
-  const catalogue = getCatalogue();
-  const model = catalogue.find(m => m.id === id);
-  if (!model) throw new Error("Unknown model");
-  
-  emitLine("models://compile-line", { stream: "stdout", line: `Compiling ${model.id}...` });
-  
-  const localName = model.hfId.split("/").pop() || model.hfId;
-  const root = await getOpfsDir();
-  const modelsDir = await root.getDirectoryHandle("models", { create: true });
-  const localDir = await modelsDir.getDirectoryHandle(localName);
-  
-  // Find the .onnx file recursively in localDir
-  async function findOnnx(dir: FileSystemDirectoryHandle): Promise<{ file: FileSystemFileHandle, parent: FileSystemDirectoryHandle } | null> {
-    for await (const [name, handle] of (dir as any).entries()) {
-      if (handle.kind === 'file' && name.endsWith('.onnx')) {
-        return { file: handle as FileSystemFileHandle, parent: dir };
+    // NOW compile the ONNX files
+    async function findOnnx(dir: FileSystemDirectoryHandle): Promise<{ file: FileSystemFileHandle, parent: FileSystemDirectoryHandle } | null> {
+      for await (const [name, handle] of (dir as any).entries()) {
+        if (handle.kind === 'file' && name.endsWith('.onnx')) {
+          return { file: handle as FileSystemFileHandle, parent: dir };
+        }
+        if (handle.kind === 'directory') {
+          const found = await findOnnx(handle as FileSystemDirectoryHandle);
+          if (found) return found;
+        }
       }
-      if (handle.kind === 'directory') {
-        const found = await findOnnx(handle as FileSystemDirectoryHandle);
-        if (found) return found;
-      }
+      return null;
     }
-    return null;
-  }
-
-  // Find all .safetensors files recursively in localDir
-  async function findAllSafetensors(dir: FileSystemDirectoryHandle): Promise<FileSystemFileHandle[]> {
-    let handles: FileSystemFileHandle[] = [];
-    for await (const [name, handle] of (dir as any).entries()) {
-      if (handle.kind === 'file' && name.endsWith('.safetensors')) {
-        handles.push(handle as FileSystemFileHandle);
-      }
-      if (handle.kind === 'directory') {
-        handles.push(...await findAllSafetensors(handle as FileSystemDirectoryHandle));
-      }
-    }
-    return handles.sort((a, b) => a.name.localeCompare(b.name));
-  }
-
-  // Get a specific file handle by path relative to localDir
-  async function getSpecificFile(dir: FileSystemDirectoryHandle, path: string): Promise<{ file: FileSystemFileHandle, parent: FileSystemDirectoryHandle }> {
-    const parts = path.split('/');
-    const fileName = parts.pop()!;
-    let currentDir = dir;
-    for (const part of parts) {
-      currentDir = await currentDir.getDirectoryHandle(part);
-    }
-    return { file: await currentDir.getFileHandle(fileName), parent: currentDir };
-  }
-  
-  const onnxResult = specificOnnx ? await getSpecificFile(localDir, specificOnnx) : await findOnnx(localDir);
-  let holoBytes: Uint8Array;
-
-  if (onnxResult && onnxResult.file.name.endsWith('.onnx')) {
+    
+    const onnxResult = await findOnnx(localDir);
+    if (!onnxResult) throw new Error("ONNX file not found after download");
+    
     const onnxHandle = onnxResult.file;
     const parentDir = onnxResult.parent;
     const onnxFile = await onnxHandle.getFile();
@@ -421,95 +610,47 @@ export async function compileKnownModel(id: string, specificOnnx?: string): Prom
     try {
       onnxBytes = new Uint8Array(await onnxFile.arrayBuffer());
     } catch (err: any) {
-      if (err.name === 'NotReadableError') {
-        throw new Error(`Failed to read ONNX file into memory (file too large for browser ArrayBuffer). Please use a smaller model or the desktop CLI.`);
-      }
-      throw err;
+      throw new Error(`Failed to read ONNX file into memory`);
     }
     
-    // Check if there is an external data file
     let externalDataBytes: Uint8Array | null = null;
     try {
       let dataHandle: FileSystemFileHandle | null = null;
-      try {
-        dataHandle = await parentDir.getFileHandle(`${onnxHandle.name}.data`);
-      } catch (e) {
-        try {
-          dataHandle = await parentDir.getFileHandle(`${onnxHandle.name}_data`);
-        } catch (e2) {}
+      try { dataHandle = await parentDir.getFileHandle(`${onnxHandle.name}.data`); } catch (e) {}
+      if (!dataHandle) {
+        try { dataHandle = await parentDir.getFileHandle(`${onnxHandle.name}_data`); } catch (e) {}
       }
-      
       if (dataHandle) {
         const dataFile = await dataHandle.getFile();
-        if (dataFile.size > 2 * 1024 * 1024 * 1024 || (onnxFile.size + dataFile.size) > 2.5 * 1024 * 1024 * 1024) {
-           throw new Error(`Model with external data is too large to compile in the browser due to WebAssembly limits. Please use the desktop CLI.`);
-        }
-        try {
-          externalDataBytes = new Uint8Array(await dataFile.arrayBuffer());
-        } catch (err: any) {
-          if (err.name === 'NotReadableError') throw new Error(`Failed to read ONNX external data into memory (too large).`);
-          throw err;
-        }
+        externalDataBytes = new Uint8Array(await dataFile.arrayBuffer());
       }
-    } catch (e) {
-      // Ignore
-    }
+    } catch (e) {}
 
+    let holoBytes: Uint8Array;
     if (externalDataBytes) {
-      emitLine("models://compile-line", { stream: "stdout", line: `Loaded ONNX (${onnxBytes.length} bytes) and external data (${externalDataBytes.length} bytes). Compiling via wasm...` });
+      emitLine("models://compile-line", { stream: "stdout", line: `Loaded ONNX and external data. Compiling via wasm...` });
       holoBytes = await compileOnnxWithData(onnxBytes, externalDataBytes);
     } else {
-      emitLine("models://compile-line", { stream: "stdout", line: `Loaded ONNX (${onnxBytes.length} bytes). Compiling via wasm...` });
+      emitLine("models://compile-line", { stream: "stdout", line: `Loaded ONNX. Compiling via wasm...` });
+      const { compile } = await import("./holo");
       holoBytes = await compile(onnxBytes);
     }
-  } else {
-    const safetensorsHandles = await findAllSafetensors(localDir);
-    if (safetensorsHandles.length === 0) {
-      throw new Error(`Could not find .onnx or .safetensors files in downloaded model`);
-    }
     
-    emitLine("models://compile-line", { stream: "stdout", line: `Loaded ${safetensorsHandles.length} Safetensors shards. Reading config.json...` });
-    const configHandle = await getSpecificFile(localDir, "config.json");
-    const configFile = await configHandle.file.getFile();
-    const configText = await configFile.text();
+    const kappa = await computeKappa(holoBytes);
+    const holoName = `${kappa}.holo`;
+    const holoHandle = await localDir.getFileHandle(holoName, { create: true });
+    const writable = await holoHandle.createWritable();
+    await writable.write(holoBytes as any);
+    await writable.close();
     
-    const shards: Uint8Array[] = [];
-    let totalBytes = 0;
-    for (const stHandle of safetensorsHandles) {
-      const stFile = await stHandle.getFile();
-      totalBytes += stFile.size;
-    }
-    
-    // WASM32 has a strict 4GB memory limit. ArrayBuffer in V8 often fails >2GB.
-    if (totalBytes > 2 * 1024 * 1024 * 1024) {
-      throw new Error(`Model is too large (${(totalBytes / 1024 / 1024 / 1024).toFixed(1)}GB) to compile in the browser due to WebAssembly 32-bit memory limits (max 2-4GB). Please use the hologram-ai desktop or CLI for models larger than 2GB, or use a smaller/quantized model.`);
-    }
-
-    for (const stHandle of safetensorsHandles) {
-      const stFile = await stHandle.getFile();
-      try {
-        shards.push(new Uint8Array(await stFile.arrayBuffer()));
-      } catch (err: any) {
-        if (err.name === 'NotReadableError') {
-          throw new Error(`Failed to read Safetensors shard into memory (file too large for browser ArrayBuffer). Please use a smaller model or the desktop CLI.`);
-        }
-        throw err;
-      }
-    }
-    
-    holoBytes = await compileSafetensors(configText, shards);
+    emitLine("models://compile-line", { stream: "stdout", line: `Compiled and saved to ${holoName} (${holoBytes.length} bytes).` });
   }
-  
-  const kappa = await computeKappa(holoBytes);
-  const holoName = `${kappa}.holo`;
-  
-  const holoHandle = await localDir.getFileHandle(holoName, { create: true });
-  const writable = await holoHandle.createWritable();
-  await writable.write(holoBytes as any);
-  await writable.close();
-  
-  emitLine("models://compile-line", { stream: "stdout", line: `Compiled and saved to ${holoName} (${holoBytes.length} bytes).` });
-  
+  return 0;
+}
+
+export async function compileKnownModel(_id: string, _specificOnnx?: string): Promise<number> {
+  // We unified download and compile into downloadKnownModel.
+  // The UI might still call this, so just return success.
   return 0;
 }
 
@@ -525,7 +666,10 @@ export interface GenerateOpts {
 
 // Removed unused variable
 
+let activeWorker: Worker | null = null;
+
 export async function generate(opts: GenerateOpts): Promise<number> {
+  // ... read holoBytes ...
   
   const archiveParts = opts.archive.split("/");
   const root = await getOpfsDir();
@@ -569,15 +713,50 @@ export async function generate(opts: GenerateOpts): Promise<number> {
   
   emitLine("chat://line", { stream: "stdout", line: "" });
   
-  const result = await wasmGenerate(holoBytes, opts.prompt, genOpts, tokenizerBytes);
-  
-  emitLine("chat://line", { stream: "stdout", line: result });
-  
-  return 0;
+  return new Promise((resolve, reject) => {
+    if (activeWorker) {
+      activeWorker.terminate();
+    }
+    
+    activeWorker = new GenerateWorker();
+    
+    activeWorker.onmessage = (e) => {
+      if (e.data.type === 'token') {
+        emitLine("chat://line", { stream: "stdout", line: e.data.text });
+      } else if (e.data.type === 'done') {
+        emitLine("chat://line", { stream: "stdout", line: e.data.text });
+        if (activeWorker) {
+          activeWorker.terminate();
+          activeWorker = null;
+        }
+        resolve(0);
+      } else if (e.data.type === 'error') {
+        emitLine("chat://line", { stream: "stderr", line: e.data.error });
+        if (activeWorker) {
+          activeWorker.terminate();
+          activeWorker = null;
+        }
+        reject(new Error(e.data.error));
+      }
+    };
+    
+    activeWorker.postMessage({
+      holoBytes,
+      prompt: opts.prompt,
+      genOpts,
+      tokenizerBytes,
+    });
+  });
 }
 
 export async function cancelGeneration(): Promise<boolean> {
-  return true;
+  if (activeWorker) {
+    activeWorker.terminate();
+    activeWorker = null;
+    emitLine("chat://line", { stream: "stdout", line: "\n[Generation cancelled]" });
+    return true;
+  }
+  return false;
 }
 
 export async function recentLogs(since: number): Promise<LogsResponse> {

@@ -28,6 +28,14 @@ pub enum ModelSource {
         config_json: String,
         safetensors_shards: Vec<Vec<u8>>,
     },
+    /// Streamed safetensors (metadata only, no weights).
+    SafetensorsStreamed {
+        config_json: String,
+        keys: Vec<String>,
+        kappas: Vec<String>,
+        shapes: Vec<Vec<u64>>,
+        dtypes: Vec<hologram_ai_common::DType>,
+    },
 }
 
 /// Input specification for a single component in a multi-ONNX model.
@@ -334,6 +342,52 @@ impl ModelCompiler {
                 hologram_ai_safetensors::build_graph_from_safetensors(&config_json, &shards_refs)
                     .context("importing from safetensors")
             }
+            ModelSource::SafetensorsStreamed {
+                config_json,
+                keys,
+                kappas,
+                shapes,
+                dtypes,
+            } => {
+                let config: serde_json::Value =
+                    serde_json::from_str(&config_json).context("Failed to parse config.json")?;
+                let mut graph =
+                    hologram_ai_safetensors::parametric::build_parametric_graph_from_keys(
+                        &config, &keys,
+                    )
+                    .context("building parametric graph from keys")?;
+
+                let mut next_id = graph.tensor_names.keys().max().copied().unwrap_or(0) + 1;
+                let mut name_to_id = std::collections::HashMap::new();
+                for (id, name) in &graph.tensor_names {
+                    name_to_id.insert(name.clone(), *id);
+                }
+
+                for i in 0..keys.len() {
+                    let id = if let Some(existing_id) = name_to_id.get(&keys[i]) {
+                        *existing_id
+                    } else {
+                        let new_id = next_id;
+                        next_id += 1;
+                        graph.tensor_names.insert(new_id, keys[i].clone());
+                        new_id
+                    };
+
+                    let info = hologram_ai_common::TensorInfo::new(
+                        dtypes[i],
+                        hologram_ai_common::shape_from_concrete(&shapes[i]),
+                    );
+                    graph.tensor_info.insert(id, info.clone());
+                    graph.params.insert(
+                        id,
+                        hologram_ai_common::AiParam::External {
+                            kappa: kappas[i].clone(),
+                            info,
+                        },
+                    );
+                }
+                Ok(graph)
+            }
         }
     }
 }
@@ -535,6 +589,7 @@ fn source_kappa_label(source: &ModelSource) -> Option<String> {
                 Err(anyhow::anyhow!("No safetensors shards"))
             }
         }
+        ModelSource::SafetensorsStreamed { .. } => return None,
     };
     match label {
         Ok(l) => Some(l),

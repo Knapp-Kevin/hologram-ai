@@ -8,8 +8,9 @@ import init, {
   compile as wasmCompile,
   generate as wasmGenerate,
   compute_kappa as wasmComputeKappa,
-  compile_safetensors as wasmCompileSafetensors,
   compile_onnx_with_data as wasmCompileOnnxWithData,
+  compile_safetensors_streamed as wasmCompileSafetensorsStreamed,
+  KappaHasher,
 } from "./wasm/hologram_ai_wasm.js";
 
 export interface Port {
@@ -69,10 +70,20 @@ export async function compileOnnxWithData(onnxBytes: Uint8Array, externalData: U
   return wasmCompileOnnxWithData(onnxBytes, externalData);
 }
 
-export async function compileSafetensors(configJson: string, safetensorsShards: Uint8Array[]): Promise<Uint8Array> {
+export async function compileSafetensorsStreamed(
+  configJson: string,
+  keys: string[],
+  kappas: string[],
+  shapes: string[],
+  dtypes: string[]
+): Promise<Uint8Array> {
   await ensureReady();
-  return wasmCompileSafetensors(configJson, safetensorsShards);
+  return wasmCompileSafetensorsStreamed(configJson, keys, kappas, shapes, dtypes);
 }
+
+export { KappaHasher };
+
+
 
 /** Compute the holospaces Kappa label for a byte array. */
 export async function computeKappa(bytes: Uint8Array): Promise<string> {
@@ -101,7 +112,8 @@ export async function generate(
   prompt: string,
   opts: GenOpts = {},
   tokenizer?: Uint8Array,
+  callback?: (text: string) => void,
 ): Promise<string> {
   await ensureReady();
-  return wasmGenerate(holo, tokenizer ?? undefined, prompt, opts);
+  return wasmGenerate(holo, tokenizer ?? undefined, prompt, opts, callback);
 }

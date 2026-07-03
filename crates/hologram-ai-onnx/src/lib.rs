@@ -31,7 +31,7 @@ pub fn decode_tensor_proto_bytes(bytes: &[u8]) -> anyhow::Result<(Vec<u8>, Vec<i
     } else {
         t.float_data.iter().flat_map(|f| f.to_le_bytes()).collect()
     };
-    Ok((raw, t.dims.clone(), t.data_type))
+    Ok((raw.to_vec(), t.dims.clone(), t.data_type))
 }
 
 /// Decode a standalone `TensorProto` into its `f32` values (from `raw_data` or
@@ -77,10 +77,18 @@ pub fn import_onnx_path(
     path: &std::path::Path,
     opts: OnnxImportOptions,
 ) -> anyhow::Result<AiGraph> {
-    let bytes =
-        std::fs::read(path).map_err(|e| anyhow::anyhow!("reading ONNX file {path:?}: {e}"))?;
+    let file = std::fs::File::open(path)
+        .map_err(|e| anyhow::anyhow!("opening ONNX file {path:?}: {e}"))?;
+
+    // Memory map the file to stream its contents rather than loading everything into RAM
+    let mmap = unsafe {
+        memmap2::MmapOptions::new()
+            .map(&file)
+            .map_err(|e| anyhow::anyhow!("memory-mapping ONNX file {path:?}: {e}"))?
+    };
+
     let model_dir = path.parent();
-    import_onnx_inner(&bytes, opts, model_dir, None)
+    import_onnx_inner(&mmap, opts, model_dir, None)
 }
 
 fn import_onnx_inner(

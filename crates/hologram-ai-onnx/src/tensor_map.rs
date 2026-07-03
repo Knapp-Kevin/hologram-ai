@@ -106,7 +106,7 @@ fn extract_raw_bytes(
     }
 
     if !t.raw_data.is_empty() {
-        return Ok(t.raw_data.clone());
+        return Ok(t.raw_data.to_vec());
     }
 
     // Typed fields — convert to bytes.

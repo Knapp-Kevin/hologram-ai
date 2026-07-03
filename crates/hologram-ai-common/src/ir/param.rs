@@ -24,6 +24,8 @@ pub enum AiParam {
         len: u64,
         info: TensorInfo,
     },
+    /// External weight stored in holospaces. The runtime will resolve it by Kappa hash.
+    External { kappa: String, info: TensorInfo },
 }
 
 impl AiParam {
@@ -45,11 +47,17 @@ impl AiParam {
         }
     }
 
+    /// Construct an external parameter reference.
+    pub fn external(kappa: String, info: TensorInfo) -> Self {
+        Self::External { kappa, info }
+    }
+
     /// Metadata for this parameter.
     pub fn info(&self) -> &TensorInfo {
         match self {
             AiParam::Inline { info, .. } => info,
             AiParam::Mmap { info, .. } => info,
+            AiParam::External { info, .. } => info,
         }
     }
 
@@ -67,6 +75,7 @@ impl AiParam {
         match self {
             AiParam::Inline { data, .. } => data.is_empty(),
             AiParam::Mmap { len, .. } => *len == 0,
+            AiParam::External { .. } => false, // Externals implicitly have data
         }
     }
 }

@@ -1124,6 +1124,7 @@ dependencies = [
  "half",
  "hologram-ai-common",
  "hologram-ai-quant",
+ "memmap2",
  "prost",
  "prost-build",
  "thiserror 2.0.18",
@@ -1174,10 +1175,12 @@ dependencies = [
 name = "hologram-ai-wasm"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "console_error_panic_hook",
  "half",
  "hologram-ai",
  "hologram-ai-common",
+ "hologram-ai-safetensors",
  "hologram-ai-tokenizer",
  "holospaces",
  "js-sys",

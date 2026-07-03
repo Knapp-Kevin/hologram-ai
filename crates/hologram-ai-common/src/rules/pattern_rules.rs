@@ -640,6 +640,7 @@ fn read_scalar_i64(tid: crate::ir::TensorId, graph: &crate::ir::AiGraph) -> Opti
             }
         }
         AiParam::Mmap { .. } => None,
+        AiParam::External { .. } => None,
     }
 }
 

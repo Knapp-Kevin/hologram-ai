@@ -166,12 +166,13 @@ export function Chat() {
 
   // Subscribe to chat lines once.
   useEffect(() => {
-    const unlisten = onProcessLine("chat://line", (l) => {
-      // The CLI prints generated tokens to stdout (when streaming) and
-      // diagnostics to stderr. For a v0 scaffold we treat every line as
-      // assistant content; users can switch to the Logs tab for diagnostics.
-      if (l.stream === "stderr") return;
-      streamingRef.current += (streamingRef.current ? "\n" : "") + l.line;
+    let timeoutId: number | null = null;
+    let isFlushing = false;
+    
+    const flushText = () => {
+      if (!isFlushing) return;
+      isFlushing = false;
+      
       setMessages((prev) => {
         const last = prev[prev.length - 1];
         if (last && last.role === "assistant") {
@@ -181,9 +182,21 @@ export function Chat() {
         }
         return [...prev, { role: "assistant", text: streamingRef.current }];
       });
+    };
+
+    const unlisten = onProcessLine("chat://line", (l) => {
+      if (l.stream === "stderr") return;
+      streamingRef.current += (streamingRef.current ? "\n" : "") + l.line;
+      
+      if (!isFlushing) {
+        isFlushing = true;
+        timeoutId = window.setTimeout(flushText, 50);
+      }
     });
+    
     return () => {
       unlisten.then((un) => un());
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
     };
   }, []);
 

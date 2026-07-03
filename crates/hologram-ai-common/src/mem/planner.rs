@@ -140,5 +140,15 @@ fn param_bytes(param: &AiParam) -> u64 {
     match param {
         AiParam::Inline { data, .. } => data.len() as u64,
         AiParam::Mmap { len, .. } => *len,
+        AiParam::External { info, .. } => {
+            info.shape
+                .iter()
+                .map(|d| match d {
+                    crate::ir::Dim::Concrete(n) => *n,
+                    _ => 1,
+                })
+                .product::<u64>()
+                * info.logical_dtype.byte_size().unwrap_or(0) as u64
+        }
     }
 }

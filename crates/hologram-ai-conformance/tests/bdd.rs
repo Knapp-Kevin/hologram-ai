@@ -31,6 +31,7 @@ struct HologramWorld {
     fixture_name: Option<String>,
     holo_output: Option<Vec<f32>>,
     ort_output: Option<Vec<f32>>,
+    holo_archive: Option<Vec<u8>>,
     original_node_count: usize,
     compiled_node_count: usize,
 }
@@ -106,6 +107,109 @@ async fn when_holo_execute(w: &mut HologramWorld) {
 #[cfg(not(feature = "conformance"))]
 #[when(expr = "the fixture is compiled and executed via the holographic compiler")]
 async fn when_holo_execute_skip(_w: &mut HologramWorld) {}
+
+#[cfg(feature = "conformance")]
+#[when(expr = "the safetensors metadata is streamed to the holographic compiler")]
+async fn when_safetensors_streamed(w: &mut HologramWorld) {
+    let config_json =
+        r#"{"architectures":["ParametricModel"],"hidden_size":32,"num_attention_heads":2}"#
+            .to_string();
+    let keys = vec![
+        "model.embed_tokens.weight".to_string(),
+        "model.layers.0.input_layernorm.weight".to_string(),
+        "model.layers.0.self_attn.q_proj.weight".to_string(),
+        "model.layers.0.self_attn.k_proj.weight".to_string(),
+        "model.layers.0.self_attn.v_proj.weight".to_string(),
+        "model.layers.0.self_attn.o_proj.weight".to_string(),
+        "model.layers.0.post_attention_layernorm.weight".to_string(),
+        "model.layers.0.mlp.gate_proj.weight".to_string(),
+        "model.layers.0.mlp.up_proj.weight".to_string(),
+        "model.layers.0.mlp.down_proj.weight".to_string(),
+        "model.norm.weight".to_string(),
+        "lm_head.weight".to_string(),
+    ];
+    let mut kappas = Vec::new();
+    let mut shapes = Vec::new();
+    let mut dtypes = Vec::new();
+
+    for key in &keys {
+        kappas.push(format!("blake3:{}", key));
+        dtypes.push(hologram_ai_common::DType::F32);
+
+        if key.contains("embed_tokens") {
+            shapes.push(vec![32000, 32]);
+        } else if key.contains("input_layernorm") {
+            shapes.push(vec![32]);
+        } else if key.contains("post_attention_layernorm") {
+            shapes.push(vec![32]);
+        } else if key.contains("norm.weight") {
+            shapes.push(vec![32]);
+        } else if key.contains("q_proj") {
+            shapes.push(vec![32, 64]);
+        } else if key.contains("k_proj") {
+            shapes.push(vec![32, 64]);
+        } else if key.contains("v_proj") {
+            shapes.push(vec![32, 64]);
+        } else if key.contains("o_proj") {
+            shapes.push(vec![64, 32]);
+        } else if key.contains("gate_proj") {
+            shapes.push(vec![32, 128]);
+        } else if key.contains("up_proj") {
+            shapes.push(vec![32, 128]);
+        } else if key.contains("down_proj") {
+            shapes.push(vec![128, 32]);
+        } else if key.contains("lm_head") {
+            shapes.push(vec![32, 32000]);
+        } else {
+            shapes.push(vec![32, 32]);
+        }
+    }
+
+    let compiler = hologram_ai::compiler::ModelCompiler::default();
+    let archive = compiler
+        .compile(hologram_ai::compiler::ModelSource::SafetensorsStreamed {
+            config_json,
+            keys,
+            kappas,
+            shapes,
+            dtypes,
+        })
+        .expect("compile failed");
+
+    w.compiled_node_count = archive.stats.node_count;
+    w.holo_archive = Some(archive.bytes);
+}
+
+#[cfg(not(feature = "conformance"))]
+#[when(expr = "the safetensors metadata is streamed to the holographic compiler")]
+async fn when_safetensors_streamed_skip(_w: &mut HologramWorld) {}
+
+#[cfg(feature = "conformance")]
+#[then(expr = "the compiled holographic archive must contain external parameter mappings")]
+async fn then_archive_contains_external(w: &mut HologramWorld) {
+    let bytes = w.holo_archive.as_ref().unwrap();
+    let runner = hologram_ai::HoloRunner::from_bytes(bytes.clone()).unwrap();
+
+    assert!(w.compiled_node_count > 0, "Graph should have nodes");
+
+    let kappa_ext = runner
+        .extension("holospaces.kappa_map")
+        .expect("Missing kappa map extension");
+    let kappa_str = std::str::from_utf8(kappa_ext).unwrap();
+
+    assert!(
+        kappa_str.contains("blake3:model.embed_tokens.weight"),
+        "Missing embed kappa mapping"
+    );
+    assert!(
+        kappa_str.contains("blake3:lm_head.weight"),
+        "Missing lm_head kappa mapping"
+    );
+}
+
+#[cfg(not(feature = "conformance"))]
+#[then(expr = "the compiled holographic archive must contain external parameter mappings")]
+async fn then_archive_contains_external_skip(_w: &mut HologramWorld) {}
 
 #[cfg(feature = "conformance")]
 #[then(expr = "the outputs must exactly match the ONNX Runtime authoritative execution")]
