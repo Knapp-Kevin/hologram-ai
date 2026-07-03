@@ -56,6 +56,7 @@ function serveContent(port) {
         method: msg.method || "GET",
         headers: msg.headers || {},
         redirect: "follow",
+        credentials: "include",
       });
       const buf = new Uint8Array(await resp.arrayBuffer());
       const CHUNK = 256 * 1024;
