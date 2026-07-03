@@ -101,9 +101,7 @@ def gen_rms_norm():
         helper.make_node("Div", ["X", "rms"], ["normed"]),
         helper.make_node("Mul", ["normed", "weight"], ["Y"]),
     ]
-    graph = helper.make_graph(
-        nodes, "rms_norm", [X], [Y], initializer=[weight, eps_t]
-    )
+    graph = helper.make_graph(nodes, "rms_norm", [X], [Y], initializer=[weight, eps_t])
     return save(
         helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)]),
         "rms_norm",
@@ -160,12 +158,8 @@ def gen_batched_matmul_4d():
 def gen_concat_4d_last_axis():
     """Concat along axis=3: [1,4,6,8] ++ [1,4,6,8] → [1,4,6,16]."""
     batch, heads, seq, half = 1, 4, 6, 8
-    A = helper.make_tensor_value_info(
-        "A", TensorProto.FLOAT, [batch, heads, seq, half]
-    )
-    B = helper.make_tensor_value_info(
-        "B", TensorProto.FLOAT, [batch, heads, seq, half]
-    )
+    A = helper.make_tensor_value_info("A", TensorProto.FLOAT, [batch, heads, seq, half])
+    B = helper.make_tensor_value_info("B", TensorProto.FLOAT, [batch, heads, seq, half])
     Y = helper.make_tensor_value_info(
         "Y", TensorProto.FLOAT, [batch, heads, seq, half * 2]
     )
@@ -194,9 +188,7 @@ def gen_scaled_dot_product_attention():
         helper.make_node("Softmax", ["QK_s"], ["attn_w"], axis=-1),
         helper.make_node("MatMul", ["attn_w", "V"], ["Y"]),
     ]
-    graph = helper.make_graph(
-        nodes, "sdpa", [Q, K, V], [Y], initializer=[scale_t]
-    )
+    graph = helper.make_graph(nodes, "sdpa", [Q, K, V], [Y], initializer=[scale_t])
     return save(
         helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)]),
         "scaled_dot_product_attention",
@@ -210,18 +202,10 @@ def gen_gqa_expand_attention():
     group = n_heads // n_kv
     scale = 1.0 / (hd**0.5)
 
-    Q = helper.make_tensor_value_info(
-        "Q", TensorProto.FLOAT, [batch, n_heads, seq, hd]
-    )
-    K = helper.make_tensor_value_info(
-        "K", TensorProto.FLOAT, [batch, n_kv, seq, hd]
-    )
-    V = helper.make_tensor_value_info(
-        "V", TensorProto.FLOAT, [batch, n_kv, seq, hd]
-    )
-    Y = helper.make_tensor_value_info(
-        "Y", TensorProto.FLOAT, [batch, n_heads, seq, hd]
-    )
+    Q = helper.make_tensor_value_info("Q", TensorProto.FLOAT, [batch, n_heads, seq, hd])
+    K = helper.make_tensor_value_info("K", TensorProto.FLOAT, [batch, n_kv, seq, hd])
+    V = helper.make_tensor_value_info("V", TensorProto.FLOAT, [batch, n_kv, seq, hd])
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [batch, n_heads, seq, hd])
 
     unsq_axes = numpy_helper.from_array(np.array([2], dtype=np.int64), "unsq_axes")
     expand_shape_k = numpy_helper.from_array(
@@ -267,9 +251,7 @@ def gen_gqa_expand_attention():
 def gen_shape_then_cast():
     """Shape(X) → Cast to float. X=[2,6,32]."""
     batch, seq, hidden = 2, 6, 32
-    X = helper.make_tensor_value_info(
-        "X", TensorProto.FLOAT, [batch, seq, hidden]
-    )
+    X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [batch, seq, hidden])
     Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [3])
     nodes = [
         helper.make_node("Shape", ["X"], ["shape_i64"]),
@@ -286,12 +268,8 @@ def gen_expand_dynamic_shape():
     """Expand where shape is built at runtime via Shape→Slice→Concat.
     X=[2,6,32], target shape=[2,6,32] (identity expand via dynamic shape)."""
     batch, seq, hidden = 2, 6, 32
-    X = helper.make_tensor_value_info(
-        "X", TensorProto.FLOAT, [batch, seq, hidden]
-    )
-    Y = helper.make_tensor_value_info(
-        "Y", TensorProto.FLOAT, [batch, seq, hidden]
-    )
+    X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [batch, seq, hidden])
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [batch, seq, hidden])
 
     ones = numpy_helper.from_array(np.ones([1], dtype=np.int64), "ones")
     starts_0 = numpy_helper.from_array(np.array([0], dtype=np.int64), "starts_0")
@@ -325,9 +303,7 @@ def gen_expand_dynamic_shape():
 def gen_shape_start_end():
     """Shape with start/end attributes. X=[1,2,6,8], Shape(start=0,end=1)→[1]."""
     batch, n_kv, seq, hd = 1, 2, 6, 8
-    X = helper.make_tensor_value_info(
-        "X", TensorProto.FLOAT, [batch, n_kv, seq, hd]
-    )
+    X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [batch, n_kv, seq, hd])
     Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
     nodes = [
         helper.make_node("Shape", ["X"], ["shape_partial"], start=0, end=1),
@@ -346,17 +322,11 @@ def gen_gqa_k_expand_shape_start_end():
     batch, n_heads, n_kv, seq, hd = 1, 8, 2, 6, 8
     group = n_heads // n_kv
 
-    K = helper.make_tensor_value_info(
-        "K", TensorProto.FLOAT, [batch, n_kv, seq, hd]
-    )
-    Y = helper.make_tensor_value_info(
-        "Y", TensorProto.FLOAT, [batch, n_heads, seq, hd]
-    )
+    K = helper.make_tensor_value_info("K", TensorProto.FLOAT, [batch, n_kv, seq, hd])
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [batch, n_heads, seq, hd])
 
     unsq_axes = numpy_helper.from_array(np.array([2], dtype=np.int64), "unsq_axes")
-    group_t = numpy_helper.from_array(
-        np.array([group], dtype=np.int64), "group_const"
-    )
+    group_t = numpy_helper.from_array(np.array([group], dtype=np.int64), "group_const")
     reshape_t = numpy_helper.from_array(
         np.array([batch, n_heads, seq, hd], dtype=np.int64), "reshape_shape"
     )
@@ -396,12 +366,8 @@ def gen_gqa_k_expand_dynamic_shape():
     batch, n_heads, n_kv, seq, hd = 1, 8, 2, 6, 8
     group = n_heads // n_kv
 
-    K = helper.make_tensor_value_info(
-        "K", TensorProto.FLOAT, [batch, n_kv, seq, hd]
-    )
-    Y = helper.make_tensor_value_info(
-        "Y", TensorProto.FLOAT, [batch, n_heads, seq, hd]
-    )
+    K = helper.make_tensor_value_info("K", TensorProto.FLOAT, [batch, n_kv, seq, hd])
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [batch, n_heads, seq, hd])
 
     unsq_axes = numpy_helper.from_array(np.array([2], dtype=np.int64), "unsq_axes")
     unsq_axes_0 = numpy_helper.from_array(np.array([0], dtype=np.int64), "unsq_axes_0")
@@ -409,9 +375,7 @@ def gen_gqa_k_expand_dynamic_shape():
     idx_1 = numpy_helper.from_array(np.array(1, dtype=np.int64), "idx_1")
     idx_2 = numpy_helper.from_array(np.array(2, dtype=np.int64), "idx_2")
     idx_3 = numpy_helper.from_array(np.array(3, dtype=np.int64), "idx_3")
-    group_t = numpy_helper.from_array(
-        np.array([group], dtype=np.int64), "group_const"
-    )
+    group_t = numpy_helper.from_array(np.array([group], dtype=np.int64), "group_const")
     reshape_t = numpy_helper.from_array(
         np.array([batch, n_heads, -1, hd], dtype=np.int64), "reshape_shape"
     )
@@ -461,9 +425,7 @@ def gen_gqa_k_expand_dynamic_shape():
 def gen_shape_start_end_dynamic_seq():
     """Shape(start=0,end=1) with dynamic seq dimension."""
     batch, n_kv, hd = 1, 2, 8
-    X = helper.make_tensor_value_info(
-        "X", TensorProto.FLOAT, [batch, n_kv, "seq", hd]
-    )
+    X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [batch, n_kv, "seq", hd])
     Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
     nodes = [
         helper.make_node("Shape", ["X"], ["shape_partial"], start=0, end=1),
@@ -495,12 +457,8 @@ def gen_swiglu():
     axes_1 = numpy_helper.from_array(np.array([1], dtype=np.int64), "axes_1")
 
     nodes = [
-        helper.make_node(
-            "Slice", ["X", "starts_0", "ends_half", "axes_1"], ["gate"]
-        ),
-        helper.make_node(
-            "Slice", ["X", "starts_half", "ends_full", "axes_1"], ["up"]
-        ),
+        helper.make_node("Slice", ["X", "starts_0", "ends_half", "axes_1"], ["gate"]),
+        helper.make_node("Slice", ["X", "starts_half", "ends_full", "axes_1"], ["up"]),
         helper.make_node("Sigmoid", ["gate"], ["gate_s"]),
         helper.make_node("Mul", ["gate", "gate_s"], ["gate_silu"]),
         helper.make_node("Mul", ["gate_silu", "up"], ["Y"]),
@@ -573,9 +531,7 @@ def gen_gqa_flat_single_kv():
         helper.make_node("Softmax", ["QK_s"], ["attn_w"], axis=-1),
         helper.make_node("MatMul", ["attn_w", "V"], ["Y"]),
     ]
-    graph = helper.make_graph(
-        nodes, "gqa_flat", [Q, K, V], [Y], initializer=[scale_t]
-    )
+    graph = helper.make_graph(nodes, "gqa_flat", [Q, K, V], [Y], initializer=[scale_t])
     return save(
         helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)]),
         "gqa_flat_single_kv",
@@ -740,12 +696,22 @@ def gen_gqa_fused_reference():
     Y = helper.make_tensor_value_info("output", TensorProto.FLOAT, [seq, q_dim])
 
     # Shape constants
-    q_reshape = numpy_helper.from_array(np.array([seq, n_q, hd], dtype=np.int64), "q_reshape")
-    kv_reshape = numpy_helper.from_array(np.array([seq, n_kv, hd], dtype=np.int64), "kv_reshape")
+    q_reshape = numpy_helper.from_array(
+        np.array([seq, n_q, hd], dtype=np.int64), "q_reshape"
+    )
+    kv_reshape = numpy_helper.from_array(
+        np.array([seq, n_kv, hd], dtype=np.int64), "kv_reshape"
+    )
     unsq_axes = numpy_helper.from_array(np.array([1], dtype=np.int64), "unsq_axes")
-    kv_expand = numpy_helper.from_array(np.array([n_kv, group, seq, hd], dtype=np.int64), "kv_expand")
-    kv_final = numpy_helper.from_array(np.array([n_q, seq, hd], dtype=np.int64), "kv_final")
-    out_flat = numpy_helper.from_array(np.array([seq, q_dim], dtype=np.int64), "out_flat")
+    kv_expand = numpy_helper.from_array(
+        np.array([n_kv, group, seq, hd], dtype=np.int64), "kv_expand"
+    )
+    kv_final = numpy_helper.from_array(
+        np.array([n_q, seq, hd], dtype=np.int64), "kv_final"
+    )
+    out_flat = numpy_helper.from_array(
+        np.array([seq, q_dim], dtype=np.int64), "out_flat"
+    )
     scale_t = numpy_helper.from_array(np.array(scale, dtype=np.float32), "scale")
 
     # Causal mask [seq, seq]: 0 on/below diagonal, -inf above
@@ -760,39 +726,45 @@ def gen_gqa_fused_reference():
         # Q: [seq, n_q*hd] → [seq, n_q, hd] → [n_q, seq, hd]
         helper.make_node("Reshape", ["Q_flat", "q_reshape"], ["Q_3d"]),
         helper.make_node("Transpose", ["Q_3d"], ["Q_t"], perm=[1, 0, 2]),
-
         # K: [seq, n_kv*hd] → [seq, n_kv, hd] → [n_kv, seq, hd] → unsqueeze → expand → reshape
         helper.make_node("Reshape", ["K_flat", "kv_reshape"], ["K_3d"]),
         helper.make_node("Transpose", ["K_3d"], ["K_t"], perm=[1, 0, 2]),
         helper.make_node("Unsqueeze", ["K_t", "unsq_axes"], ["K_4d"]),
         helper.make_node("Expand", ["K_4d", "kv_expand"], ["K_exp4"]),
         helper.make_node("Reshape", ["K_exp4", "kv_final"], ["K_exp"]),
-
         # V: same as K
         helper.make_node("Reshape", ["V_flat", "kv_reshape"], ["V_3d"]),
         helper.make_node("Transpose", ["V_3d"], ["V_t"], perm=[1, 0, 2]),
         helper.make_node("Unsqueeze", ["V_t", "unsq_axes"], ["V_4d"]),
         helper.make_node("Expand", ["V_4d", "kv_expand"], ["V_exp4"]),
         helper.make_node("Reshape", ["V_exp4", "kv_final"], ["V_exp"]),
-
         # K^T: [n_q, hd, seq]
         helper.make_node("Transpose", ["K_exp"], ["K_T"], perm=[0, 2, 1]),
-
         # SDPA: QK^T → scale → mask → softmax → @V
         helper.make_node("MatMul", ["Q_t", "K_T"], ["QK"]),
         helper.make_node("Mul", ["QK", "scale"], ["QK_s"]),
         helper.make_node("Add", ["QK_s", "causal_mask"], ["QK_masked"]),
         helper.make_node("Softmax", ["QK_masked"], ["scores"], axis=-1),
         helper.make_node("MatMul", ["scores", "V_exp"], ["AttnOut_t"]),
-
         # Output: [n_q, seq, hd] → [seq, n_q, hd] → [seq, n_q*hd]
         helper.make_node("Transpose", ["AttnOut_t"], ["AttnOut_3d"], perm=[1, 0, 2]),
         helper.make_node("Reshape", ["AttnOut_3d", "out_flat"], ["output"]),
     ]
     graph = helper.make_graph(
-        nodes, "gqa_flat_multi_kv", [Q, K, V], [Y],
-        initializer=[q_reshape, kv_reshape, unsq_axes, kv_expand, kv_final,
-                     out_flat, scale_t, causal_t],
+        nodes,
+        "gqa_flat_multi_kv",
+        [Q, K, V],
+        [Y],
+        initializer=[
+            q_reshape,
+            kv_reshape,
+            unsq_axes,
+            kv_expand,
+            kv_final,
+            out_flat,
+            scale_t,
+            causal_t,
+        ],
     )
     return save(
         helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)]),
@@ -821,6 +793,7 @@ def gen_swiglu_fused_reference():
         "swiglu_fused_reference",
     )
 
+
 def gen_mlp():
     """MLP: X[4,32] -> Linear(32->64) -> Relu -> Linear(64->32) -> Y[4,32]."""
     X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [4, 32])
@@ -829,21 +802,24 @@ def gen_mlp():
     W2_init = helper.make_tensor("W2", TensorProto.FLOAT, [64, 32], mk_weight([64, 32]))
     B2_init = helper.make_tensor("B2", TensorProto.FLOAT, [32], mk_weight([32]))
     Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [4, 32])
-    
+
     node1 = helper.make_node("MatMul", ["X", "W1"], ["H1"])
     node2 = helper.make_node("Add", ["H1", "B1"], ["H1_b"])
     node3 = helper.make_node("Relu", ["H1_b"], ["H2"])
     node4 = helper.make_node("MatMul", ["H2", "W2"], ["H3"])
     node5 = helper.make_node("Add", ["H3", "B2"], ["Y"])
-    
+
     graph = helper.make_graph(
-        [node1, node2, node3, node4, node5], 
-        "mlp", 
-        [X], 
-        [Y], 
-        [W1_init, B1_init, W2_init, B2_init]
+        [node1, node2, node3, node4, node5],
+        "mlp",
+        [X],
+        [Y],
+        [W1_init, B1_init, W2_init, B2_init],
     )
-    return save(helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)]), "mlp")
+    return save(
+        helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)]), "mlp"
+    )
+
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
