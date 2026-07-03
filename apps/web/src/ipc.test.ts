@@ -14,22 +14,22 @@ describe('fetchViaExtension', () => {
       postMessage: vi.fn(),
     };
     
-    if (!window.chrome) (window as any).chrome = {};
-    window.chrome.runtime = {
+    if (!(window as any).chrome) (window as any).chrome = {};
+    (window as any).chrome.runtime = {
       connect: vi.fn().mockReturnValue(mockPort),
     } as any;
   });
   
   afterEach(() => {
-    if (window.chrome) {
-      delete (window.chrome as any).runtime;
+    if ((window as any).chrome) {
+      delete (window as any).chrome.runtime;
     }
     vi.restoreAllMocks();
   });
   
   it('should reject if chrome.runtime is missing', async () => {
-    if (window.chrome) {
-      delete (window.chrome as any).runtime;
+    if ((window as any).chrome) {
+      delete (window as any).chrome.runtime;
     }
     
     await expect(fetchViaExtension('https://example.com'))
