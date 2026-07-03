@@ -219,55 +219,7 @@ function emitLine(event: string, line: ProcessLine) {
   addLog(line.stream === "stderr" ? "error" : "info", event, line.line);
 }
 
-export async function fetchViaExtension(url: string): Promise<Uint8Array> {
-  return new Promise((resolve, reject) => {
-    // @ts-ignore
-    if (typeof chrome === "undefined" || !chrome.runtime) {
-      return reject(new Error("Chrome extension not available. Please install the holospaces egress extension."));
-    }
-    const extId = document.documentElement.getAttribute("data-holospaces-egress");
-    if (!extId) {
-      return reject(new Error("Chrome extension not available. Please install the holospaces egress extension."));
-    }
-    // @ts-ignore
-    const port = chrome.runtime.connect(extId, { name: "holospaces-content" });
-    const id = Math.floor(Math.random() * 1000000);
-    const chunks: Uint8Array[] = [];
-    let totalLen = 0;
-    
-    port.onDisconnect.addListener(() => {
-      // @ts-ignore
-      if (chrome.runtime.lastError) {
-        // @ts-ignore
-        reject(new Error("Chrome extension not available or disconnected: " + chrome.runtime.lastError.message));
-      } else {
-        reject(new Error("Chrome extension disconnected unexpectedly."));
-      }
-    });
-    
-    port.onMessage.addListener((msg: any) => {
-      if (msg.id !== id) return;
-      if (msg.type === "head") {
-        if (msg.status >= 400) reject(new Error(`HTTP ${msg.status}`));
-      } else if (msg.type === "chunk") {
-        chunks.push(new Uint8Array(msg.bytes));
-        totalLen += msg.bytes.length;
-      } else if (msg.type === "end") {
-        const full = new Uint8Array(totalLen);
-        let offset = 0;
-        for (const c of chunks) {
-          full.set(c, offset);
-          offset += c.length;
-        }
-        resolve(full);
-      } else if (msg.type === "error") {
-        reject(new Error(msg.error));
-      }
-    });
-    
-    port.postMessage({ type: "fetch", id, url, method: "GET" });
-  });
-}
+
 
 export async function downloadKnownModel(id: string): Promise<number> {
   const catalogue = getCatalogue();
@@ -283,9 +235,9 @@ export async function downloadKnownModel(id: string): Promise<number> {
   
   let info: any;
   try {
-    const infoBytes = await fetchViaExtension(`https://huggingface.co/api/models/${model.hfId}`);
-    const infoText = new TextDecoder().decode(infoBytes);
-    info = JSON.parse(infoText);
+    const response = await fetch(`https://huggingface.co/api/models/${model.hfId}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    info = await response.json();
   } catch (err) {
     throw new Error(`Failed to fetch model info: ${err}`);
   }
@@ -307,9 +259,10 @@ export async function downloadKnownModel(id: string): Promise<number> {
     const url = `https://huggingface.co/${model.hfId}/resolve/main/${file.rfilename}`;
     emitLine("models://download-line", { stream: "stdout", line: `Fetching ${url}...` });
     
-    let buffer: Uint8Array;
+    let response: Response;
     try {
-      buffer = await fetchViaExtension(url);
+      response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
     } catch (err) {
       throw new Error(`Failed to fetch ${file.rfilename}: ${err}`);
     }
@@ -324,7 +277,15 @@ export async function downloadKnownModel(id: string): Promise<number> {
     
     const handle = await currentDir.getFileHandle(fileName, { create: true });
     const writable = await handle.createWritable();
-    await writable.write(buffer as any);
+    
+    if (response.body) {
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        await writable.write(value);
+      }
+    }
     await writable.close();
     
     emitLine("models://download-line", { stream: "stdout", line: `Saved ${file.rfilename}.` });

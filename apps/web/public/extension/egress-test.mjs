@@ -41,15 +41,6 @@ globalThis.chrome = {
     onMessageExternal: { addListener: (h) => messageHandlers.push(h) },
   },
   permissions: { request: async () => true },
-  cookies: {
-    get: (opts, cb) => {
-      if (opts.url === "https://huggingface.co" && opts.name === "token") {
-        cb({ value: "mock_hf_token" });
-      } else {
-        cb(null);
-      }
-    }
-  }
 };
 
 // Load the service worker — it registers the connection + message handlers.
@@ -118,15 +109,11 @@ try {
 // Polyfill fetch (the real one is the service worker's CORS-free fetch) and drive
 // a "holospaces-content" port — proving the worker fetches + chunks the bytes the
 // browser peer reassembles into the rootfs.
-const fetchCalls = [];
-globalThis.fetch = async (url, opts) => {
-  fetchCalls.push({ url, opts });
-  return {
-    status: 200,
-    headers: { get: (h) => (h.toLowerCase() === "content-type" ? "application/octet-stream" : null) },
-    arrayBuffer: async () => new TextEncoder().encode("layer-bytes-for:" + url).buffer,
-  };
-};
+globalThis.fetch = async (url) => ({
+  status: 200,
+  headers: { get: (h) => (h.toLowerCase() === "content-type" ? "application/octet-stream" : null) },
+  arrayBuffer: async () => new TextEncoder().encode("layer-bytes-for:" + url).buffer,
+});
 const contentMsgs = [];
 const contentListeners = [];
 const contentPort = {
@@ -149,17 +136,6 @@ check(
   !!head && head.status === 200 && !!end &&
     new TextDecoder().decode(Uint8Array.from(got)).startsWith("layer-bytes-for:"),
   "the router fetches CORS-blocked content and streams the layer back in chunks (content role)",
-);
-
-await contentListeners[0]({
-  type: "fetch",
-  id: 2,
-  url: "https://huggingface.co/api/models/meta-llama/Llama-3.1-8B",
-});
-const hfCall = fetchCalls.find(c => c.url.includes("huggingface.co"));
-check(
-  !!hfCall && hfCall.opts.headers["Authorization"] === "Bearer mock_hf_token",
-  "the router intercepts huggingface.co fetches and injects the session cookie as a Bearer token"
 );
 
 console.log(failed ? "EXTENSION-EGRESS-TEST: FAILED" : "EXTENSION-EGRESS-TEST: PASS (router: egress over Direct Sockets + content over CORS-free fetch)");
