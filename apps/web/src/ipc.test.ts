@@ -4,12 +4,17 @@ import { fetchViaExtension } from './ipc';
 describe('fetchViaExtension', () => {
   let mockPort: any;
   let onMessageListeners: any[] = [];
+  let onDisconnectListeners: any[] = [];
   
   beforeEach(() => {
     onMessageListeners = [];
+    onDisconnectListeners = [];
     mockPort = {
       onMessage: {
         addListener: (fn: any) => onMessageListeners.push(fn),
+      },
+      onDisconnect: {
+        addListener: (fn: any) => onDisconnectListeners.push(fn),
       },
       postMessage: vi.fn(),
     };
@@ -108,5 +113,28 @@ describe('fetchViaExtension', () => {
     listener({ id, type: 'error', error: 'Network failure' });
     
     await expect(promise).rejects.toThrow(/Network failure/);
+  });
+  
+  it('should reject when extension port disconnects with lastError', async () => {
+    const promise = fetchViaExtension('https://example.com');
+    
+    // Simulate chrome.runtime.lastError
+    (window as any).chrome.runtime.lastError = { message: "Could not establish connection. Receiving end does not exist." };
+    
+    const listener = onDisconnectListeners[0];
+    listener();
+    
+    await expect(promise).rejects.toThrow(/Could not establish connection. Receiving end does not exist./);
+    
+    delete (window as any).chrome.runtime.lastError;
+  });
+  
+  it('should reject when extension port disconnects unexpectedly without lastError', async () => {
+    const promise = fetchViaExtension('https://example.com');
+    
+    const listener = onDisconnectListeners[0];
+    listener();
+    
+    await expect(promise).rejects.toThrow(/Chrome extension disconnected unexpectedly/);
   });
 });

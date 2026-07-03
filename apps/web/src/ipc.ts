@@ -231,6 +231,16 @@ export async function fetchViaExtension(url: string): Promise<Uint8Array> {
     const chunks: Uint8Array[] = [];
     let totalLen = 0;
     
+    port.onDisconnect.addListener(() => {
+      // @ts-ignore
+      if (chrome.runtime.lastError) {
+        // @ts-ignore
+        reject(new Error("Chrome extension not available or disconnected: " + chrome.runtime.lastError.message));
+      } else {
+        reject(new Error("Chrome extension disconnected unexpectedly."));
+      }
+    });
+    
     port.onMessage.addListener((msg: any) => {
       if (msg.id !== id) return;
       if (msg.type === "head") {
