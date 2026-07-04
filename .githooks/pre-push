@@ -3,6 +3,11 @@ set -e
 
 echo "Running pre-push hook..."
 
+if [ -n "$(git status --porcelain)" ]; then
+  echo "Error: You have uncommitted changes. Please commit, stash, or drop them before pushing."
+  exit 1
+fi
+
 echo "1. Checking rust formatting..."
 cargo fmt --all -- --check
 
@@ -12,12 +17,32 @@ cargo clippy --workspace --tests --bins -- -D warnings
 echo "3. Running rust tests..."
 cargo test --workspace
 
-echo "4. Building web app..."
+echo "4. Running structural witnesses..."
+cargo test --release -p hologram-ai-conformance --features=structural \
+    --test structural_ce \
+    --test structural_za \
+    --test structural_zm \
+    --test structural_cf \
+    --test structural_lw \
+    --test structural_im
+
+echo "5. Checking wasm32-unknown-unknown compilation..."
+cargo build --target wasm32-unknown-unknown -p hologram-ai-quant
+cargo build --target wasm32-unknown-unknown -p hologram-ai-tokenizer --no-default-features
+
+echo "6. Checking thumbv7em-none-eabi compilation..."
+cargo build --target thumbv7em-none-eabi -p hologram-ai-quant
+cargo build --target thumbv7em-none-eabi -p hologram-ai-tokenizer --no-default-features
+
+echo "7. Running ORT conformance tests..."
+cargo test --release -p hologram-ai-conformance --features=conformance
+
+echo "8. Building web app..."
 cd apps/web
 pnpm install
 pnpm run build
 
-echo "5. Running web app tests..."
+echo "9. Running web app tests..."
 pnpm run test
 
 echo "Pre-push checks passed successfully!"
